@@ -228,8 +228,8 @@ st.markdown("**Core ≥ 30% area, movable center, ϕ ∈ [0,1] guaranteed**")
 
 st.sidebar.header("Domain")
 L = st.sidebar.slider("L (char. length, cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
-Nx = st.sidebar.slider("Nx", 100, 300, 180, 10)
-Ny = st.sidebar.slider("Ny", 100, 300, 180, 10)
+Nx = st.sidebar.slider("Nx", 10, 300, 50, 10)
+Ny = st.sidebar.slider("Ny", 10, 300, 50, 10)
 
 st.sidebar.header("Core Template")
 core_radius_frac = st.sidebar.slider("Core radius / L", 0.3, 0.7, 0.55, 0.01,
