@@ -231,8 +231,8 @@ Nx = st.sidebar.slider("Nx", 10, 300, 50, 10)
 Ny = st.sidebar.slider("Ny", 10, 300, 50, 10)
 
 st.sidebar.header("Core & Shell")
-core_radius_frac = st.sidebar.slider("Core r/L", 0.31, 0.7, 0.5, 0.01)
-shell_thickness_frac = st.sidebar.slider("Shell Δr / r_core", 0.1, 0.5, 0.25, 0.01)
+core_radius_frac = st.sidebar.slider("Core r/L", 0.1, 0.7, 0.1, 0.01)
+shell_thickness_frac = st.sidebar.slider("Shell Δr / r_core", 0.1, 0.5, 0.5, 0.01)
 core_center_x = st.sidebar.slider("Core x/L", 0.2, 0.8, 0.5, 0.01)
 core_center_y = st.sidebar.slider("Core y/L", 0.2, 0.8, 0.5, 0.01)
 
