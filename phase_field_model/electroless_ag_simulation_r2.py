@@ -380,6 +380,7 @@ if st.session_state.results:
         @st.cache_data
         def zip_all_vtrs(phi_hist, c_hist, psi, t_hist, x, y):
             bio = BytesIO()
+            temps = []
             with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as zf:
                 for i, tt in enumerate(t_hist):
                     grid = pv.RectilinearGrid(x, y, [0])
@@ -389,8 +390,17 @@ if st.session_state.results:
                     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".vtr")
                     grid.save(tmp.name)
                     zf.write(tmp.name, f"ag_t{tt:.2f}.vtr")
+                    temps.append(tmp.name)
                     tmp.close()
-                    Path(tmp.name).unlink()
+            # Clean up temps after zip is closed
+            for tmp_name in temps:
+                Path(tmp_name).unlink(missing_ok=True)
             return bio.getvalue()
         zip_bytes = zip_all_vtrs(phi_hist, c_hist, psi, t_hist, x, y)
         st.download_button("Download ZIP of All VTRs", zip_bytes, "ag_all_vtrs.zip", "application/zip")
+
+# Download DB file
+if DB_PATH.exists():
+    st.download_button("Download DB File", DB_PATH.read_bytes(), "simulations.db", "application/octet-stream")
+else:
+    st.info("No DB file found yet.")
