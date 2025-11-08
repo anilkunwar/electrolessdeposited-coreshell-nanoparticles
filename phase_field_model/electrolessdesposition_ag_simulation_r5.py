@@ -383,7 +383,12 @@ if st.session_state.snapshots:
         ax3.semilogy(df["t*"], np.maximum(df["α·mean(c)"],1e-30), label='α·c')
         ax3.legend(fontsize=8); ax3.grid(True)
         st.pyplot(fig3)
-
+    
+    
+    
+    # --------------------------------------------------------------
+    # POST-PROCESSOR : material field + electric-potential proxy
+    # --------------------------------------------------------------
     # --------------------------------------------------------------
     # POST-PROCESSOR : material field + electric-potential proxy
     # --------------------------------------------------------------
@@ -396,9 +401,9 @@ if st.session_state.snapshots:
             ["phi + 2*psi (simple)",
              "phi*(1-psi) + 2*psi",
              "h·(phi² + psi²)",
-             "h·(4*phi² + 2*psi²)",   # NEW
+             "h·(4*phi² + 2*psi²)",
              "max(phi, psi) + psi"],
-            index=3,                     # default to the new one
+            index=3,
             help="Choose how the two phase fields are merged into one colour map."
         )
     with col_b:
@@ -408,7 +413,7 @@ if st.session_state.snapshots:
             h_factor = st.slider("h (scaling)", 0.1, 2.0, 0.5, 0.05,
                                  help="Scale factor for continuous material fields")
         else:
-            h_factor = 1.0   # not used
+            h_factor = 1.0
 
     # ---------- build material ----------
     def build_material(phi, psi, method, h=1.0):
@@ -418,7 +423,7 @@ if st.session_state.snapshots:
             return phi*(1.0-psi) + 2.0*psi
         elif method == "h·(phi² + psi²)":
             return h*(phi**2 + psi**2)
-        elif method == "h·(4*phi² + 2*psi²)":          # NEW
+        elif method == "h·(4*phi² + 2*psi²)":
             return h*(4.0*phi**2 + 2.0*psi**2)
         elif method == "max(phi, psi) + psi":
             return np.where(psi > 0.5, 2.0,
@@ -427,23 +432,23 @@ if st.session_state.snapshots:
             raise ValueError("unknown material method")
 
     material = build_material(phi_view, psi_view, material_method, h=h_factor)
-    potential = -alpha * c_view          # proxy for driving term
+    potential = -alpha * c_view
+
+    # ---------- Define colormap logic ONCE (for 2D and 3D) ----------
+    if material_method in ["phi + 2*psi (simple)",
+                           "phi*(1-psi) + 2*psi",
+                           "max(phi, psi) + psi"]:
+        cmap_mat = plt.cm.get_cmap("Set1", 3)
+        vmin_mat, vmax_mat = 0, 2
+    else:
+        cmap_mat = cmap_choice
+        vmin_mat = vmax_mat = None
 
     # ---------- 2-D visualisation ----------
     if mode.startswith("2D"):
-        # colormap handling
-        if material_method in ["phi + 2*psi (simple)",
-                               "phi*(1-psi) + 2*psi",
-                               "max(phi, psi) + psi"]:
-            cmap_mat = plt.cm.get_cmap("Set1", 3)
-            vmin, vmax = 0, 2
-        else:
-            cmap_mat = cmap_choice
-            vmin = vmax = None
-
         fig_mat, ax_mat = plt.subplots(figsize=(6,5))
         im_mat = ax_mat.imshow(material.T, origin='lower', extent=[0,1,0,1],
-                               cmap=cmap_mat, vmin=vmin, vmax=vmax)
+                               cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
         if material_method in ["phi + 2*psi (simple)",
                                "phi*(1-psi) + 2*psi",
                                "max(phi, psi) + psi"]:
@@ -462,16 +467,9 @@ if st.session_state.snapshots:
             ax_pot.set_title(f"Potential proxy @ t* = {t:.5f}")
             st.pyplot(fig_pot)
 
-            # combined view
             fig_comb, ax_comb = plt.subplots(figsize=(6,5))
-            if material_method in ["phi + 2*psi (simple)",
-                                   "phi*(1-psi) + 2*psi",
-                                   "max(phi, psi) + psi"]:
-                ax_comb.imshow(material.T, origin='lower', extent=[0,1,0,1],
-                               cmap=cmap_mat, vmin=0, vmax=2, alpha=0.7)
-            else:
-                ax_comb.imshow(material.T, origin='lower', extent=[0,1,0,1],
-                               cmap=cmap_choice, alpha=0.7)
+            ax_comb.imshow(material.T, origin='lower', extent=[0,1,0,1],
+                           cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat, alpha=0.7)
             cs = ax_comb.contour(potential.T, levels=12, cmap="plasma",
                                  linewidths=0.8, alpha=0.9)
             ax_comb.clabel(cs, inline=True, fontsize=7, fmt="%.2f")
@@ -488,13 +486,10 @@ if st.session_state.snapshots:
         for ax, sl, label in zip(axes,
                                  [material[cx,:,:], material[:,cy,:], material[:,:,cz]],
                                  ["x-slice","y-slice","z-slice"]):
-            if material_method in ["phi + 2*psi (simple)",
-                                   "phi*(1-psi) + 2*psi",
-                                   "max(phi, psi) + psi"]:
-                im = ax.imshow(sl.T, origin='lower', cmap=cmap_mat, vmin=0, vmax=2)
-            else:
-                im = ax.imshow(sl.T, origin='lower', cmap=cmap_choice)
-            ax.set_title(label); ax.axis('off')
+            im = ax.imshow(sl.T, origin='lower',
+                           cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
+            ax.set_title(label)
+            ax.axis('off')
         fig_mat.suptitle(f"Material (3-D slices) @ t* = {t:.5f}")
         st.pyplot(fig_mat)
 
@@ -504,12 +499,13 @@ if st.session_state.snapshots:
                                      [potential[cx,:,:], potential[:,cy,:], potential[:,:,cz]],
                                      ["x-slice","y-slice","z-slice"]):
                 im = ax.imshow(sl.T, origin='lower', cmap="RdBu_r")
-                ax.set_title(label); ax.axis('off')
+                ax.set_title(label)
+                ax.axis('off')
             fig_pot.suptitle(f"Potential proxy (-α·c) @ t* = {t:.5f}")
             plt.colorbar(im, ax=axes, orientation='horizontal',
                          fraction=0.05, label="-α·c")
             st.pyplot(fig_pot)
-
+    
     # ------------------- diagnostics export -------------------
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
