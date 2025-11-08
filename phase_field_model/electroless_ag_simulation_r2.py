@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# ELECTROLESS Ag – SHELL-FIRST + BALANCED BULK/INTERFACE (FULLY FIXED)
+# ELECTROLESS Ag – SHELL-FIRST + BALANCED BULK/INTERFACE (FINAL)
 # --------------------------------------------------------------
 import streamlit as st
 import numpy as np
@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # -------------------- 1. SQLite --------------------
-DB_PATH = Path("simulations_balanced.db")
+DB_PATH = Path("simulations_final.db")
 def _hash_params(**kw):
     s = "".join(f"{k}={v}" for k, v in sorted(kw.items()))
     return hashlib.sha256(s.encode()).hexdigest()[:16]
@@ -103,7 +103,6 @@ def run_simulation(
     r_outer = r_core * (1.0 + shell_thickness_frac)
     phi = np.where(dist <= r_inner, 0.0,
             np.where(dist <= r_outer, 1.0, 0.0)).astype(np.float32)
-    # Smooth interfaces
     phi = phi * (1.0 - 0.5*(1.0 - np.tanh((dist - r_inner) / eps_tilde))) \
             * (1.0 - 0.5*(1.0 + np.tanh((dist - r_outer) / eps_tilde)))
     phi = np.clip(phi, 0.0, 1.0)
@@ -145,9 +144,9 @@ def run_simulation(
 
         phi_xx = _laplacian(phi, h2)
 
-        # ---- Free-energy terms ----
+        # ---- Free-energy terms (SCALED) ----
         f_bulk = f_prime_bulk(phi, psi, a_index, beta_tilde, h)
-        grad_term = -W_tilde * eps_tilde**2 * phi_xx
+        grad_term = -W_tilde * phi_xx  # ← W_tilde ~ 1e-13
         mu = grad_term + f_bulk - alpha_tilde * c
         mu_xx = _laplacian(mu, h2)
 
@@ -203,6 +202,8 @@ def run_simulation(
 
                 metrics.metric('t*', f"{t:.3f}")
                 metrics.metric('ϕ range', f"[{phi.min():.4f},{phi.max():.4f}]")
+                metrics.metric('‖grad‖₂', f"{grad_norm:.2e}")
+                metrics.metric('‖bulk‖₂', f"{bulk_norm:.2e}")
             except: pass
 
         if step > 100 and np.max(np.abs(phi - phi_old)) < 1e-6:
@@ -227,21 +228,21 @@ st.markdown("**Shell-first, sharp interior, smooth interfaces, diagnostics**")
 
 st.sidebar.header("Domain")
 L  = st.sidebar.slider("L (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
-Nx = st.sidebar.slider("Nx", 10, 300, 50, 10)
-Ny = st.sidebar.slider("Ny", 10, 300, 50, 10)
+Nx = st.sidebar.slider("Nx", 80, 300, 160, 10)
+Ny = st.sidebar.slider("Ny", 80, 300, 160, 10)
 
 st.sidebar.header("Core & Shell")
-core_radius_frac = st.sidebar.slider("Core r/L", 0.1, 0.7, 0.1, 0.01)
-shell_thickness_frac = st.sidebar.slider("Shell Δr / r_core", 0.1, 0.5, 0.5, 0.01)
+core_radius_frac = st.sidebar.slider("Core r/L", 0.31, 0.7, 0.5, 0.01)
+shell_thickness_frac = st.sidebar.slider("Shell Δr / r_core", 0.1, 0.5, 0.25, 0.01)
 core_center_x = st.sidebar.slider("Core x/L", 0.2, 0.8, 0.5, 0.01)
 core_center_y = st.sidebar.slider("Core y/L", 0.2, 0.8, 0.5, 0.01)
 
 st.sidebar.header("Interface Energy")
-eps_tilde = st.sidebar.slider("ε* (interface width)", 0.01, 0.08, 0.03, 0.005)
-W_tilde   = st.sidebar.slider("W* (gradient prefactor)", 0.1, 10.0, 1.0, 0.1)
+eps_tilde = st.sidebar.slider("ε* (interface width / L)", 0.01, 0.08, 0.03, 0.005)
+W_tilde   = st.sidebar.slider("W* (gradient strength)", 1e-15, 1e-11, 1e-13, 1e-15, format="%.0e")
 
 st.sidebar.header("Kinetics")
-M_tilde   = st.sidebar.number_input("M*", 1e-3, 1.0, 0.1, 0.01)
+M_tilde   = st.sidebar.number_input("M*", 1e-3, 1.0, 0.05, 0.01)
 dt_tilde  = st.sidebar.number_input("Δt*", 1e-4, 1e-2, 5e-4, 1e-5)
 t_max_tilde = st.sidebar.number_input("t*_max", 1.0, 30.0, 12.0, 0.5)
 D_tilde   = st.sidebar.number_input("D*", 0.01, 1.0, 0.1, 0.01)
@@ -340,5 +341,5 @@ if st.session_state.results:
     fig3.add_trace(go.Scatter(x=t_hist, y=bulk_norm, name='bulk'))
     fig3.add_trace(go.Scatter(x=t_hist, y=grad_norm, name='gradient'))
     fig3.add_trace(go.Scatter(x=t_hist, y=conc_norm, name='αc'))
-    fig3.update_layout(xaxis_title='t*', yaxis_type='log', height=400)
+    fig3.update_layout(xaxis_title='t*', yaxis_type='log', height=400, title="Energy Balance")
     st.plotly_chart(fig3, use_container_width=True)
