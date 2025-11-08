@@ -492,7 +492,7 @@ if st.session_state.snapshots:
                                    "max(phi, psi) + psi"]:
                 im = ax.imshow(sl.T, origin='lower', cmap=cmap_mat, vmin=0, vmax=2)
             else:
-  (im = ax.imshow(sl.T, origin='lower', cmap=cmap_choice))
+                im = ax.imshow(sl.T, origin='lower', cmap=cmap_choice)
             ax.set_title(label); ax.axis('off')
         fig_mat.suptitle(f"Material (3-D slices) @ t* = {t:.5f}")
         st.pyplot(fig_mat)
