@@ -1,3 +1,16 @@
+"""
+streamlit_electroless_enhanced.py
+Features:
+ - 2D / 3D electroless deposition shell growth (simple physics)
+ - Numba acceleration if available
+ - Optional semi-implicit IMEX solver using scipy.sparse (fallback to explicit)
+ - Animation slider + autoplay
+ - Export diagnostics CSV, PNG snapshots, VTU/PVD outputs, and zipped VTUs
+ - Selectable Matplotlib colormap from a large list (~50)
+ - NEW : post-processor that merges phi/psi into a single material field
+   and visualises the electric-potential proxy -α·c
+   → now includes h·(4·phi² + 2·psi²) with a live h-slider
+"""
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -6,7 +19,7 @@ import io, zipfile, time, csv, os
 from datetime import datetime
 import tempfile
 
-# Optional acceleration / I/O libs (use if available)
+# ------------------- optional libs -------------------
 try:
     from numba import njit, prange
     NUMBA_AVAILABLE = True
@@ -23,34 +36,14 @@ try:
     MESHIO_AVAILABLE = True
 except Exception:
     MESHIO_AVAILABLE = False
-try:
-    import pyvista as pv
-    PYVISTA_AVAILABLE = True
-except Exception:
-    PYVISTA_AVAILABLE = False
 
 st.set_page_config(page_title="Electroless Ag — Enhanced Simulator", layout="wide")
 st.title("Electroless Ag — Enhanced Simulator (2D / 3D)")
 
-# -----------------------
-# Utility: large colormap list (~50)
-# -----------------------
-CMAPS = [
-    "viridis","plasma","inferno","magma","cividis",
-    "turbo","jet","rainbow","nipy_spectral","cubehelix",
-    "summer","autumn","winter","spring","cool",
-    "hot","copper","bone","pink","ocean",
-    "gist_earth","terrain","gnuplot","gnuplot2","seismic",
-    "Spectral","coolwarm","bwr","BrBG","PuOr",
-    "RdYlBu","viridis_r","plasma_r","inferno_r","magma_r",
-    "cividis_r","twilight","twilight_shifted","gist_rainbow","rainbow_r",
-    "turbo_r","jet_r","Greys","Purples","Oranges","Greens","YlOrRd","YlGnBu","YlGn"
-]
-CMAPS = [c for c in CMAPS if c in plt.colormaps()]
+# ------------------- colormap list -------------------
+CMAPS = [c for c in plt.colormaps() if c not in {"jet", "jet_r"}]
 
-# -----------------------
-# Sidebar: simulation config
-# -----------------------
+# ------------------- sidebar -------------------
 st.sidebar.header("Simulation mode")
 mode = st.sidebar.selectbox("Mode", ["2D (planar)", "3D (spherical)"])
 
@@ -85,37 +78,19 @@ if use_semi_implicit and not SCIPY_AVAILABLE:
     use_semi_implicit = False
 
 st.sidebar.header("Visualization")
-cmap_choice = st.sidebar.selectbox("Matplotlib colormap", CMAPS, index=0)
-show_contours = st.sidebar.checkbox("Show Plotly contour overlay (2D)", value=True)
+cmap_choice = st.sidebar.selectbox("Matplotlib colormap", CMAPS, index=CMAPS.index("viridis"))
 
-# -----------------------
-# Helpers: discrete operators (2D and 3D)
-# -----------------------
-def make_grid(L=1.0):
-    if Nz == 1:
-        x = np.linspace(0, L, Nx)
-        y = np.linspace(0, L, Ny)
-        X, Y = np.meshgrid(x, y, indexing='ij')
-        return (x, y, X, Y)
-    else:
-        x = np.linspace(0, L, Nx)
-        y = np.linspace(0, L, Ny)
-        z = np.linspace(0, L, Nz)
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        return (x, y, z, X, Y, Z)
+# ------------------- geometry -------------------
+st.sidebar.header("Core & shell geometry")
+core_radius_frac = st.sidebar.slider("Core radius (fraction of L)", 0.05, 0.45, 0.18, 0.01)
+shell_thickness_frac = st.sidebar.slider("Shell thickness (Δr / r_core)", 0.05, 0.6, 0.2, 0.01)
 
-# laplacian explicit (returns Laplacian / dx^2)
+run_button = st.sidebar.button("Run Simulation")
+export_vtu_button = st.sidebar.button("Export VTU/PVD/ZIP")
+download_diags_button = st.sidebar.button("Download diagnostics CSV")
+
+# ------------------- operators -------------------
 if NUMBA_AVAILABLE and use_numba:
-    @njit(parallel=True)
-    def laplacian_explicit_3d(u, dx):
-        nx, ny, nz = u.shape
-        out = np.zeros_like(u)
-        for i in prange(1, nx-1):
-            for j in range(1, ny-1):
-                for k in range(1, nz-1):
-                    out[i,j,k] = (u[i+1,j,k] + u[i-1,j,k] + u[i,j+1,k] + u[i,j-1,k] + u[i,j,k+1] + u[i,j,k-1] - 6*u[i,j,k])
-        return out / (dx*dx)
-
     @njit(parallel=True)
     def laplacian_explicit_2d(u, dx):
         nx, ny = u.shape
@@ -124,69 +99,70 @@ if NUMBA_AVAILABLE and use_numba:
             for j in prange(1, ny-1):
                 out[i,j] = (u[i+1,j] + u[i-1,j] + u[i,j+1] + u[i,j-1] - 4*u[i,j])
         return out / (dx*dx)
+
+    @njit(parallel=True)
+    def laplacian_explicit_3d(u, dx):
+        nx, ny, nz = u.shape
+        out = np.zeros_like(u)
+        for i in prange(1, nx-1):
+            for j in prange(1, ny-1):
+                for k in prange(1, nz-1):
+                    out[i,j,k] = (u[i+1,j,k] + u[i-1,j,k] + u[i,j+1,k] + u[i,j-1,k] +
+                                  u[i,j,k+1] + u[i,j,k-1] - 6*u[i,j,k])
+        return out / (dx*dx)
 else:
     def laplacian_explicit_2d(u, dx):
         out = np.zeros_like(u)
         out[1:-1,1:-1] = (u[2:,1:-1] + u[:-2,1:-1] + u[1:-1,2:] + u[1:-1,:-2] - 4*u[1:-1,1:-1])
-        out[0,1:-1] = (u[1,1:-1] + u[0,2:] + u[0,:-2] - 3*u[0,1:-1])
-        out[-1,1:-1] = (u[-2,1:-1] + u[-1,2:] + u[-1,:-2] - 3*u[-1,1:-1])
-        out[1:-1,0] = (u[2:,0] + u[:-2,0] + u[1:-1,1] - 3*u[1:-1,0])
-        out[1:-1,-1] = (u[2:,-1] + u[:-2,-1] + u[1:-1,-2] - 3*u[1:-1,-1])
-        out[0,0] = (u[1,0] + u[0,1] - 2*u[0,0])
-        out[0,-1] = (u[0,-2] + u[1,-1] - 2*u[0,-1])
-        out[-1,0] = (u[-2,0] + u[-1,1] - 2*u[-1,0])
-        out[-1,-1] = (u[-2,-1] + u[-1,-2] - 2*u[-1,-1])
         return out / (dx*dx)
 
     def laplacian_explicit_3d(u, dx):
         out = np.zeros_like(u)
-        out[1:-1,1:-1,1:-1] = (
-            u[2:,1:-1,1:-1] + u[:-2,1:-1,1:-1] +
-            u[1:-1,2:,1:-1] + u[1:-1,:-2,1:-1] +
-            u[1:-1,1:-1,2:] + u[1:-1,1:-1,:-2] - 6*u[1:-1,1:-1,1:-1]
-        )
+        out[1:-1,1:-1,1:-1] = (u[2:,1:-1,1:-1] + u[:-2,1:-1,1:-1] +
+                               u[1:-1,2:,1:-1] + u[1:-1,:-2,1:-1] +
+                               u[1:-1,1:-1,2:] + u[1:-1,1:-1,:-2] - 6*u[1:-1,1:-1,1:-1])
         return out / (dx*dx)
 
 def grad_mag_2d(u, dx):
-    uy = np.zeros_like(u); ux = np.zeros_like(u)
+    ux = np.zeros_like(u); uy = np.zeros_like(u)
     ux[:,1:-1] = (u[:,2:] - u[:,:-2]) / (2*dx)
     ux[:,0] = (u[:,1] - u[:,0]) / dx
     ux[:,-1] = (u[:,-1] - u[:,-2]) / dx
     uy[1:-1,:] = (u[2:,:] - u[:-2,:]) / (2*dx)
     uy[0,:] = (u[1,:] - u[0,:]) / dx
     uy[-1,:] = (u[-1,:] - u[-2,:]) / dx
-    return np.sqrt(ux*ux + uy*uy + 1e-30)
+    return np.sqrt(ux**2 + uy**2 + 1e-30)
 
-# -----------------------
-# Simulation core (2D or 3D)
-# -----------------------
+# ------------------- simulation core -------------------
 def run_simulation_2d(params):
     Nx, Ny = params['Nx'], params['Ny']
-    L = 1.0
-    dx = L / (Nx - 1)
+    L = 1.0; dx = L/(Nx-1)
     x = np.linspace(0, L, Nx); y = np.linspace(0, L, Ny)
     X, Y = np.meshgrid(x, y, indexing='ij')
-    # core psi - spherical core in 2D is circle
     cx = cy = 0.5
-    dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
-    psi = (dist <= params['core_radius_frac'] * L).astype(np.float64)
-    # initial phi shell
-    r_core = params['core_radius_frac'] * L
-    r_outer = r_core * (1.0 + params['shell_thickness_frac'])
-    phi = np.where(dist <= r_core, 0.0, np.where(dist <= r_outer, 1.0, 0.0)).astype(np.float64)
-    eps = max(4.0*dx, 1e-6)
-    phi = phi * (1.0 - 0.5*(1.0 - np.tanh((dist - r_core)/eps))) * (1.0 - 0.5*(1.0 + np.tanh((dist - r_outer)/eps)))
+    dist = np.sqrt((X-cx)**2 + (Y-cy)**2)
+
+    psi = (dist <= params['core_radius_frac']*L).astype(np.float64)
+    r_core = params['core_radius_frac']*L
+    r_outer = r_core*(1.0 + params['shell_thickness_frac'])
+    phi = np.where(dist <= r_core, 0.0,
+                   np.where(dist <= r_outer, 1.0, 0.0)).astype(np.float64)
+    eps = max(4*dx, 1e-6)
+    phi = phi * (1.0 - 0.5*(1.0 - np.tanh((dist-r_core)/eps))) \
+              * (1.0 - 0.5*(1.0 + np.tanh((dist-r_outer)/eps)))
     phi = np.clip(phi, 0.0, 1.0)
-    # concentration
-    c = params['c_bulk'] * (Y / L) * (1.0 - phi) * (1.0 - psi)
+
+    c = params['c_bulk'] * (Y/L) * (1.0 - phi) * (1.0 - psi)
     c = np.clip(c, 0.0, params['c_bulk'])
-    snapshots = []
-    diagnostics = []
+
+    snapshots, diagnostics = [], []
     n_steps = params['n_steps']; dt = params['dt']; save_every = params['save_every']
-    gamma = params['gamma']; beta = params['beta']; k0 = params['k0']; M = params['M']; D = params['D']; alpha = params['alpha']
-    # prepare semi-implicit matrix if requested
+    gamma = params['gamma']; beta = params['beta']; k0 = params['k0']
+    M = params['M']; D = params['D']; alpha = params['alpha']
+
+    # semi-implicit matrix (optional)
     if params['use_semi_implicit'] and SCIPY_AVAILABLE:
-        N = Nx * Ny
+        N = Nx*Ny
         A = sp.lil_matrix((N,N))
         for i in range(Nx):
             for j in range(Ny):
@@ -198,145 +174,139 @@ def run_simulation_2d(params):
                     else:
                         A[idx, idx] += 1.0
         A = A.tocsr()
-        # operator for implicit solve: (I - dt * M * gamma * Lap)
-        Implicit_mat = sp.eye(N) - (dt * M * gamma) * A
-        try:
-            lu = spla.factorized(Implicit_mat.tocsc())
-            has_factor = True
-        except Exception:
-            has_factor = False
+        Implicit_mat = sp.eye(N) - (dt*M*gamma)*A
+        lu = spla.factorized(Implicit_mat.tocsc())
+        has_factor = True
     else:
         has_factor = False
-    for step in range(n_steps + 1):
-        t = step * dt
-        # interface indicator
+
+    for step in range(n_steps+1):
+        t = step*dt
         gphi = grad_mag_2d(phi, dx)
-        delta_int = 6.0 * phi * (1.0 - phi) * (1.0 - psi) * gphi
-        delta_int = np.clip(delta_int, 0.0, 6.0 / max(eps, dx))
-        # Neumann boundaries (mirror)
-        phi[0,:] = phi[1,:]; phi[-1,:] = phi[-2,:]; phi[:,0] = phi[:,1]; phi[:,-1] = phi[:,-2]
+        delta_int = 6.0*phi*(1.0-phi)*(1.0-psi)*gphi
+        delta_int = np.clip(delta_int, 0.0, 6.0/max(eps,dx))
+
+        phi[0,:] = phi[1,:]; phi[-1,:] = phi[-2,:]
+        phi[:,0] = phi[:,1]; phi[:,-1] = phi[:,-2]
+
         lap_phi = laplacian_explicit_2d(phi, dx)
-        f_bulk = 2.0 * beta * phi * (1 - phi) * (1 - 2 * phi)
-        c_mol = c * (1.0 - phi) * (1.0 - psi)
-        i_loc = k0 * c_mol * delta_int
+        f_bulk = 2.0*beta*phi*(1.0-phi)*(1.0-2.0*phi)
+        c_mol = c*(1.0-phi)*(1.0-psi)
+        i_loc = k0*c_mol*delta_int
         i_loc = np.clip(i_loc, 0.0, 1e6)
-        deposition = M * i_loc
-        # curvature smoothing term (implicit handled below optionally)
-        curvature_explicit = M * gamma * lap_phi
-        # explicit update for deposition and bulk
-        phi_temp = phi + dt * (deposition - M * f_bulk)
-        # semi-implicit step for curvature: solve (I - dt*M*gamma*Lap) phi_new = phi_temp
+        deposition = M*i_loc
+        curvature = M*gamma*lap_phi
+
+        phi_temp = phi + dt*(deposition - M*f_bulk)
         if has_factor:
-            b = phi_temp.reshape(-1)
-            phi_new_flat = lu(b)
-            phi = phi_new_flat.reshape(phi.shape)
+            phi = lu(phi_temp.ravel()).reshape(phi.shape)
         else:
-            # explicit fallback
-            phi = phi_temp + dt * curvature_explicit
+            phi = phi_temp + dt*curvature
         phi = np.clip(phi, 0.0, 1.0)
-        # concentration diffusion + sink
+
         lap_c = laplacian_explicit_2d(c, dx)
         sink = i_loc
-        c += dt * (D * lap_c - sink)
-        c = np.clip(c, 0.0, params['c_bulk'] * 5.0)
-        # BCs for c: top reservoir (y = max) -> using last column as top
+        c += dt*(D*lap_c - sink)
+        c = np.clip(c, 0.0, params['c_bulk']*5.0)
         c[:, -1] = params['c_bulk']
-        c[:, 0] = c[:, 1]
-        c[0, :] = c[1, :]
-        c[-1,:] = c[-2,:]
-        # diagnostics
+
         bulk_norm = np.sqrt(np.mean(f_bulk**2))
-        grad_norm_raw = np.sqrt(np.mean((M * gamma * lap_phi)**2))
-        grad_norm_phys = np.sqrt(np.mean(((M * gamma * lap_phi) * (dx*dx))**2))
-        alpha_c_norm = alpha * np.mean(c)
+        grad_norm_raw = np.sqrt(np.mean((M*gamma*lap_phi)**2))
+        grad_norm_phys = np.sqrt(np.mean(((M*gamma*lap_phi)*(dx*dx))**2))
+        alpha_c_norm = alpha*np.mean(c)
+
         if step % save_every == 0 or step == n_steps:
             snapshots.append((t, phi.copy(), c.copy(), psi.copy()))
             diagnostics.append((t, bulk_norm, grad_norm_raw, grad_norm_phys, alpha_c_norm))
     return snapshots, diagnostics, (x, y)
+
+
 def run_simulation_3d(params):
     Nx, Ny, Nz = params['Nx'], params['Ny'], params['Nz']
-    L = 1.0
-    dx = L / (Nx - 1)
+    L = 1.0; dx = L/(Nx-1)
     x = np.linspace(0, L, Nx); y = np.linspace(0, L, Ny); z = np.linspace(0, L, Nz)
     X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
     cx = cy = cz = 0.5
-    dist = np.sqrt((X - cx)**2 + (Y - cy)**2 + (Z - cz)**2)
-    psi = (dist <= params['core_radius_frac'] * L).astype(np.float64)
-    r_core = params['core_radius_frac'] * L
-    r_outer = r_core * (1.0 + params['shell_thickness_frac'])
-    phi = np.where(dist <= r_core, 0.0, np.where(dist <= r_outer, 1.0, 0.0)).astype(np.float64)
-    eps = max(4.0*dx, 1e-6)
-    phi = phi * (1.0 - 0.5*(1.0 - np.tanh((dist - r_core)/eps))) * (1.0 - 0.5*(1.0 + np.tanh((dist - r_outer)/eps)))
+    dist = np.sqrt((X-cx)**2 + (Y-cy)**2 + (Z-cz)**2)
+
+    psi = (dist <= params['core_radius_frac']*L).astype(np.float64)
+    r_core = params['core_radius_frac']*L
+    r_outer = r_core*(1.0 + params['shell_thickness_frac'])
+    phi = np.where(dist <= r_core, 0.0,
+                   np.where(dist <= r_outer, 1.0, 0.0)).astype(np.float64)
+    eps = max(4*dx, 1e-6)
+    phi = phi * (1.0 - 0.5*(1.0 - np.tanh((dist-r_core)/eps))) \
+              * (1.0 - 0.5*(1.0 + np.tanh((dist-r_outer)/eps)))
     phi = np.clip(phi, 0.0, 1.0)
-    c = params['c_bulk'] * (Z / L) * (1.0 - phi) * (1.0 - psi)
+
+    c = params['c_bulk'] * (Z/L) * (1.0 - phi) * (1.0 - psi)
     c = np.clip(c, 0.0, params['c_bulk'])
-    snapshots = []
-    diagnostics = []
+
+    snapshots, diagnostics = [], []
     n_steps = params['n_steps']; dt = params['dt']; save_every = params['save_every']
-    gamma = params['gamma']; beta = params['beta']; k0 = params['k0']; M = params['M']; D = params['D']; alpha = params['alpha']
-    for step in range(n_steps + 1):
-        t = step * dt
-        # 3D laplacian (explicit)
+    gamma = params['gamma']; beta = params['beta']; k0 = params['k0']
+    M = params['M']; D = params['D']; alpha = params['alpha']
+
+    for step in range(n_steps+1):
+        t = step*dt
         lap_phi = laplacian_explicit_3d(phi, dx)
-        # gradient magnitude for interface indicator: central differences approx
         gx, gy, gz = np.gradient(phi, dx, edge_order=2)
-        gphi = np.sqrt(gx*gx + gy*gy + gz*gz + 1e-30)
-        delta_int = 6.0 * phi * (1.0 - phi) * (1.0 - psi) * gphi
-        delta_int = np.clip(delta_int, 0.0, 6.0 / max(eps, dx))
-        # boundaries (mirror)
+        gphi = np.sqrt(gx**2 + gy**2 + gz**2 + 1e-30)
+        delta_int = 6.0*phi*(1.0-phi)*(1.0-psi)*gphi
+        delta_int = np.clip(delta_int, 0.0, 6.0/max(eps,dx))
+
         phi[0,:,:] = phi[1,:,:]; phi[-1,:,:] = phi[-2,:,:]
         phi[:,0,:] = phi[:,1,:]; phi[:,-1,:] = phi[:,-2,:]
         phi[:,:,0] = phi[:,:,1]; phi[:,:,-1] = phi[:,:,-2]
-        f_bulk = 2.0 * beta * phi * (1 - phi) * (1 - 2 * phi)
-        c_mol = c * (1.0 - phi) * (1.0 - psi)
-        i_loc = k0 * c_mol * delta_int
+
+        f_bulk = 2.0*beta*phi*(1.0-phi)*(1.0-2.0*phi)
+        c_mol = c*(1.0-phi)*(1.0-psi)
+        i_loc = k0*c_mol*delta_int
         i_loc = np.clip(i_loc, 0.0, 1e6)
-        deposition = M * i_loc
-        curvature = M * gamma * lap_phi
-        phi += dt * (deposition + curvature - M * f_bulk)
+        deposition = M*i_loc
+        curvature = M*gamma*lap_phi
+
+        phi += dt*(deposition + curvature - M*f_bulk)
         phi = np.clip(phi, 0.0, 1.0)
-        # concentration
+
         lap_c = laplacian_explicit_3d(c, dx)
         sink = i_loc
-        c += dt * (D * lap_c - sink)
-        c = np.clip(c, 0.0, params['c_bulk'] * 5.0)
+        c += dt*(D*lap_c - sink)
+        c = np.clip(c, 0.0, params['c_bulk']*5.0)
         c[:, -1, :] = params['c_bulk']
-        # diagnostics
+
         bulk_norm = np.sqrt(np.mean(f_bulk**2))
-        grad_norm_raw = np.sqrt(np.mean((M * gamma * lap_phi)**2))
-        grad_norm_phys = np.sqrt(np.mean(((M * gamma * lap_phi) * (dx*dx))**2))
-        alpha_c_norm = alpha * np.mean(c)
+        grad_norm_raw = np.sqrt(np.mean((M*gamma*lap_phi)**2))
+        grad_norm_phys = np.sqrt(np.mean(((M*gamma*lap_phi)*(dx*dx))**2))
+        alpha_c_norm = alpha*np.mean(c)
+
         if step % save_every == 0 or step == n_steps:
             snapshots.append((t, phi.copy(), c.copy(), psi.copy()))
             diagnostics.append((t, bulk_norm, grad_norm_raw, grad_norm_phys, alpha_c_norm))
     return snapshots, diagnostics, (x, y, z)
-# -----------------------
-# UI: run controls
-# -----------------------
-st.sidebar.header("Core & shell geometry")
-core_radius_frac = st.sidebar.slider("Core radius (fraction of L)", 0.05, 0.45, 0.18, 0.01)
-shell_thickness_frac = st.sidebar.slider("Shell thickness (Δr / r_core)", 0.05, 0.6, 0.2, 0.01)
-run_button = st.sidebar.button("Run Simulation ▶")
-export_vtu_button = st.sidebar.button("Export VTU/PVD/ZIP")
-download_diags_button = st.sidebar.button("Download diagnostics CSV")
-# pack params
+
+# ------------------- run -------------------
 params = {
     'Nx': Nx, 'Ny': Ny, 'Nz': Nz,
     'dt': dt, 'n_steps': n_steps, 'save_every': save_every,
-    'gamma': gamma, 'beta': beta, 'k0': k0, 'M': M, 'alpha': alpha, 'c_bulk': c_bulk, 'D': D,
-    'core_radius_frac': core_radius_frac, 'shell_thickness_frac': shell_thickness_frac,
-    'use_semi_implicit': use_semi_implicit, 'use_numba': use_numba
+    'gamma': gamma, 'beta': beta, 'k0': k0, 'M': M,
+    'alpha': alpha, 'c_bulk': c_bulk, 'D': D,
+    'core_radius_frac': core_radius_frac,
+    'shell_thickness_frac': shell_thickness_frac,
+    'use_semi_implicit': use_semi_implicit,
+    'use_numba': use_numba
 }
-# storage in session_state
+
 if "snapshots" not in st.session_state:
     st.session_state.snapshots = None
 if "diagnostics" not in st.session_state:
     st.session_state.diagnostics = None
 if "grid_coords" not in st.session_state:
     st.session_state.grid_coords = None
+
 if run_button:
     t0 = time.time()
-    st.info("Running simulation — this may take a few seconds...")
+    st.info("Running simulation …")
     if mode.startswith("2D"):
         snapshots, diagnostics, coords = run_simulation_2d({**params})
     else:
@@ -344,10 +314,9 @@ if run_button:
     st.session_state.snapshots = snapshots
     st.session_state.diagnostics = diagnostics
     st.session_state.grid_coords = coords
-    st.success(f"Simulation finished in {time.time() - t0:.2f}s — frames saved: {len(snapshots)}")
-# -----------------------
-# Visualization & playback
-# -----------------------
+    st.success(f"Done in {time.time()-t0:.2f}s — {len(snapshots)} frames")
+
+# ------------------- playback -------------------
 if st.session_state.snapshots:
     snapshots = st.session_state.snapshots
     diagnostics = st.session_state.diagnostics
@@ -358,11 +327,12 @@ if st.session_state.snapshots:
     with cols[0]:
         frame_idx = st.slider("Frame", 0, len(snapshots)-1, len(snapshots)-1)
         auto_play = st.checkbox("Autoplay", value=False)
-        autoplay_interval = st.number_input("Autoplay interval (s)", 0.1, 5.0, 0.4, 0.1)
-        # choose field
-        field = st.selectbox("Field to display", ["phi (shell)", "c (concentration)", "psi (core)"])
-        cmap = plt.get_cmap(cmap_choice)
+        autoplay_interval = st.number_input("Interval (s)", 0.1, 5.0, 0.4, 0.1)
+
+        field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)"])
         t, phi_view, c_view, psi_view = snapshots[frame_idx]
+        cmap = plt.get_cmap(cmap_choice)
+
         if mode.startswith("2D"):
             fig, ax = plt.subplots(figsize=(6,5))
             if field == "phi (shell)":
@@ -372,65 +342,184 @@ if st.session_state.snapshots:
             else:
                 im = ax.imshow(psi_view.T, origin='lower', extent=[0,1,0,1], cmap=cmap)
             plt.colorbar(im, ax=ax)
-            ax.set_title(f"{field} at t*={t:.5f}")
+            ax.set_title(f"{field} @ t*={t:.5f}")
             st.pyplot(fig)
-            mid = phi_view.shape[0] // 2
-            fig2, ax2 = plt.subplots(figsize=(6,2.2)
+
+            mid = phi_view.shape[0]//2
+            fig2, ax2 = plt.subplots(figsize=(6,2.2))
             if field == "phi (shell)":
                 ax2.plot(np.linspace(0,1,phi_view.shape[1]), phi_view[mid,:], label='phi')
             elif field == "c (concentration)":
                 ax2.plot(np.linspace(0,1,c_view.shape[1]), c_view[mid,:], label='c')
             else:
                 ax2.plot(np.linspace(0,1,psi_view.shape[1]), psi_view[mid,:], label='psi')
-            ax2.set_xlabel("y / L"); ax2.legend(); ax2.grid(True)
+            ax2.set_xlabel("y/L"); ax2.legend(); ax2.grid(True)
             st.pyplot(fig2)
         else:
             fig, axes = plt.subplots(1,3, figsize=(12,4))
             cx = phi_view.shape[0]//2; cy = phi_view.shape[1]//2; cz = phi_view.shape[2]//2
-            if field == "phi (shell)":
-                axes[0].imshow(phi_view[cx,:,:].T, origin='lower', cmap=cmap); axes[0].set_title("slice x=center")
-                axes[1].imshow(phi_view[:,cy,:].T, origin='lower', cmap=cmap); axes[1].set_title("slice y=center")
-                axes[2].imshow(phi_view[:,:,cz].T, origin='lower', cmap=cmap); axes[2].set_title("slice z=center")
-            elif field == "c (concentration)":
-                axes[0].imshow(c_view[cx,:,:].T, origin='lower', cmap=cmap); axes[0].set_title("slice x=center")
-                axes[1].imshow(c_view[:,cy,:].T, origin='lower', cmap=cmap); axes[1].set_title("slice y=center")
-                axes[2].imshow(c_view[:,:,cz].T, origin='lower', cmap=cmap); axes[2].set_title("slice z=center")
-            else:
-                axes[0].imshow(psi_view[cx,:,:].T, origin='lower', cmap=cmap); axes[0].set_title("slice x=center")
-                axes[1].imshow(psi_view[:,cy,:].T, origin='lower', cmap=cmap); axes[1].set_title("slice y=center")
-                axes[2].imshow(psi_view[:,:,cz].T, origin='lower', cmap=cmap); axes[2].set_title("slice z=center")
-            for ax in axes: ax.axis('off')
+            for ax, sl, title in zip(axes,
+                                     [phi_view[cx,:,:], phi_view[:,cy,:], phi_view[:,:,cz]],
+                                     ["x-slice","y-slice","z-slice"]):
+                ax.imshow(sl.T, origin='lower', cmap=cmap); ax.set_title(title); ax.axis('off')
             st.pyplot(fig)
 
         if auto_play:
-            for idx in range(frame_idx, len(snapshots)):
+            for i in range(frame_idx, len(snapshots)):
                 time.sleep(autoplay_interval)
                 st.session_state._rerun = True
 
     with cols[1]:
-        st.subheader("Diagnostics (latest frame)")
-        import pandas as pd
-        df = pd.DataFrame(diagnostics, columns=["t*", "||bulk||₂", "||grad||₂ (raw)", "||grad||₂ (scaled)", "α·mean(c)"])
+        st.subheader("Diagnostics")
+        df = pd.DataFrame(diagnostics,
+                          columns=["t*","||bulk||₂","||grad||₂ raw","||grad||₂ scaled","α·mean(c)"])
         st.dataframe(df.tail(20).style.format("{:.3e}"))
 
         fig3, ax3 = plt.subplots(figsize=(4,3))
-        times = df["t*"].values
-        ax3.semilogy(times, np.maximum(df["||bulk||₂"].values,1e-30), label='bulk')
-        ax3.semilogy(times, np.maximum(df["||grad||₂ (raw)"].values,1e-30), label='grad raw')
-        ax3.semilogy(times, np.maximum(df["||grad||₂ (scaled)"].values,1e-30), label='grad scaled')
-        ax3.semilogy(times, np.maximum(df["α·mean(c)"].values,1e-30), label='α·c')
+        ax3.semilogy(df["t*"], np.maximum(df["||bulk||₂"],1e-30), label='bulk')
+        ax3.semilogy(df["t*"], np.maximum(df["||grad||₂ raw"],1e-30), label='grad raw')
+        ax3.semilogy(df["t*"], np.maximum(df["||grad||₂ scaled"],1e-30), label='grad scaled')
+        ax3.semilogy(df["t*"], np.maximum(df["α·mean(c)"],1e-30), label='α·c')
         ax3.legend(fontsize=8); ax3.grid(True)
         st.pyplot(fig3)
-    # -----------------------
-    # Export: CSV diagnostics / PNG snapshot / VTU/PVD/ZIP
-    # -----------------------
+
+    # --------------------------------------------------------------
+    # POST-PROCESSOR : material field + electric-potential proxy
+    # --------------------------------------------------------------
+    st.subheader("Material composition & electric-potential proxy")
+
+    col_a, col_b, col_c = st.columns([2, 2, 2])
+    with col_a:
+        material_method = st.selectbox(
+            "Material interpolation",
+            ["phi + 2*psi (simple)",
+             "phi*(1-psi) + 2*psi",
+             "h·(phi² + psi²)",
+             "h·(4*phi² + 2*psi²)",   # NEW
+             "max(phi, psi) + psi"],
+            index=3,                     # default to the new one
+            help="Choose how the two phase fields are merged into one colour map."
+        )
+    with col_b:
+        show_potential = st.checkbox("Overlay electric-potential proxy (-α·c)", value=True)
+    with col_c:
+        if "h·" in material_method:
+            h_factor = st.slider("h (scaling)", 0.1, 2.0, 0.5, 0.05,
+                                 help="Scale factor for continuous material fields")
+        else:
+            h_factor = 1.0   # not used
+
+    # ---------- build material ----------
+    def build_material(phi, psi, method, h=1.0):
+        if method == "phi + 2*psi (simple)":
+            return phi + 2.0*psi
+        elif method == "phi*(1-psi) + 2*psi":
+            return phi*(1.0-psi) + 2.0*psi
+        elif method == "h·(phi² + psi²)":
+            return h*(phi**2 + psi**2)
+        elif method == "h·(4*phi² + 2*psi²)":          # NEW
+            return h*(4.0*phi**2 + 2.0*psi**2)
+        elif method == "max(phi, psi) + psi":
+            return np.where(psi > 0.5, 2.0,
+                   np.where(phi > 0.5, 1.0, 0.0))
+        else:
+            raise ValueError("unknown material method")
+
+    material = build_material(phi_view, psi_view, material_method, h=h_factor)
+    potential = -alpha * c_view          # proxy for driving term
+
+    # ---------- 2-D visualisation ----------
+    if mode.startswith("2D"):
+        # colormap handling
+        if material_method in ["phi + 2*psi (simple)",
+                               "phi*(1-psi) + 2*psi",
+                               "max(phi, psi) + psi"]:
+            cmap_mat = plt.cm.get_cmap("Set1", 3)
+            vmin, vmax = 0, 2
+        else:
+            cmap_mat = cmap_choice
+            vmin = vmax = None
+
+        fig_mat, ax_mat = plt.subplots(figsize=(6,5))
+        im_mat = ax_mat.imshow(material.T, origin='lower', extent=[0,1,0,1],
+                               cmap=cmap_mat, vmin=vmin, vmax=vmax)
+        if material_method in ["phi + 2*psi (simple)",
+                               "phi*(1-psi) + 2*psi",
+                               "max(phi, psi) + psi"]:
+            cbar = plt.colorbar(im_mat, ax=ax_mat, ticks=[0,1,2])
+            cbar.ax.set_yticklabels(['electrolyte','Ag shell','Cu core'])
+        else:
+            plt.colorbar(im_mat, ax=ax_mat, label="material")
+        ax_mat.set_title(f"Material @ t* = {t:.5f}")
+        st.pyplot(fig_mat)
+
+        if show_potential:
+            fig_pot, ax_pot = plt.subplots(figsize=(6,5))
+            im_pot = ax_pot.imshow(potential.T, origin='lower', extent=[0,1,0,1],
+                                   cmap="RdBu_r")
+            plt.colorbar(im_pot, ax=ax_pot, label="Potential proxy -α·c")
+            ax_pot.set_title(f"Potential proxy @ t* = {t:.5f}")
+            st.pyplot(fig_pot)
+
+            # combined view
+            fig_comb, ax_comb = plt.subplots(figsize=(6,5))
+            if material_method in ["phi + 2*psi (simple)",
+                                   "phi*(1-psi) + 2*psi",
+                                   "max(phi, psi) + psi"]:
+                ax_comb.imshow(material.T, origin='lower', extent=[0,1,0,1],
+                               cmap=cmap_mat, vmin=0, vmax=2, alpha=0.7)
+            else:
+                ax_comb.imshow(material.T, origin='lower', extent=[0,1,0,1],
+                               cmap=cmap_choice, alpha=0.7)
+            cs = ax_comb.contour(potential.T, levels=12, cmap="plasma",
+                                 linewidths=0.8, alpha=0.9)
+            ax_comb.clabel(cs, inline=True, fontsize=7, fmt="%.2f")
+            ax_comb.set_title("Material + Potential contours")
+            st.pyplot(fig_comb)
+
+    # ---------- 3-D visualisation ----------
+    else:
+        cx = phi_view.shape[0]//2
+        cy = phi_view.shape[1]//2
+        cz = phi_view.shape[2]//2
+
+        fig_mat, axes = plt.subplots(1,3, figsize=(12,4))
+        for ax, sl, label in zip(axes,
+                                 [material[cx,:,:], material[:,cy,:], material[:,:,cz]],
+                                 ["x-slice","y-slice","z-slice"]):
+            if material_method in ["phi + 2*psi (simple)",
+                                   "phi*(1-psi) + 2*psi",
+                                   "max(phi, psi) + psi"]:
+                im = ax.imshow(sl.T, origin='lower', cmap=cmap_mat, vmin=0, vmax=2)
+            else:
+  (im = ax.imshow(sl.T, origin='lower', cmap=cmap_choice))
+            ax.set_title(label); ax.axis('off')
+        fig_mat.suptitle(f"Material (3-D slices) @ t* = {t:.5f}")
+        st.pyplot(fig_mat)
+
+        if show_potential:
+            fig_pot, axes = plt.subplots(1,3, figsize=(12,4))
+            for ax, sl, label in zip(axes,
+                                     [potential[cx,:,:], potential[:,cy,:], potential[:,:,cz]],
+                                     ["x-slice","y-slice","z-slice"]):
+                im = ax.imshow(sl.T, origin='lower', cmap="RdBu_r")
+                ax.set_title(label); ax.axis('off')
+            fig_pot.suptitle(f"Potential proxy (-α·c) @ t* = {t:.5f}")
+            plt.colorbar(im, ax=axes, orientation='horizontal',
+                         fraction=0.05, label="-α·c")
+            st.pyplot(fig_pot)
+
+    # ------------------- diagnostics export -------------------
     csv_buffer = io.StringIO()
     writer = csv.writer(csv_buffer)
-    writer.writerow(["t*", "||bulk||2", "||grad||2_raw", "||grad||2_scaled", "alpha_mean_c"])
+    writer.writerow(["t*","||bulk||2","||grad||2_raw","||grad||2_scaled","alpha_mean_c"])
     writer.writerows(diagnostics)
-    csv_data = csv_buffer.getvalue().encode()
-    st.download_button("Download diagnostics CSV", csv_data, file_name=f"diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv")
-    # PNG snapshot of current frame
+    st.download_button("Download diagnostics CSV",
+                       csv_buffer.getvalue().encode(),
+                       file_name=f"diagnostics_{datetime.now():%Y%m%d_%H%M%S}.csv",
+                       mime="text/csv")
+
+    # ------------------- PNG snapshot -------------------
     img_buf = io.BytesIO()
     if mode.startswith("2D"):
         fig_snap, ax_snap = plt.subplots(figsize=(5,4))
@@ -447,27 +536,22 @@ if st.session_state.snapshots:
     else:
         fig_snap, axes_snap = plt.subplots(1,3,figsize=(10,3))
         cx = phi_view.shape[0]//2; cy = phi_view.shape[1]//2; cz = phi_view.shape[2]//2
-        if field == "phi (shell)":
-            axes_snap[0].imshow(phi_view[cx,:,:].T, origin='lower', cmap=cmap_choice); axes_snap[0].set_title("x slice")
-            axes_snap[1].imshow(phi_view[:,cy,:].T, origin='lower', cmap=cmap_choice); axes_snap[1].set_title("y slice")
-            axes_snap[2].imshow(phi_view[:,:,cz].T, origin='lower', cmap=cmap_choice); axes_snap[2].set_title("z slice")
-        elif field == "c (concentration)":
-            axes_snap[0].imshow(c_view[cx,:,:].T, origin='lower', cmap=cmap_choice); axes_snap[0].set_title("x slice")
-            axes_snap[1].imshow(c_view[:,cy,:].T, origin='lower', cmap=cmap_choice); axes_snap[1].set_title("y slice")
-            axes_snap[2].imshow(c_view[:,:,cz].T, origin='lower', cmap=cmap_choice); axes_snap[2].set_title("z slice")
-        else:
-            axes_snap[0].imshow(psi_view[cx,:,:].T, origin='lower', cmap=cmap_choice); axes_snap[0].set_title("x slice")
-            axes_snap[1].imshow(psi_view[:,cy,:].T, origin='lower', cmap=cmap_choice); axes_snap[1].set_title("y slice")
-            axes_snap[2].imshow(psi_view[:,:,cz].T, origin='lower', cmap=cmap_choice); axes_snap[2].set_title("z slice")
-        for ax in axes_snap: ax.axis('off')
+        for ax, sl, title in zip(axes_snap,
+                                 [phi_view[cx,:,:], phi_view[:,cy,:], phi_view[:,:,cz]],
+                                 ["x","y","z"]):
+            ax.imshow(sl.T, origin='lower', cmap=cmap_choice); ax.set_title(title); ax.axis('off')
         fig_snap.tight_layout()
         fig_snap.savefig(img_buf, format='png', dpi=150); plt.close(fig_snap)
     img_buf.seek(0)
-    st.download_button("Download current snapshot (PNG)", img_buf, file_name=f"snapshot_t{t:.5f}.png", mime="image/png")
-    # Export VTU / PVD / ZIP (if meshio available) when requested
+    st.download_button("Download current snapshot (PNG)",
+                       img_buf,
+                       file_name=f"snapshot_t{t:.5f}.png",
+                       mime="image/png")
+
+    # ------------------- VTU / PVD / ZIP -------------------
     if export_vtu_button:
         if not MESHIO_AVAILABLE:
-            st.error("meshio not installed; cannot export VTU/PVD. Install `meshio` to enable VTU export.")
+            st.error("`meshio` not installed — VTU export disabled.")
         else:
             tmpdir = tempfile.mkdtemp()
             vtus = []
@@ -482,8 +566,7 @@ if st.session_state.snapshots:
                     Xg, Yg, Zg = np.meshgrid(xv, yv, zv, indexing='ij')
                     points = np.column_stack([Xg.ravel(), Yg.ravel(), Zg.ravel()])
 
-                # ---- add material field ----
-                mat_s = build_material(phi_s, psi_s, material_method, h=0.5)
+                mat_s = build_material(phi_s, psi_s, material_method, h=h_factor)
                 point_data = {
                     "phi": phi_s.ravel().astype(np.float32),
                     "c": c_s.ravel().astype(np.float32),
@@ -492,7 +575,7 @@ if st.session_state.snapshots:
                 }
                 meshio.write_points_cells(fname, points, [], point_data=point_data)
                 vtus.append(fname)
-            # create .pvd
+
             pvd_path = os.path.join(tmpdir, "collection.pvd")
             with open(pvd_path, "w") as f:
                 f.write("<VTKFile type=\"Collection\" version=\"0.1\" byte_order=\"LittleEndian\">\n")
@@ -501,19 +584,22 @@ if st.session_state.snapshots:
                     f.write(f'    <DataSet timestep="{idx}" file="{os.path.basename(v)}"/>\n')
                 f.write("  </Collection>\n")
                 f.write("</VTKFile>\n")
-            # zip
+
             zipbuf = io.BytesIO()
             with zipfile.ZipFile(zipbuf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for p in vtus:
                     zf.write(p, arcname=os.path.basename(p))
                 zf.write(pvd_path, arcname=os.path.basename(pvd_path))
             zipbuf.seek(0)
-            st.download_button("Download VTU/PVD ZIP", zipbuf.read(), file_name=f"frames_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", mime="application/zip")
+            st.download_button("Download VTU/PVD ZIP",
+                               zipbuf.read(),
+                               file_name=f"frames_{datetime.now():%Y%m%d_%H%M%S}.zip",
+                               mime="application/zip")
 
     if MESHIO_AVAILABLE:
-        sel_frame_for_vtu = st.number_input("Select frame to save as single VTU", 0, len(snapshots)-1, 0)
+        sel = st.number_input("Select frame for single VTU", 0, len(snapshots)-1, 0)
         if st.button("Download selected frame as VTU"):
-            tframe, phi_s, c_s, psi_s = snapshots[int(sel_frame_for_vtu)]
+            tframe, phi_s, c_s, psi_s = snapshots[int(sel)]
             buf = io.BytesIO()
             if mode.startswith("2D"):
                 xv, yv = coords
@@ -524,7 +610,7 @@ if st.session_state.snapshots:
                 Xg, Yg, Zg = np.meshgrid(xv, yv, zv, indexing='ij')
                 points = np.column_stack([Xg.ravel(), Yg.ravel(), Zg.ravel()])
 
-            mat_s = build_material(phi_s, psi_s, material_method, h=0.5)
+            mat_s = build_material(phi_s, psi_s, material_method, h=h_factor)
             point_data = {
                 "phi": phi_s.ravel().astype(np.float32),
                 "c": c_s.ravel().astype(np.float32),
@@ -533,9 +619,9 @@ if st.session_state.snapshots:
             }
             meshio.write_points_cells(buf, points, [], file_format="vtu", point_data=point_data)
             buf.seek(0)
-            st.download_button("Download VTU (selected frame)", buf.read(), file_name=f"frame_{int(sel_frame_for_vtu):04d}.vtu", mime="application/octet-stream")
+            st.download_button("Download VTU",
+                               buf.read(),
+                               file_name=f"frame_{int(sel):04d}.vtu",
+                               mime="application/octet-stream")
 else:
-    st.info("Run a simulation to see results. Tip: keep 3D grid small (<= 40) for interactive runs.")
-# -----------------------
-# End of app
-# -----------------------
+    st.info("Run a simulation to see results. Tip: keep 3D grid ≤ 40 for fast runs.")
