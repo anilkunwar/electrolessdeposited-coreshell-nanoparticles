@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# NON-DIMENSIONAL ELECTROLESS Ag – SMOOTH DOUBLE-WELL (STABLE)
+# ELECTRODEPOSITION Ag – CORRECT PHYSICS, STABLE SHELL GROWTH
 # --------------------------------------------------------------
 import streamlit as st
 import numpy as np
@@ -11,8 +11,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from io import BytesIO
 
-# -------------------- 1. SQLite caching --------------------
-DB_PATH = Path("simulations_nondim.db")
+# -------------------- 1. SQLite --------------------
+DB_PATH = Path("simulations_electrodeposition.db")
 def _hash_params(**kw):
     s = "".join(f"{k}={v}" for k, v in sorted(kw.items()))
     return hashlib.sha256(s.encode()).hexdigest()[:16]
@@ -21,21 +21,22 @@ def init_db():
     with sqlite3.connect(DB_PATH) as con:
         con.execute("""CREATE TABLE IF NOT EXISTS runs (
                     run_id TEXT PRIMARY KEY, params BLOB, x BLOB, y BLOB,
-                    phi_hist BLOB, c_hist BLOB, t_hist BLOB, psi BLOB
+                    phi_hist BLOB, c_hist BLOB, phi_l_hist BLOB, t_hist BLOB, psi BLOB
                )""")
 
-def save_run(run_id, params, x, y, phi_hist, c_hist, t_hist, psi):
+def save_run(run_id, params, x, y, phi_hist, c_hist, phi_l_hist, t_hist, psi):
     with sqlite3.connect(DB_PATH) as con:
-        con.execute("""INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?)""",
+        con.execute("""INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?)""",
                     (run_id, pickle.dumps(params), pickle.dumps(x), pickle.dumps(y),
-                     pickle.dumps(phi_hist), pickle.dumps(c_hist), pickle.dumps(t_hist), pickle.dumps(psi)))
+                     pickle.dumps(phi_hist), pickle.dumps(c_hist), pickle.dumps(phi_l_hist),
+                     pickle.dumps(t_hist), pickle.dumps(psi)))
 
 def load_run(run_id):
     with sqlite3.connect(DB_PATH) as con:
         cur = con.execute("SELECT * FROM runs WHERE run_id=?", (run_id,))
         row = cur.fetchone()
         if row:
-            keys = ["params","x","y","phi_hist","c_hist","t_hist","psi"]
+            keys = ["params","x","y","phi_hist","c_hist","phi_l_hist","t_hist","psi"]
             return {k: pickle.loads(v) for k, v in zip(keys, row[1:])}
     return None
 
@@ -65,68 +66,53 @@ def _grad_y(arr, h):
             out[i,j] = (arr[i+1,j] - arr[i-1,j]) / (2*h)
     return out
 
-# -------------------- 3. SMOOTH DOUBLE-WELL FREE ENERGY --------------------
+# -------------------- 3. DOUBLE-WELL FREE ENERGY --------------------
 @njit(parallel=True, fastmath=True)
 def f_prime_double_well(phi, psi, a_index, beta_tilde, h):
-    """
-    Original polynomial form (non-dimensional):
-        f' = (1+a_index)/8 * (1-ψ) * 2β ϕ(1-ϕ)(1-2ϕ)
-           + (1-a_index)/8 * ψ * 2β (ϕ-h)
-    """
     ny, nx = phi.shape
     f_prime = np.zeros_like(phi)
-
-    # double-well part
     dw = 2.0 * beta_tilde * phi * (1.0 - phi) * (1.0 - 2.0 * phi)
-
-    # template harmonic part
     harm = 2.0 * beta_tilde * (phi - h)
-
     for i in prange(ny):
         for j in prange(nx):
             f_prime[i,j] = ((1.0 + a_index) * (1.0 - psi[i,j]) * dw[i,j] / 8.0 +
                             (1.0 - a_index) * psi[i,j] * harm[i,j] / 8.0)
     return f_prime
 
-# -------------------- 4. Simulation (non-dimensional) --------------------
-def run_simulation_nondim(
+# -------------------- 4. ELECTRODEPOSITION SIMULATION --------------------
+def run_simulation(
     run_id, L, Nx, Ny, eps_tilde, core_radius_frac, core_center,
     M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
-    alpha_tilde, i0_tilde, c_ref_tilde, beta_tilde, a_index, h,
-    ratio_top_factor, ratio_surface_factor, ratio_decay_tilde,
-    save_every, ui
+    Phi_anode_tilde, alpha_tilde, i0_tilde, c_ref_tilde,
+    beta_tilde, a_index, h, save_every, ui
 ):
-    # ---- grid ----
-    h  = L / (Nx - 1)
-    h2 = h * h
+    h = L / (Nx - 1); h2 = h * h
     x = np.linspace(0, L, Nx, dtype=np.float32)
     y = np.linspace(0, L, Ny, dtype=np.float32)
     X, Y = np.meshgrid(x, y, indexing='ij')
 
-    # ---- core template (≥30 % area) ----
+    # --- Core template ---
     r_core = core_radius_frac * L
     cx, cy = core_center[0] * L, core_center[1] * L
     psi = (((X - cx)**2 + (Y - cy)**2) <= r_core**2).astype(np.float32)
     core_area = np.sum(psi) * h * h / (L * L)
-    st.write(f"**Core occupies {core_area:.1%} of domain**")
+    st.write(f"**Core: {core_area:.1%} of domain**")
 
-    # ---- initial phase field ----
+    # --- Initial fields ---
     dist = np.sqrt((X-cx)**2 + (Y-cy)**2) - r_core
     phi = 0.5 * (1.0 - np.tanh(3.0 * dist / eps_tilde))
-    phi = np.clip(phi, 1e-6, 1.0 - 1e-6)          # soft safety
+    phi = np.clip(phi, 1e-6, 1.0 - 1e-6)
 
-    # ---- ratio field (Ag/Cu spatial variation) ----
-    vertical = Y / L
-    surface  = np.exp(-np.abs(dist) / ratio_decay_tilde)
-    ratio = ( (1.0 - ratio_surface_factor) * (0.2 + 0.8 * vertical) +
-              ratio_surface_factor * surface )
-    ratio = np.clip(ratio, 0.1, 8.0)
+    c = c_bulk_tilde * (Y / L) * (1.0 - phi) * (1.0 - psi)
+    phi_l = (Y / L) * Phi_anode_tilde  # Linear potential
 
-    # ---- concentration ----
-    c = c_bulk_tilde * vertical * (1.0 - phi) * (1.0 - psi)
+    # --- Constants ---
+    F_tilde = 1.0; R_tilde = 1.0; T_tilde = 1.0  # non-dim
+    z = 1
+    MAg_rho_tilde = 1.0
 
-    # ---- storage ----
-    phi_hist, c_hist, t_hist = [], [], []
+    # --- Storage ---
+    phi_hist, c_hist, phi_l_hist, t_hist = [], [], [], []
     n_steps = int(np.ceil(t_max_tilde / dt_tilde))
     save_step = max(1, save_every)
     phi_old = phi.copy()
@@ -134,67 +120,73 @@ def run_simulation_nondim(
     progress = ui['progress']; status = ui['status']
     plot = ui['plot']; line = ui['line']; metrics = ui['metrics']
 
-    # non-dimensional constants
-    MAg_rho_tilde = 1.0                     # scaled molar volume
-    eta_chem_tilde = st.session_state.get('eta_chem_tilde', 0.5)
-
     for step in range(n_steps + 1):
         t = step * dt_tilde
 
-        # ----- Neumann BCs for phi -----
-        phi[:,0] = phi[:,1];   phi[:,-1] = phi[:,-2]
-        phi[0,:] = phi[1,:];   phi[-1,:] = phi[-2,:]
+        # Neumann BCs
+        phi[:,0] = phi[:,1]; phi[:,-1] = phi[:,-2]
+        phi[0,:] = phi[1,:]; phi[-1,:] = phi[-2,:]
 
-        # ----- gradients & interface indicator -----
-        phi_x = _grad_x(phi, h);   phi_y = _grad_y(phi, h)
+        # Gradients
+        phi_x = _grad_x(phi, h); phi_y = _grad_y(phi, h)
         grad_phi = np.sqrt(phi_x**2 + phi_y**2 + 1e-30)
         delta_int = 6.0 * phi * (1.0 - phi) * (1.0 - psi) * grad_phi
         delta_int = np.clip(delta_int, 0.0, 6.0 / eps_tilde)
 
         phi_xx = _laplacian(phi, h2)
 
-        # ----- double-well free-energy derivative -----
+        # Free energy
         f_prime = f_prime_double_well(phi, psi, a_index, beta_tilde, h)
-
         mu = -eps_tilde**2 * phi_xx + f_prime - alpha_tilde * c
         mu_xx = _laplacian(mu, h2)
 
-        # ----- local current & advection -----
-        c_mol = c * (1.0 - phi) * (1.0 - psi) * ratio
-        i_loc = i0_tilde * (c_mol / c_ref_tilde) * np.exp(0.5 * eta_chem_tilde)
+        # --- Butler-Volmer current ---
+        eta = -phi_l
+        c_mol = c * (1.0 - phi) * (1.0 - psi)
+        exp_c = np.exp(1.5 * F_tilde * eta / (R_tilde * T_tilde))
+        exp_a = np.exp(-0.5 * F_tilde * eta / (R_tilde * T_tilde))
+        i_loc = i0_tilde * (exp_c * c_mol / c_ref_tilde - exp_a)
         i_loc = i_loc * delta_int
         i_loc = np.clip(i_loc, -1e3, 1e3)
 
-        u = -i_loc * MAg_rho_tilde
+        # --- Advection velocity (volume addition) ---
+        u = -i_loc / (z * F_tilde) * MAg_rho_tilde
         advection = u * (1.0 - psi) * phi_y
 
-        # ----- phase evolution -----
+        # --- Phase evolution ---
         dphi_dt = M_tilde * mu_xx - advection
         phi += dt_tilde * dphi_dt
-        phi = np.clip(phi, 0.0, 1.0)          # mild clipping – polynomial stays inside
+        phi = np.clip(phi, 0.0, 1.0)
 
-        # ----- concentration evolution -----
+        # --- Concentration ---
         c_eff = (1.0 - phi) * (1.0 - psi) * c
-        c_xx  = _laplacian(c_eff, h2)
-        sink  = -i_loc * delta_int
-        c += dt_tilde * (D_tilde * c_xx + sink)
-        c = np.clip(c, 0.0, c_bulk_tilde * 2.0)
+        c_xx = _laplacian(c_eff, h2)
+        c_y = _grad_y(c_eff, h)
 
-        # ----- concentration BCs -----
-        c[:,0]  = 0.0
+        # Electromigration: (z F D / RT) * E * c_y
+        E_field = Phi_anode_tilde / L
+        migration = (z * F_tilde * D_tilde / (R_tilde * T_tilde)) * E_field * c_y
+
+        sink = -i_loc * delta_int / (z * F_tilde)
+        c += dt_tilde * (D_tilde * c_xx + migration + sink)
+        c = np.clip(c, 0.0, c_bulk_tilde * 2)
+
+        # BCs
+        c[:,0] = 0.0
         c[:,-1] = c_bulk_tilde * (y / L)
 
-        # ----- store & UI -----
+        # --- Store ---
         if step % save_step == 0 or step == n_steps:
             phi_hist.append(phi.copy())
             c_hist.append(c.copy())
+            phi_l_hist.append(phi_l.copy())
             t_hist.append(t)
 
             try:
                 fig = go.Figure(go.Contour(z=phi_hist[-1].T, x=x/L, y=y/L,
                                           contours_coloring='heatmap',
                                           colorbar=dict(title='ϕ')))
-                fig.update_layout(height=360, margin=dict(l=10,r=10,t=20,b=20))
+                fig.update_layout(height=360)
                 plot.plotly_chart(fig, use_container_width=True)
 
                 mid = Nx // 2
@@ -207,156 +199,110 @@ def run_simulation_nondim(
 
                 metrics.metric('t*', f"{t:.3f}")
                 metrics.metric('ϕ range', f"[{phi.min():.4f}, {phi.max():.4f}]")
-            except Exception: pass
+            except: pass
 
-        # convergence check
         if step > 100 and np.max(np.abs(phi - phi_old)) < 1e-6:
-            status.info(f"Converged at t* = {t:.4f}")
+            status.info("Converged")
             break
         if step % 50 == 0: phi_old = phi.copy()
 
         progress.progress(min(1.0, step / n_steps))
-        if st.session_state.get('stop_sim', False):
-            status.warning("Stopped by user")
-            break
+        if st.session_state.get('stop_sim', False): break
 
     progress.empty()
     return {
         'x': x, 'y': y,
         'phi_hist': np.array(phi_hist), 'c_hist': np.array(c_hist),
-        't_hist': np.array(t_hist), 'psi': psi, 'ratio_field': ratio
+        'phi_l_hist': np.array(phi_l_hist), 't_hist': np.array(t_hist),
+        'psi': psi
     }
 
 # -------------------- 5. UI --------------------
-st.title("Electroless Ag – Smooth Double-Well (Stable)")
-st.markdown("**Core ≥ 30 % area | movable centre | ϕ ∈ [0,1] via mild clipping**")
+st.title("Electrodeposition Ag – Correct Physics")
+st.markdown("**Higher driving force far from template → stable outward shell**")
 
 st.sidebar.header("Domain")
-L  = st.sidebar.slider("L (char. length, cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
-Nx = st.sidebar.slider("Nx", 80, 300, 160, 10)
-Ny = st.sidebar.slider("Ny", 80, 300, 160, 10)
+L = st.sidebar.slider("L (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
+Nx = st.sidebar.slider("Nx", 100, 300, 180, 10)
+Ny = st.sidebar.slider("Ny", 100, 300, 180, 10)
 
 st.sidebar.header("Core Template")
-core_radius_frac = st.sidebar.slider("Core radius / L", 0.31, 0.7, 0.55, 0.01,
-                                     help="≥30 % area → r/L ≥ √(0.3/π) ≈ 0.31")
-core_center_x = st.sidebar.slider("Core centre x/L", 0.2, 0.8, 0.5, 0.01)
-core_center_y = st.sidebar.slider("Core centre y/L", 0.2, 0.8, 0.5, 0.01)
+core_radius_frac = st.sidebar.slider("Core r/L", 0.31, 0.7, 0.55, 0.01)
+core_center_x = st.sidebar.slider("Core x/L", 0.2, 0.8, 0.5, 0.01)
+core_center_y = st.sidebar.slider("Core y/L", 0.2, 0.8, 0.5, 0.01)
 
 st.sidebar.header("Interface")
-eps_tilde = st.sidebar.slider("ε* = ε/L", 0.01, 0.1, 0.03, 0.005)
+eps_tilde = st.sidebar.slider("ε*", 0.01, 0.1, 0.03, 0.005)
 
 st.sidebar.header("Kinetics")
-M_tilde   = st.sidebar.number_input("M* = M·t₀/L²", 1e-3, 1.0, 0.1, 0.01)
-dt_tilde  = st.sidebar.number_input("Δt*", 1e-4, 1e-2, 5e-4, 1e-5)
-t_max_tilde = st.sidebar.number_input("t*_max", 1.0, 30.0, 12.0, 0.5)
-D_tilde   = st.sidebar.number_input("D* = D·t₀/L²", 0.01, 1.0, 0.1, 0.01)
+M_tilde = st.sidebar.number_input("M*", 1e-3, 1.0, 0.1, 0.01)
+dt_tilde = st.sidebar.number_input("Δt*", 1e-4, 1e-2, 5e-4, 1e-5)
+t_max_tilde = st.sidebar.number_input("t*_max", 1.0, 30.0, 15.0, 0.5)
+D_tilde = st.sidebar.number_input("D*", 0.01, 1.0, 0.1, 0.01)
 c_bulk_tilde = st.sidebar.number_input("c*_bulk", 0.1, 10.0, 1.0, 0.1)
+
+st.sidebar.header("Electrochemistry")
+Phi_anode_tilde = st.sidebar.slider("Φ*_anode", 0.1, 5.0, 2.0, 0.1)
+i0_tilde = st.sidebar.number_input("i₀*", 0.01, 1.0, 0.1, 0.01)
+c_ref_tilde = st.sidebar.number_input("c*_ref", 0.1, 10.0, 1.0, 0.1)
 
 st.sidebar.header("Coupling")
 alpha_tilde = st.sidebar.number_input("α*", 0.0, 10.0, 1.0, 0.1)
-i0_tilde    = st.sidebar.number_input("i₀*", 0.01, 1.0, 0.1, 0.01)
-c_ref_tilde = st.sidebar.number_input("c*_ref", 0.1, 10.0, 1.0, 0.1)
-eta_chem_tilde = st.sidebar.slider("η*_chem", 0.1, 2.0, 0.8, 0.05)
-
-st.sidebar.header("Free Energy (Double-Well)")
 beta_tilde = st.sidebar.slider("β*", 0.1, 10.0, 1.0, 0.1)
-a_index    = st.sidebar.slider("a-index", -1.0, 1.0, 0.0, 0.1)
-h          = st.sidebar.slider("h (target inside core)", 0.0, 1.0, 0.5, 0.1)
+a_index = st.sidebar.slider("a-index", -1.0, 1.0, 0.0, 0.1)
+h = st.sidebar.slider("h", 0.0, 1.0, 0.5, 0.1)
 
-st.sidebar.header("Ratio Field")
-ratio_top_factor      = st.sidebar.slider("Top-weight", 0.0, 1.0, 0.7, 0.05)
-ratio_surface_factor  = st.sidebar.slider("Surface-boost", 0.0, 1.0, 0.5, 0.05)
-ratio_decay_tilde     = st.sidebar.slider("Decay λ*/L", 0.01, 0.2, 0.05, 0.01)
-
-save_every = st.sidebar.number_input("Save every N steps", 10, 100, 30, 5)
-
-# keep η* in session state so the simulation can read it
-st.session_state.eta_chem_tilde = eta_chem_tilde
+save_every = st.sidebar.number_input("Save every", 10, 100, 30, 5)
 
 init_db()
-if "run_id" not in st.session_state: st.session_state.run_id = None
 if "results" not in st.session_state: st.session_state.results = None
 if "stop_sim" not in st.session_state: st.session_state.stop_sim = False
 
-col1, col2 = st.columns([3, 1])
-plot_area = col1.container()
-line_area = col1.container()
-metrics_area = col2.container()
-status = st.empty()
-progress = st.empty()
+col1, col2 = st.columns([3,1])
+plot_area = col1.container(); line_area = col1.container(); metrics_area = col2.container()
+status = st.empty(); progress = st.empty()
 
 run_col, stop_col = st.columns(2)
-
-if run_col.button("Run Simulation"):
+if run_col.button("Run"):
     st.session_state.stop_sim = False
     run_id = _hash_params(**locals())
     cached = load_run(run_id)
     if cached:
-        st.session_state.results = cached
-        status.success("Loaded cached run")
+        st.session_state.results = cached; status.success("Loaded")
     else:
-        status.info("Running …")
-        ui = {
-            'progress': progress, 'status': status,
-            'plot': plot_area, 'line': line_area, 'metrics': metrics_area
-        }
-        results = run_simulation_nondim(
+        status.info("Running...")
+        ui = {'progress': progress, 'status': status, 'plot': plot_area, 'line': line_area, 'metrics': metrics_area}
+        results = run_simulation(
             run_id, L, Nx, Ny, eps_tilde, core_radius_frac, (core_center_x, core_center_y),
             M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
-            alpha_tilde, i0_tilde, c_ref_tilde, beta_tilde, a_index, h,
-            ratio_top_factor, ratio_surface_factor, ratio_decay_tilde,
-            save_every, ui
+            Phi_anode_tilde, alpha_tilde, i0_tilde, c_ref_tilde,
+            beta_tilde, a_index, h, save_every, ui
         )
-        save_run(run_id, {}, results['x'], results['y'],
-                 results['phi_hist'], results['c_hist'],
-                 results['t_hist'], results['psi'])
+        save_run(run_id, {}, results['x'], results['y'], results['phi_hist'], results['c_hist'],
+                 results['phi_l_hist'], results['t_hist'], results['psi'])
         st.session_state.results = results
-        status.success("Finished & saved!")
+        status.success("Done!")
 
-if stop_col.button("Stop"):
-    st.session_state.stop_sim = True
+if stop_col.button("Stop"): st.session_state.stop_sim = True
 
 # -------------------- Results --------------------
 if st.session_state.results:
     r = st.session_state.results
     x, y = r['x'], r['y']
-    phi_hist, c_hist = r['phi_hist'], r['c_hist']
-    t_hist = r['t_hist']
-    psi = r['psi']
-    ratio = r.get('ratio_field')
+    phi_hist, c_hist, phi_l_hist = r['phi_hist'], r['c_hist'], r['phi_l_hist']
+    t_hist = r['t_hist']; psi = r['psi']
 
     st.subheader("Results")
-    time_idx = st.slider("Time t*", 0, len(t_hist)-1, len(t_hist)//2,
-                         format="t* = %.3f")
-    var = st.selectbox("Field", ["ϕ – phase", "c – concentration", "ψ – template", "ratio"])
-    data = (phi_hist[time_idx] if "ϕ" in var else
-            c_hist[time_idx]   if "c" in var else
-            psi                if "ψ" in var else ratio)
+    time_idx = st.slider("Time t*", 0, len(t_hist)-1, len(t_hist)//2)
+    var = st.selectbox("Field", ["ϕ", "c", "ϕ_l", "ψ"])
+    data = phi_hist[time_idx] if var == "ϕ" else c_hist[time_idx] if var == "c" else phi_l_hist[time_idx] if var == "ϕ_l" else psi
 
-    fig = go.Figure(go.Contour(z=data.T, x=x/L, y=y/L,
-                               contours_coloring='heatmap',
-                               colorbar=dict(title=var.split()[0])))
-    fig.update_layout(height=500, title=f"{var} at t* = {t_hist[time_idx]:.3f}")
+    fig = go.Figure(go.Contour(z=data.T, x=x/L, y=y/L, contours_coloring='heatmap',
+                               colorbar=dict(title=var)))
+    fig.update_layout(height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    mid = Nx // 2
+    mid = Nx//2
     fig2, ax = plt.subplots()
-    ax.plot(y/L, data[mid,:], label=var.split()[0])
-    ax.set_xlabel('y/L'); ax.grid(True); ax.legend()
+    ax.plot(y/L, data[mid,:]); ax.set_xlabel('y/L'); ax.grid(True)
     st.pyplot(fig2); plt.close(fig2)
-
-    # VTR export (single time step)
-    def vtr_bytes(phi, c, psi, x, y):
-        grid = pv.RectilinearGrid(x, y, [0])
-        grid.point_data["phi"] = phi.T.ravel(order="F")
-        grid.point_data["c"]   = c.T.ravel(order="F")
-        grid.point_data["psi"] = psi.T.ravel(order="F")
-        bio = BytesIO(); grid.save(bio, file_format="vtr"); return bio.getvalue()
-    vtr = vtr_bytes(phi_hist[time_idx], c_hist[time_idx], psi, x, y)
-    st.download_button(f"VTR t*={t_hist[time_idx]:.3f}", vtr,
-                       f"ag_t{t_hist[time_idx]:.3f}.vtr", "application/octet-stream")
-
-# DB download
-if DB_PATH.exists():
-    st.download_button("Download DB", DB_PATH.read_bytes(),
-                       "simulations_nondim.db", "application/octet-stream")
