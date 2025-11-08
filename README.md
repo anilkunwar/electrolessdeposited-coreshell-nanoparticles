@@ -12,6 +12,6 @@ Text based data extraction from web using attention mechanism
 # Phase Field Modeling
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm1-streamlit-red)](https://electrolessdeposition-phasefieldsimulation.streamlit.app/) # scipy conv
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm2-streamlit-red)](https://electrolessdeposition-phasefieldsimulation2.streamlit.app/) # numba
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm2-streamlit-red)](https://electrolessdeposition-phasefieldsimulation2.streamlit.app/) # numba (non-dimensionalized)
 
 
