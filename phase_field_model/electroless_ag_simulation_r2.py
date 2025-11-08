@@ -1,18 +1,17 @@
 # --------------------------------------------------------------
-# ELECTROLESS Ag – SHELL-FIRST + BALANCED BULK/INTERFACE (FINAL)
+# ELECTROLESS Ag – SHELL-FIRST + BALANCED BULK/GRADIENT (IMEX)
 # --------------------------------------------------------------
 import streamlit as st
 import numpy as np
 from numba import njit, prange
 import plotly.graph_objects as go
-import pyvista as pv
 import sqlite3, pickle, hashlib
 from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
 # -------------------- 1. SQLite --------------------
-DB_PATH = Path("simulations_final.db")
+DB_PATH = Path("simulations_imex.db")
 def _hash_params(**kw):
     s = "".join(f"{k}={v}" for k, v in sorted(kw.items()))
     return hashlib.sha256(s.encode()).hexdigest()[:16]
@@ -79,9 +78,21 @@ def f_prime_bulk(phi, psi, a_index, beta_tilde, h):
                       (1.0 - a_index) * psi[i,j] * harm[i,j] / 8.0)
     return f
 
-# -------------------- 4. SIMULATION (balanced) --------------------
+# -------------------- 4. IMEX SOLVER (gradient implicit) --------------------
+@njit
+def imex_step(phi, mu, M_tilde, dt_tilde, h2):
+    """Semi-implicit: ∇²μ treated implicitly, everything else explicit."""
+    ny, nx = phi.shape
+    phi_new = phi.copy()
+    for i in range(1, ny-1):
+        for j in range(1, nx-1):
+            lap_mu = (mu[i+1,j] + mu[i-1,j] + mu[i,j+1] + mu[i,j-1] - 4*mu[i,j]) / h2
+            phi_new[i,j] = phi[i,j] + dt_tilde * M_tilde * lap_mu
+    return phi_new
+
+# -------------------- 5. SIMULATION --------------------
 def run_simulation(
-    run_id, L, Nx, Ny, eps_tilde, W_tilde, core_radius_frac, shell_thickness_frac, core_center,
+    run_id, L, Nx, Ny, eps_tilde, gamma_tilde, core_radius_frac, shell_thickness_frac, core_center,
     M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
     k0_tilde, c_ref_tilde, alpha_tilde, beta_tilde, a_index, h,
     ratio_top_factor, ratio_surface_factor, ratio_decay_tilde,
@@ -98,7 +109,7 @@ def run_simulation(
     dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
     psi  = (dist <= r_core).astype(np.float32)
 
-    # ---- Shell: sharp interior, smooth interfaces ----
+    # ---- Shell (sharp interior, tanh interfaces) ----
     r_inner = r_core
     r_outer = r_core * (1.0 + shell_thickness_frac)
     phi = np.where(dist <= r_inner, 0.0,
@@ -127,7 +138,7 @@ def run_simulation(
     for step in range(n_steps + 1):
         t = step * dt_tilde
 
-        # ---- Compute gradients BEFORE BCs ----
+        # ---- Gradients (for interface indicator) ----
         phi_x = _grad_x(phi, h)
         phi_y = _grad_y(phi, h)
         grad_phi = np.sqrt(phi_x**2 + phi_y**2 + 1e-30)
@@ -136,47 +147,51 @@ def run_simulation(
         delta_int = 6.0 * phi * (1.0 - phi) * (1.0 - psi) * grad_phi
         delta_int = np.clip(delta_int, 0.0, 6.0 / eps_tilde)
 
-        # ---- Apply Neumann BCs AFTER gradients ----
-        phi[0, :]  = phi[1, :]
-        phi[-1, :] = phi[-2, :]
-        phi[:, 0]  = phi[:, 1]
-        phi[:, -1] = phi[:, -2]
+        # ---- Neumann BCs (after gradients) ----
+        phi[0, :]  = phi[1, :]; phi[-1, :] = phi[-2, :]
+        phi[:, 0]  = phi[:, 1]; phi[:, -1] = phi[:, -2]
 
+        # ---- Laplacian for explicit part ----
         phi_xx = _laplacian(phi, h2)
 
-        # ---- Free-energy terms (SCALED) ----
-        f_bulk = f_prime_bulk(phi, psi, a_index, beta_tilde, h)
-        grad_term = -W_tilde * phi_xx  # ← W_tilde ~ 1e-13
-        mu = grad_term + f_bulk - alpha_tilde * c
-        mu_xx = _laplacian(mu, h2)
+        # ---- Free-energy terms (balanced) ----
+        f_bulk    = f_prime_bulk(phi, psi, a_index, beta_tilde, h)      # bulk
+        grad_term = -gamma_tilde * phi_xx                               # gradient (non-dim)
+        mu_explicit = f_bulk - alpha_tilde * c                           # explicit part
+        mu = mu_explicit + grad_term                                    # total chemical potential
 
-        # ---- Diagnostics (L2 norms) ----
-        bulk_norm = np.sqrt(np.mean(f_bulk**2))
-        grad_norm = np.sqrt(np.mean(grad_term**2))
-        conc_norm = alpha_tilde * np.mean(c)
+        # ---- IMEX step (gradient implicit) ----
+        phi = imex_step(phi, mu, M_tilde, dt_tilde, h2)
 
-        # ---- Current & advection ----
+        # ---- Clip to physical bounds ----
+        phi = np.clip(phi, 0.0, 1.0)
+
+        # ---- Electroless current & advection ----
         c_mol = c * (1.0 - phi) * (1.0 - psi) * ratio
         i_loc = k0_tilde * c_mol / c_ref_tilde * delta_int
         i_loc = np.clip(i_loc, 0.0, 1e3)
-
         u = i_loc * MAg_rho_tilde
         advection = u * (1.0 - psi) * phi_y
 
-        # ---- Phase evolution ----
-        dphi_dt = M_tilde * mu_xx + advection
-        phi += dt_tilde * dphi_dt
+        # ---- Explicit update of advection (optional semi-implicit) ----
+        phi += dt_tilde * M_tilde * advection
         phi = np.clip(phi, 0.0, 1.0)
 
-        # ---- Concentration ----
+        # ---- Concentration evolution ----
         c_eff = (1.0 - phi) * (1.0 - psi) * c
         c_xx  = _laplacian(c_eff, h2)
         sink  = -i_loc * delta_int
         c += dt_tilde * (D_tilde * c_xx + sink)
         c = np.clip(c, 0.0, c_bulk_tilde*2)
 
+        # BCs for concentration
         c[:,0] = 0.0
         c[:,-1] = c_bulk_tilde * (y / L)
+
+        # ---- Diagnostics ----
+        bulk_norm = np.sqrt(np.mean(f_bulk**2))
+        grad_norm = np.sqrt(np.mean(grad_term**2))
+        conc_norm = alpha_tilde * np.mean(c)
 
         # ---- Save & UI ----
         if step % save_step == 0 or step == n_steps:
@@ -201,7 +216,6 @@ def run_simulation(
                 line.pyplot(fig2); plt.close(fig2)
 
                 metrics.metric('t*', f"{t:.3f}")
-                metrics.metric('ϕ range', f"[{phi.min():.4f},{phi.max():.4f}]")
                 metrics.metric('‖grad‖₂', f"{grad_norm:.2e}")
                 metrics.metric('‖bulk‖₂', f"{bulk_norm:.2e}")
             except: pass
@@ -222,24 +236,24 @@ def run_simulation(
         'diag': np.array(diag_hist)
     }
 
-# -------------------- 5. UI --------------------
-st.title("Electroless Ag – Balanced Bulk vs. Interface")
-st.markdown("**Shell-first, sharp interior, smooth interfaces, diagnostics**")
+# -------------------- 6. UI --------------------
+st.title("Electroless Ag – Balanced Bulk vs. Gradient (IMEX)")
+st.markdown("**Shell-first, non-dimensional gradient energy, live balance diagnostics**")
 
 st.sidebar.header("Domain")
 L  = st.sidebar.slider("L (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
-Nx = st.sidebar.slider("Nx", 10, 300, 50, 10)
-Ny = st.sidebar.slider("Ny", 10, 300, 50, 10)
+Nx = st.sidebar.slider("Nx", 80, 300, 160, 10)
+Ny = st.sidebar.slider("Ny", 80, 300, 160, 10)
 
 st.sidebar.header("Core & Shell")
-core_radius_frac = st.sidebar.slider("Core r/L", 0.10, 0.7, 0.25, 0.01)
-shell_thickness_frac = st.sidebar.slider("Shell Δr / r_core", 0.1, 0.5, 0.35, 0.01)
+core_radius_frac = st.sidebar.slider("Core r/L", 0.31, 0.7, 0.5, 0.01)
+shell_thickness_frac = st.sidebar.slider("Shell Δr / r_core", 0.1, 0.5, 0.25, 0.01)
 core_center_x = st.sidebar.slider("Core x/L", 0.2, 0.8, 0.5, 0.01)
 core_center_y = st.sidebar.slider("Core y/L", 0.2, 0.8, 0.5, 0.01)
 
-st.sidebar.header("Interface Energy")
-eps_tilde = st.sidebar.slider("ε* (interface width / L)", 0.01, 0.08, 0.03, 0.005)
-W_tilde   = st.sidebar.slider("W* (gradient strength)", 1e-15, 1e-11, 1e-13, 1e-15, format="%.0e")
+st.sidebar.header("Interface")
+eps_tilde = st.sidebar.slider("ε* (tanh width / L)", 0.01, 0.08, 0.03, 0.005)
+gamma_tilde = st.sidebar.slider("γ* (gradient prefactor)", 0.1, 20.0, 2.0, 0.1)
 
 st.sidebar.header("Kinetics")
 M_tilde   = st.sidebar.number_input("M*", 1e-3, 1.0, 0.05, 0.01)
@@ -285,7 +299,7 @@ if run_col.button("Run"):
         ui = {'progress': progress, 'status': status,
               'plot': plot_area, 'line': line_area, 'metrics': metrics_area}
         results = run_simulation(
-            run_id, L, Nx, Ny, eps_tilde, W_tilde,
+            run_id, L, Nx, Ny, eps_tilde, gamma_tilde,
             core_radius_frac, shell_thickness_frac, (core_center_x, core_center_y),
             M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
             k0_tilde, c_ref_tilde, alpha_tilde, beta_tilde, a_index, h,
@@ -296,11 +310,11 @@ if run_col.button("Run"):
                  results['phi_hist'], results['c_hist'],
                  results['t_hist'], results['psi'], results['diag'])
         st.session_state.results = results
-        status.success("Finished!")
+        status.success("Done!")
 
 if stop_col.button("Stop"): st.session_state.stop_sim = True
 
-# -------------------- Results & Diagnostics --------------------
+# -------------------- Results --------------------
 if st.session_state.results:
     r = st.session_state.results
     x, y = r['x'], r['y']
@@ -319,14 +333,13 @@ if st.session_state.results:
     fig.update_layout(height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Line plot
     mid = Nx//2
     fig2, ax = plt.subplots()
     ax.plot(y/L, data[mid,:], label=var)
     ax.set_xlabel('y/L'); ax.grid(True); ax.legend()
     st.pyplot(fig2); plt.close(fig2)
 
-    # Diagnostics
+    # ---- Energy balance ----
     st.subheader("Energy-Term Balance (L² norms)")
     bulk_norm, grad_norm, conc_norm = diag.T
     df = pd.DataFrame({
@@ -341,5 +354,6 @@ if st.session_state.results:
     fig3.add_trace(go.Scatter(x=t_hist, y=bulk_norm, name='bulk'))
     fig3.add_trace(go.Scatter(x=t_hist, y=grad_norm, name='gradient'))
     fig3.add_trace(go.Scatter(x=t_hist, y=conc_norm, name='αc'))
-    fig3.update_layout(xaxis_title='t*', yaxis_type='log', height=400, title="Energy Balance")
+    fig3.update_layout(xaxis_title='t*', yaxis_type='log', height=400,
+                       title="Bulk vs. Gradient Balance")
     st.plotly_chart(fig3, use_container_width=True)
