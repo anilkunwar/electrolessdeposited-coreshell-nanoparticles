@@ -287,10 +287,17 @@ if run_col.button("Run"):
     run_id = _hash_params(**locals())
     cached = load_run(run_id)
     if cached:
-        st.session_state.results = cached; status.success("Loaded")
+        st.session_state.results = cached
+        status.success("Loaded cached run")
     else:
-        status.info("Running...")
-        ui = {'progress': progress, 'status': status, 'plot': plot_area, 'line': line_area, 'metrics': metrics_area}
+        status.info("Starting simulation…")
+        ui = {
+            'progress': progress,
+            'status': status,
+            'plot': plot_area,
+            'line': line_area,
+            'metrics': metrics_area
+        }
         results = run_simulation_nondim(
             run_id, L, Nx, Ny, eps_tilde, core_radius_frac, core_center,
             M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
@@ -298,11 +305,14 @@ if run_col.button("Run"):
             W_tilde, kBT_tilde, eps_log, ratio_top_factor, ratio_surface_factor, ratio_decay_tilde,
             save_every, ui
         )
-        save_run(run_id, {}, results['x'], results['y'], results['phi_hist'], results['c_hist'], results['t_hist'], results['psi'])
+        save_run(run_id, {}, results['x'], results['y'],
+                 results['phi_hist'], results['c_hist'],
+                 results['t_hist'], results['psi'])
         st.session_state.results = results
-        status.success("Done!")
+        status.success("Finished & saved!")
 
-if stop_col.button("Stop"): st.session_state.stop_sim = True
+if stop_col.button("Stop"):
+    st.session_state.stop_sim = True
 
 # Results
 if st.session_state.results:
