@@ -644,7 +644,7 @@ if st.session_state.snapshots:
                     "phi": phi_s.ravel().astype(np.float32),
                     "c": c_s.ravel().astype(np.float32),
                     "psi": psi_s.ravel().astype(np.float32),
-164                    "material": mat_s.ravel().astype(np.float32)
+                    "material": mat_s.ravel().astype(np.float32)
                 }
                 meshio.write_points_cells(fname, points, [], point_data=point_data)
                 vtus.append(fname)
