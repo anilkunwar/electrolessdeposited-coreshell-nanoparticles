@@ -12,11 +12,16 @@ import sqlite3, pickle, hashlib, zipfile, tempfile
 from pathlib import Path
 import matplotlib.pyplot as plt
 from io import BytesIO
+
 # -------------------- 1. SQLite helper --------------------
 DB_PATH = Path("simulations.db")
+
+
 def _hash_params(**kw):
     s = "".join(f"{k}={v}" for k, v in sorted(kw.items()))
     return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
 def init_db():
     with sqlite3.connect(DB_PATH) as con:
         con.execute(
@@ -27,6 +32,8 @@ def init_db():
                     t_hist BLOB, psi BLOB
                )"""
         )
+
+
 def save_run(run_id, params, x, y, phi_hist, c_hist, phi_l_hist, t_hist, psi):
     with sqlite3.connect(DB_PATH) as con:
         con.execute(
@@ -40,6 +47,8 @@ def save_run(run_id, params, x, y, phi_hist, c_hist, phi_l_hist, t_hist, psi):
              pickle.dumps(phi_l_hist), pickle.dumps(t_hist),
              pickle.dumps(psi)),
         )
+
+
 def load_run(run_id):
     with sqlite3.connect(DB_PATH) as con:
         cur = con.execute(
@@ -51,13 +60,19 @@ def load_run(run_id):
             keys = ["params","x","y","phi_hist","c_hist","phi_l_hist","t_hist","psi"]
             return {k: pickle.loads(v) for k, v in zip(keys, row)}
     return None
+
+
 def list_runs():
     with sqlite3.connect(DB_PATH) as con:
         cur = con.execute("SELECT run_id FROM runs")
         return [r[0][:8] for r in cur.fetchall()]
+
+
 def delete_all():
     DB_PATH.unlink(missing_ok=True)
     init_db()
+
+
 # -------------------- 2. Numba kernels --------------------
 @njit(parallel=True, fastmath=True)
 def _laplacian(arr, dx2):
@@ -68,6 +83,8 @@ def _laplacian(arr, dx2):
             out[i, j] = (arr[i + 1, j] + arr[i - 1, j] +
                          arr[i, j + 1] + arr[i, j - 1] - 4 * arr[i, j]) / dx2
     return out
+
+
 @njit(parallel=True, fastmath=True)
 def _grad_x(arr, dx):
     ny, nx = arr.shape
@@ -76,6 +93,8 @@ def _grad_x(arr, dx):
         for j in prange(1, nx - 1):
             out[i, j] = (arr[i, j + 1] - arr[i, j - 1]) / (2 * dx)
     return out
+
+
 @njit(parallel=True, fastmath=True)
 def _grad_y(arr, dy):
     ny, nx = arr.shape
@@ -84,6 +103,8 @@ def _grad_y(arr, dy):
         for j in prange(nx):
             out[i, j] = (arr[i + 1, j] - arr[i - 1, j]) / (2 * dy)
     return out
+
+
 # -------------------- 3. Live simulation wrapper --------------------
 # This function runs the simulation in Python (Numba kernels used for heavy ops)
 # and updates Streamlit placeholders so the user sees live progress.
@@ -231,17 +252,17 @@ All runs are stored in `simulations.db`. Press **Reset DB** to wipe everything.
 """)
 # ---------- sidebar ----------
 st.sidebar.header("Simulation Parameters")
-Lx = st.sidebar.slider("Lx (cm)", 1e-6, 1e-5, 5e-6, 1e-7)
-Ly = st.sidebar.slider("Ly (cm)", 1e-6, 1e-5, 5e-6, 1e-7)
+Lx = st.sidebar.slider("Lx (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
+Ly = st.sidebar.slider("Ly (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
 Nx = st.sidebar.slider("Nx", 60, 250, 100, 10)
 Ny = st.sidebar.slider("Ny", 60, 250, 100, 10)
-epsilon = st.sidebar.slider("ε (cm)", 1e-8, 1e-7, 5e-8, 1e-8)
+epsilon = st.sidebar.slider("ε (cm)", 1e-8, 1e-7, 5e-8, 1e-8, format="%e")
 y0 = Lx / 2
-M = st.sidebar.number_input("M (cm²/s)", 1e-6, 1e-4, 1e-5, 1e-6)
-dt = st.sidebar.number_input("Δt (s)", 5e-7, 5e-5, 5e-6, 1e-7)
+M = st.sidebar.number_input("M (cm²/s)", 1e-6, 1e-4, 1e-5, 1e-6, format="%e")
+dt = st.sidebar.number_input("Δt (s)", 5e-7, 5e-5, 5e-6, 1e-7, format="%e")
 t_max = st.sidebar.number_input("t_max (s)", 1.0, 20.0, 5.0, 0.5)
-c_bulk = st.sidebar.number_input("c_bulk (mol/cm³)", 1e-6, 1e-4, 5e-5, 1e-6)
-D = st.sidebar.number_input("D (cm²/s)", 5e-6, 2e-5, 1e-5, 1e-6)
+c_bulk = st.sidebar.number_input("c_bulk (mol/cm³)", 1e-6, 1e-4, 5e-5, 1e-6, format="%e")
+D = st.sidebar.number_input("D (cm²/s)", 5e-6, 2e-5, 1e-5, 1e-6, format="%e")
 z, F, R, T = 1, 96485, 8.314, 298
 alpha = st.sidebar.number_input("α", 0.0, 1.0, 0.1, 0.01)
 i0 = st.sidebar.number_input("i₀ (A/m²)", 0.1, 10.0, 0.5, 0.1)
@@ -250,8 +271,8 @@ M_Ag, rho_Ag = 0.10787, 10500
 beta = st.sidebar.slider("β", 0.1, 10.0, 1.0, 0.1)
 a_index = st.sidebar.slider("a-index", -1.0, 1.0, 0.0, 0.1)
 h = st.sidebar.slider("h", 0.0, 1.0, 0.5, 0.1)
-AgNH3_conc = st.sidebar.number_input("[Ag(NH₃)₂]⁺ (mol/cm³)", 1e-6, 1e-4, 5e-5, 1e-6)
-Cu_ion_conc = st.sidebar.number_input("[Cu²⁺] (mol/cm³)", 1e-6, 5e-4, 5e-5, 1e-6)
+AgNH3_conc = st.sidebar.number_input("[Ag(NH₃)₂]⁺ (mol/cm³)", 1e-6, 1e-4, 5e-5, 1e-6, format="%e")
+Cu_ion_conc = st.sidebar.number_input("[Cu²⁺] (mol/cm³)", 1e-6, 5e-4, 5e-5, 1e-6, format="%e")
 eta_chem = st.sidebar.slider("η_chem (V)", 0.1, 0.5, 0.3, 0.05)
 
 save_every = st.sidebar.number_input("Save every N steps", 5, 50, 20, 1)  # Increased default to reduce data
@@ -259,12 +280,12 @@ save_every = st.sidebar.number_input("Save every N steps", 5, 50, 20, 1)  # Incr
 st.sidebar.header("Template")
 template_type = st.sidebar.selectbox("Shape", ["Circle", "Semicircle", "Square", "Parametric"])
 radius = 1e-6
-side_length = st.sidebar.slider("Square side (cm)", 1e-7, 1e-6, 2e-7, 1e-8) if template_type == "Square" else 2e-7
+side_length = st.sidebar.slider("Square side (cm)", 1e-7, 1e-6, 2e-7, 1e-8, format="%e") if template_type == "Square" else 2e-7
 param_func = st.sidebar.text_input(
     "g(x,y,p1,p2)", "(x/p1)**2 + (y/p2)**2 - 1",
     help="g ≤ 0 → ψ = 1") if template_type == "Parametric" else ""
-param1 = st.sidebar.slider("p1", 1e-7, 1e-6, 2e-7, 1e-8) if template_type == "Parametric" else 2e-7
-param2 = st.sidebar.slider("p2", 1e-7, 1e-6, 2e-7, 1e-8) if template_type == "Parametric" else 2e-7
+param1 = st.sidebar.slider("p1", 1e-7, 1e-6, 2e-7, 1e-8, format="%e") if template_type == "Parametric" else 2e-7
+param2 = st.sidebar.slider("p2", 1e-7, 1e-6, 2e-7, 1e-8, format="%e") if template_type == "Parametric" else 2e-7
 
 psi = create_template(Lx, Ly, Nx, Ny, template_type,
                       radius, side_length, param1, param2, param_func)
@@ -399,3 +420,24 @@ if DB_PATH.exists():
     st.download_button("Download DB File", DB_PATH.read_bytes(), "simulations.db", "application/octet-stream")
 else:
     st.info("No DB file found yet.")
+# VTU/PVD Transient Export
+if st.button("Download VTU/PVD Transient (ZIP)"):
+    bio = BytesIO()
+    with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as zf:
+        pvd_content = '<?xml version="1.0"?>\n<VTKFile type="Collection" version="0.1">\n<Collection>\n'
+        for i, tt in enumerate(t_hist):
+            grid = pv.RectilinearGrid(x, y, [0])
+            grid.point_data["phi"] = phi_hist[i].T.ravel(order="F")
+            grid.point_data["c"] = c_hist[i].T.ravel(order="F")
+            grid.point_data["psi"] = psi.T.ravel(order="F")
+            vtu_name = f"ag_t{tt:.2f}.vtu"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".vtu")
+            grid.save(tmp.name, file_format="vtu")
+            zf.write(tmp.name, vtu_name)
+            pvd_content += f'<DataSet timestep="{tt}" file="{vtu_name}"/>\n'
+            tmp.close()
+            Path(tmp.name).unlink()
+        pvd_content += '</Collection>\n</VTKFile>'
+        zf.writestr("transient.pvd", pvd_content)
+    zip_bytes = bio.getvalue()
+    st.download_button("Download VTU/PVD ZIP", zip_bytes, "ag_transient.zip", "application/zip")
