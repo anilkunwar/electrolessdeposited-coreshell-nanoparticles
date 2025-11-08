@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# ELECTROLESS Ag DEPOSITION – SHELL-GROWTH + SPATIAL RATIO
+# ELECTROLESS Ag DEPOSITION – STABLE SHELL GROWTH + BOUNDS
 # --------------------------------------------------------------
 import streamlit as st
 import numpy as np
@@ -92,18 +92,15 @@ def _grad_y(arr, dy):
             out[i, j] = (arr[i + 1, j] - arr[i - 1, j]) / (2 * dy)
     return out
 
-# -------------------- 3. Helper: distance to template edge --------------------
 @njit(parallel=True, fastmath=True)
 def _distance_to_edge(psi, dx, dy):
-    """Signed-distance-like field (positive outside, zero on edge, negative inside)."""
     ny, nx = psi.shape
     dist = np.zeros_like(psi)
     for i in prange(ny):
         for j in prange(nx):
-            if psi[i, j] > 0.5:                     # inside template
+            if psi[i, j] > 0.5:
                 dist[i, j] = -1.0
             else:
-                # look for nearest inside point (simple 4-neighbour search)
                 dmin = 1e9
                 for di in (-1, 0, 1):
                     for dj in (-1, 0, 1):
@@ -115,7 +112,7 @@ def _distance_to_edge(psi, dx, dy):
                 dist[i, j] = dmin if dmin < 1e9 else 1.0
     return dist
 
-# -------------------- 4. Live simulation wrapper --------------------
+# -------------------- 3. Live simulation wrapper --------------------
 def run_simulation_live(
     run_id,
     Lx, Ly, Nx, Ny, epsilon, y0,
@@ -127,7 +124,6 @@ def run_simulation_live(
     save_every,
     ui,
 ):
-  
     dx = Lx / (Nx - 1)
     dy = Ly / (Ny - 1)
     dx2 = dx * dx
@@ -137,26 +133,20 @@ def run_simulation_live(
 
     # ---- initialise phase field ----
     phi = ((1 - psi) * 0.5 * (1 - np.tanh((Y - y0) / epsilon))).astype(np.float32)
+    phi = np.clip(phi, 0.0, 1.0)  # Enforce bounds
 
     # ---- SPATIAL RATIO FIELD -------------------------------------------------
     base_ratio = np.float32(AgNH3_conc / (Cu_ion_conc + 1e-12))
-
-    # 1) Vertical gradient (high at top)
-    vertical = Y / Ly                                   # 0 at bottom, 1 at top
-
-    # 2) Surface enhancement (high near template edge)
-    dist = _distance_to_edge(psi, dx, dy)               # >0 outside, <0 inside
-    surface_enh = np.exp(-np.abs(dist) / ratio_decay_len)  # peaks at edge
-
-    # Combine:  ratio = base * (a*vertical + b*surface)  with a+b≈1
+    vertical = Y / Ly
+    dist = _distance_to_edge(psi, dx, dy)
+    surface_enh = np.exp(-np.abs(dist) / ratio_decay_len)
     ratio_field = base_ratio * (
         (1.0 - ratio_surface_factor) * (0.2 + 0.8 * vertical) +
         ratio_surface_factor * surface_enh
     )
-    # clamp to avoid numerical blow-up
-    ratio_field = np.clip(ratio_field, 0.1 * base_ratio, 10.0 * base_ratio)
+    ratio_field = np.clip(ratio_field, 0.1 * base_ratio, 8.0 * base_ratio)
 
-    # ---- concentration field (no ratio here – it will be applied in i_loc) ----
+    # ---- concentration field ----
     c = (c_bulk * vertical * (1 - phi) * (1 - psi)).astype(np.float32)
 
     # pre-compute constants
@@ -170,7 +160,7 @@ def run_simulation_live(
     save_step = max(1, save_every)
     phi_old = phi.copy()
 
-    # UI placeholders
+    # UI
     progress_bar = ui['progress']
     status = ui['status']
     plot_area = ui['plot']
@@ -185,6 +175,7 @@ def run_simulation_live(
         phi_y = _grad_y(phi, dy)
         grad_phi_mag = np.sqrt(phi_x**2 + phi_y**2 + 1e-30)
         delta_int = 6 * phi * (1 - phi) * (1 - psi) * grad_phi_mag
+        delta_int = np.clip(delta_int, 0.0, 6.0 / epsilon)  # Prevent blow-up
 
         phi_xx = _laplacian(phi, dx2)
         f_prime_ed = beta * 2 * phi * (1 - phi) * (1 - 2 * phi)
@@ -198,11 +189,16 @@ def run_simulation_live(
         c_mol = c * 1e6 * (1 - phi) * (1 - psi) * ratio_field
         i_loc = i0 * (c_mol / c_ref) * np.exp(0.5 * Fz * eta_chem / RT)
         i_loc = i_loc * delta_int
+        i_loc = np.clip(i_loc, -1e5, 1e5)  # Safety cap
 
-        # ---- phase-field evolution ----
+        # ---- phase-field evolution (BOUNDED) ----
         u = - (i_loc / Fz) * MAg_rho
         advection = u * (1 - psi) * phi_y
-        phi += dt * (M * mu_xx - advection)
+        dphi_dt = M * mu_xx - advection
+
+        phi_new = phi + dt * dphi_dt
+        phi_new = np.clip(phi_new, 0.0, 1.0)
+        phi = 0.95 * phi_new + 0.05 * phi  # Damped update
 
         # ---- concentration evolution ----
         c_eff = (1 - phi) * (1 - psi) * c
@@ -210,8 +206,9 @@ def run_simulation_live(
         sink = - i_loc * delta_int / (Fz * 1e6)
         c_t = D * c_xx + sink
         c += dt * c_t
+        c = np.clip(c, 0.0, c_bulk * 2.0)
 
-        # ---- BCs (preserve vertical gradient) ----
+        # ---- BCs ----
         c[:, 0] = 0.0
         c[:, -1] = c_bulk * vertical[:, -1]
 
@@ -231,19 +228,19 @@ def run_simulation_live(
 
                 mid_x = Nx // 2
                 fig2, ax = plt.subplots()
-                ax.plot(y, phi_hist[-1][mid_x, :], label='φ')
+                ax.plot(y, phi_hist[-1][mid_x, :], label='φ (Ag)')
                 ax.plot(y, ratio_field[mid_x, :], '--', label='ratio')
                 ax.set_xlabel('y (cm)'); ax.set_title(f't={t:.3f}s')
                 ax.legend(); ax.grid(True)
                 line_area.pyplot(fig2); plt.close(fig2)
 
                 metrics_area.metric('t (s)', f"{t:.3f}")
-                metrics_area.metric('max(φ)', f"{phi.max():.4f}")
-                metrics_area.metric('mean(φ)', f"{phi.mean():.4f}")
+                metrics_area.metric('φ range', f"[{phi.min():.3f}, {phi.max():.3f}]")
+                metrics_area.metric('max(i_loc)', f"{i_loc.max():.2e}")
             except Exception:
                 pass
 
-        # convergence / early stop
+        # convergence
         if step > 100 and np.max(np.abs(phi - phi_old)) < 1e-6:
             status.info(f"Converged at t={t:.4f}s")
             break
@@ -264,7 +261,7 @@ def run_simulation_live(
     }
     return results
 
-# -------------------- 5. Template geometry --------------------
+# -------------------- 4. Template geometry --------------------
 def create_template(Lx, Ly, Nx, Ny, template_type,
                     radius, side_length, param1, param2, param_func):
     x = np.linspace(0, Lx, Nx)
@@ -287,15 +284,15 @@ def create_template(Lx, Ly, Nx, Ny, template_type,
             st.error(f"Parametric error: {e}")
     return psi
 
-# -------------------- 6. UI ------------------------------------
-st.title("Electroless Ag Shell Growth – Spatial Ratio Control")
+# -------------------- 5. UI ------------------------------------
+st.title("Electroless Ag Shell Growth – Stable & Bounded")
 st.markdown("""
-**2-D phase-field** with **spatially varying [Ag]/[Cu] ratio** → controlled shell growth.  
-Stop button works live. All runs cached in `simulations.db`.
+**2-D phase-field** with **bounded φ ∈ [0,1]** and **spatial [Ag]/[Cu] control**.  
+Live plots, stop button, caching, VTK export.
 """)
 
 # ---------- sidebar ----------
-st.sidebar.header("Domain & Discretisation")
+st.sidebar.header("Domain")
 Lx = st.sidebar.slider("Lx (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
 Ly = st.sidebar.slider("Ly (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
 Nx = st.sidebar.slider("Nx", 60, 250, 120, 10)
@@ -304,14 +301,14 @@ epsilon = st.sidebar.slider("ε (cm)", 1e-8, 1e-7, 5e-8, 1e-8, format="%e")
 y0 = Lx / 2
 
 st.sidebar.header("Physics")
-M = st.sidebar.number_input("M (cm²/s)", 1e-6, 1e-4, 1e-5, 1e-6, format="%e")
-dt = st.sidebar.number_input("Δt (s)", 5e-7, 5e-5, 5e-6, 1e-7, format="%e")
-t_max = st.sidebar.number_input("t_max (s)", 1.0, 20.0, 6.0, 0.5)
+M = st.sidebar.number_input("M (cm²/s)", 1e-6, 1e-5, 3e-6, 1e-7, format="%e")
+dt = st.sidebar.number_input("Δt (s)", 1e-7, 5e-6, 1e-6, 1e-7, format="%e")
+t_max = st.sidebar.number_input("t_max (s)", 1.0, 20.0, 8.0, 0.5)
 c_bulk = st.sidebar.number_input("c_bulk (mol/cm³)", 1e-6, 1e-4, 5e-5, 1e-6, format="%e")
 D = st.sidebar.number_input("D (cm²/s)", 5e-6, 2e-5, 1e-5, 1e-6, format="%e")
 z, F, R, T = 1, 96485, 8.314, 298
 alpha = st.sidebar.number_input("α", 0.0, 1.0, 0.1, 0.01)
-i0 = st.sidebar.number_input("i₀ (A/m²)", 0.1, 10.0, 0.5, 0.1)
+i0 = st.sidebar.number_input("i₀ (A/m²)", 0.1, 2.0, 0.8, 0.1)
 c_ref = st.sidebar.number_input("c_ref (mol/m³)", 100, 2000, 1000, 100)
 M_Ag, rho_Ag = 0.10787, 10500
 beta = st.sidebar.slider("β", 0.1, 10.0, 1.0, 0.1)
@@ -323,18 +320,16 @@ AgNH3_conc = st.sidebar.number_input("[Ag(NH₃)₂]⁺ (mol/cm³)", 1e-6, 1e-4,
 Cu_ion_conc = st.sidebar.number_input("[Cu²⁺] (mol/cm³)", 1e-6, 5e-4, 5e-5, 1e-6, format="%e")
 eta_chem = st.sidebar.slider("η_chem (V)", 0.1, 0.5, 0.3, 0.05)
 
-st.sidebar.header("Ratio Gradient Control")
-ratio_top_factor = st.sidebar.slider("Top-weight (vertical)", 0.0, 1.0, 0.8, 0.05,
-                                     help="1 → ratio max at top, 0 → uniform")
-ratio_surface_factor = st.sidebar.slider("Surface-boost", 0.0, 1.0, 0.6, 0.05,
-                                         help="1 → strong peak at template edge")
-ratio_decay_len = st.sidebar.slider("Decay length (cm)", 1e-8, 5e-7, 1e-7, 1e-8, format="%e")
+st.sidebar.header("Ratio Gradient")
+ratio_top_factor = st.sidebar.slider("Top-weight", 0.0, 1.0, 0.7, 0.05)
+ratio_surface_factor = st.sidebar.slider("Surface-boost", 0.0, 1.0, 0.6, 0.05)
+ratio_decay_len = st.sidebar.slider("Decay length (cm)", 1e-8, 5e-7, 1.5e-7, 1e-8, format="%e")
 
-save_every = st.sidebar.number_input("Save every N steps", 5, 50, 20, 1)
+save_every = st.sidebar.number_input("Save every N steps", 5, 50, 15, 1)
 
 st.sidebar.header("Template")
 template_type = st.sidebar.selectbox("Shape", ["Circle", "Semicircle", "Square", "Parametric"])
-radius = 1e-6
+radius = 2e-7
 side_length = st.sidebar.slider("Square side (cm)", 1e-7, 1e-6, 2e-7, 1e-8, format="%e") if template_type == "Square" else 2e-7
 param_func = st.sidebar.text_input("g(x,y,p1,p2)", "(x/p1)**2 + (y/p2)**2 - 1") if template_type == "Parametric" else ""
 param1 = st.sidebar.slider("p1", 1e-7, 1e-6, 2e-7, 1e-8, format="%e") if template_type == "Parametric" else 2e-7
@@ -349,7 +344,7 @@ if "run_id" not in st.session_state:   st.session_state.run_id = None
 if "results" not in st.session_state:  st.session_state.results = None
 if "stop_sim" not in st.session_state: st.session_state.stop_sim = False
 
-# UI placeholders
+# UI
 col1, col2 = st.columns([3, 1])
 plot_area = col1.container()
 line_area = col1.container()
@@ -407,15 +402,15 @@ if stop_col.button("Stop Simulation"):
 if st.sidebar.button("Show saved run IDs"):
     ids = list_runs()
     if ids:
-        st.sidebar.write("**Saved runs (first 8 chars):**")
+        st.sidebar.write("**Saved runs:**")
         for i in ids: st.sidebar.code(i)
     else:
         st.sidebar.info("No runs yet.")
-if st.sidebar.button("Reset DB (delete all)"):
+if st.sidebar.button("Reset DB"):
     delete_all()
     st.session_state.run_id = None
     st.session_state.results = None
-    st.success("Database cleared.")
+    st.success("DB cleared.")
 
 # -------------------- Results --------------------
 if st.session_state.results:
@@ -449,7 +444,7 @@ if st.session_state.results:
     ax.grid(True)
     st.pyplot(fig2); plt.close(fig2)
 
-    # VTR export (selected timestep)
+    # VTR export
     def vtr_bytes(phi, c, psi, x, y):
         grid = pv.RectilinearGrid(x, y, [0])
         grid.point_data["phi"] = phi.T.ravel(order="F")
@@ -462,7 +457,6 @@ if st.session_state.results:
     st.download_button(f"VTR t={t_hist[time_idx]:.2f}s", vtr,
                        f"ag_{t_hist[time_idx]:.2f}.vtr", "application/octet-stream")
 
-    # ZIP of all VTRs
     if st.button("Download All VTRs (ZIP)"):
         bio = BytesIO()
         with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as zf:
