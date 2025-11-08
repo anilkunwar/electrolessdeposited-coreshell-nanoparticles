@@ -93,7 +93,7 @@ def free_energy_derivative_nondim(phi, psi, a_index, beta_tilde, h, W_tilde, kBT
 
 # -------------------- 4. Simulation (Non-dimensional) --------------------
 def run_simulation_nondim(
-    run_id, L,, Nx, Ny, eps_tilde, core_radius_frac, core_center,
+    run_id, L, Nx, Ny, eps_tilde, core_radius_frac, core_center,
     M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
     alpha_tilde, i0_tilde, c_ref_tilde, beta_tilde, a_index, h,
     W_tilde, kBT_tilde, eps_log, ratio_top_factor, ratio_surface_factor, ratio_decay_tilde,
