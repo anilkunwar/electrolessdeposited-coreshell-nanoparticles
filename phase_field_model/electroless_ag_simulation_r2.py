@@ -227,8 +227,8 @@ st.markdown("**Shell-first, sharp interior, smooth interfaces, diagnostics**")
 
 st.sidebar.header("Domain")
 L  = st.sidebar.slider("L (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
-Nx = st.sidebar.slider("Nx", 80, 300, 160, 10)
-Ny = st.sidebar.slider("Ny", 80, 300, 160, 10)
+Nx = st.sidebar.slider("Nx", 10, 300, 50, 10)
+Ny = st.sidebar.slider("Ny", 10, 300, 50, 10)
 
 st.sidebar.header("Core & Shell")
 core_radius_frac = st.sidebar.slider("Core r/L", 0.31, 0.7, 0.5, 0.01)
