@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# ELECTRODEPOSITION Ag – CORRECT PHYSICS, STABLE SHELL GROWTH
+# ELECTROLESS Ag – SHELL-FIRST INITIALIZATION (STABLE)
 # --------------------------------------------------------------
 import streamlit as st
 import numpy as np
@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 
 # -------------------- 1. SQLite --------------------
-DB_PATH = Path("simulations_electrodeposition.db")
+DB_PATH = Path("simulations_shellfirst.db")
 def _hash_params(**kw):
     s = "".join(f"{k}={v}" for k, v in sorted(kw.items()))
     return hashlib.sha256(s.encode()).hexdigest()[:16]
@@ -21,22 +21,21 @@ def init_db():
     with sqlite3.connect(DB_PATH) as con:
         con.execute("""CREATE TABLE IF NOT EXISTS runs (
                     run_id TEXT PRIMARY KEY, params BLOB, x BLOB, y BLOB,
-                    phi_hist BLOB, c_hist BLOB, phi_l_hist BLOB, t_hist BLOB, psi BLOB
+                    phi_hist BLOB, c_hist BLOB, t_hist BLOB, psi BLOB
                )""")
 
-def save_run(run_id, params, x, y, phi_hist, c_hist, phi_l_hist, t_hist, psi):
+def save_run(run_id, params, x, y, phi_hist, c_hist, t_hist, psi):
     with sqlite3.connect(DB_PATH) as con:
-        con.execute("""INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?)""",
+        con.execute("""INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?)""",
                     (run_id, pickle.dumps(params), pickle.dumps(x), pickle.dumps(y),
-                     pickle.dumps(phi_hist), pickle.dumps(c_hist), pickle.dumps(phi_l_hist),
-                     pickle.dumps(t_hist), pickle.dumps(psi)))
+                     pickle.dumps(phi_hist), pickle.dumps(c_hist), pickle.dumps(t_hist), pickle.dumps(psi)))
 
 def load_run(run_id):
     with sqlite3.connect(DB_PATH) as con:
         cur = con.execute("SELECT * FROM runs WHERE run_id=?", (run_id,))
         row = cur.fetchone()
         if row:
-            keys = ["params","x","y","phi_hist","c_hist","phi_l_hist","t_hist","psi"]
+            keys = ["params","x","y","phi_hist","c_hist","t_hist","psi"]
             return {k: pickle.loads(v) for k, v in zip(keys, row[1:])}
     return None
 
@@ -79,12 +78,13 @@ def f_prime_double_well(phi, psi, a_index, beta_tilde, h):
                             (1.0 - a_index) * psi[i,j] * harm[i,j] / 8.0)
     return f_prime
 
-# -------------------- 4. ELECTRODEPOSITION SIMULATION --------------------
+# -------------------- 4. SHELL-FIRST SIMULATION --------------------
 def run_simulation(
-    run_id, L, Nx, Ny, eps_tilde, core_radius_frac, core_center,
+    run_id, L, Nx, Ny, eps_tilde, core_radius_frac, shell_thickness_frac, core_center,
     M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
-    Phi_anode_tilde, alpha_tilde, i0_tilde, c_ref_tilde,
-    beta_tilde, a_index, h, save_every, ui
+    k0_tilde, c_ref_tilde, alpha_tilde, beta_tilde, a_index, h,
+    ratio_top_factor, ratio_surface_factor, ratio_decay_tilde,
+    save_every, ui
 ):
     h = L / (Nx - 1); h2 = h * h
     x = np.linspace(0, L, Nx, dtype=np.float32)
@@ -94,31 +94,40 @@ def run_simulation(
     # --- Core template ---
     r_core = core_radius_frac * L
     cx, cy = core_center[0] * L, core_center[1] * L
-    psi = (((X - cx)**2 + (Y - cy)**2) <= r_core**2).astype(np.float32)
+    dist_to_center = np.sqrt((X - cx)**2 + (Y - cy)**2)
+    psi = (dist_to_center <= r_core).astype(np.float32)
     core_area = np.sum(psi) * h * h / (L * L)
     st.write(f"**Core: {core_area:.1%} of domain**")
 
-    # --- Initial fields ---
-    dist = np.sqrt((X-cx)**2 + (Y-cy)**2) - r_core
-    phi = 0.5 * (1.0 - np.tanh(3.0 * dist / eps_tilde))
-    phi = np.clip(phi, 1e-6, 1.0 - 1e-6)
+    # --- SHELL: thickness = 1/4 * r_core ---
+    r_inner = r_core
+    r_outer = r_core * (1.0 + shell_thickness_frac)
+    shell_mask = (dist_to_center > r_inner) & (dist_to_center <= r_outer)
+    phi = np.zeros_like(dist_to_center, dtype=np.float32)
+    phi[shell_mask] = 1.0  # phi = 1 in shell
+    phi[dist_to_center <= r_core] = 0.0  # phi = 0 in core
+    phi = np.clip(phi, 0.0, 1.0)
 
+    # --- Concentration ---
     c = c_bulk_tilde * (Y / L) * (1.0 - phi) * (1.0 - psi)
-    phi_l = (Y / L) * Phi_anode_tilde  # Linear potential
 
-    # --- Constants ---
-    F_tilde = 1.0; R_tilde = 1.0; T_tilde = 1.0  # non-dim
-    z = 1
-    MAg_rho_tilde = 1.0
+    # --- Ratio field (surface boost) ---
+    dist_to_shell = np.abs(dist_to_center - (r_inner + r_outer)/2)
+    surface = np.exp(-dist_to_shell / ratio_decay_tilde)
+    vertical = Y / L
+    ratio = (1.0 - ratio_surface_factor) * (0.2 + 0.8 * vertical) + ratio_surface_factor * surface
+    ratio = np.clip(ratio, 0.1, 8.0)
 
     # --- Storage ---
-    phi_hist, c_hist, phi_l_hist, t_hist = [], [], [], []
+    phi_hist, c_hist, t_hist = [], [], []
     n_steps = int(np.ceil(t_max_tilde / dt_tilde))
     save_step = max(1, save_every)
     phi_old = phi.copy()
 
     progress = ui['progress']; status = ui['status']
     plot = ui['plot']; line = ui['line']; metrics = ui['metrics']
+
+    MAg_rho_tilde = 1.0  # non-dim molar volume
 
     for step in range(n_steps + 1):
         t = step * dt_tilde
@@ -140,35 +149,26 @@ def run_simulation(
         mu = -eps_tilde**2 * phi_xx + f_prime - alpha_tilde * c
         mu_xx = _laplacian(mu, h2)
 
-        # --- Butler-Volmer current ---
-        eta = -phi_l
-        c_mol = c * (1.0 - phi) * (1.0 - psi)
-        exp_c = np.exp(1.5 * F_tilde * eta / (R_tilde * T_tilde))
-        exp_a = np.exp(-0.5 * F_tilde * eta / (R_tilde * T_tilde))
-        i_loc = i0_tilde * (exp_c * c_mol / c_ref_tilde - exp_a)
+        # --- Electroless current (reduction only) ---
+        c_mol = c * (1.0 - phi) * (1.0 - psi) * ratio
+        i_loc = k0_tilde * c_mol / c_ref_tilde
         i_loc = i_loc * delta_int
-        i_loc = np.clip(i_loc, -1e3, 1e3)
+        i_loc = np.clip(i_loc, 0.0, 1e3)  # reduction only
 
-        # --- Advection velocity (volume addition) ---
-        u = -i_loc / (z * F_tilde) * MAg_rho_tilde
+        # --- Advection (outward growth) ---
+        u = i_loc * MAg_rho_tilde  # positive → outward
         advection = u * (1.0 - psi) * phi_y
 
         # --- Phase evolution ---
-        dphi_dt = M_tilde * mu_xx - advection
+        dphi_dt = M_tilde * mu_xx + advection  # +advection → grow outward
         phi += dt_tilde * dphi_dt
         phi = np.clip(phi, 0.0, 1.0)
 
         # --- Concentration ---
         c_eff = (1.0 - phi) * (1.0 - psi) * c
         c_xx = _laplacian(c_eff, h2)
-        c_y = _grad_y(c_eff, h)
-
-        # Electromigration: (z F D / RT) * E * c_y
-        E_field = Phi_anode_tilde / L
-        migration = (z * F_tilde * D_tilde / (R_tilde * T_tilde)) * E_field * c_y
-
-        sink = -i_loc * delta_int / (z * F_tilde)
-        c += dt_tilde * (D_tilde * c_xx + migration + sink)
+        sink = -i_loc * delta_int
+        c += dt_tilde * (D_tilde * c_xx + sink)
         c = np.clip(c, 0.0, c_bulk_tilde * 2)
 
         # BCs
@@ -179,7 +179,6 @@ def run_simulation(
         if step % save_step == 0 or step == n_steps:
             phi_hist.append(phi.copy())
             c_hist.append(c.copy())
-            phi_l_hist.append(phi_l.copy())
             t_hist.append(t)
 
             try:
@@ -213,21 +212,21 @@ def run_simulation(
     return {
         'x': x, 'y': y,
         'phi_hist': np.array(phi_hist), 'c_hist': np.array(c_hist),
-        'phi_l_hist': np.array(phi_l_hist), 't_hist': np.array(t_hist),
-        'psi': psi
+        't_hist': np.array(t_hist), 'psi': psi
     }
 
 # -------------------- 5. UI --------------------
-st.title("Electrodeposition Ag – Correct Physics")
-st.markdown("**Higher driving force far from template → stable outward shell**")
+st.title("Electroless Ag – Shell-First Initialization")
+st.markdown("**Initial shell (thickness = ¼ r_core) with ϕ = 1, grows outward**")
 
 st.sidebar.header("Domain")
 L = st.sidebar.slider("L (cm)", 1e-6, 1e-5, 5e-6, 1e-7, format="%e")
 Nx = st.sidebar.slider("Nx", 100, 300, 180, 10)
 Ny = st.sidebar.slider("Ny", 100, 300, 180, 10)
 
-st.sidebar.header("Core Template")
-core_radius_frac = st.sidebar.slider("Core r/L", 0.31, 0.7, 0.55, 0.01)
+st.sidebar.header("Core & Shell")
+core_radius_frac = st.sidebar.slider("Core r/L", 0.31, 0.7, 0.5, 0.01)
+shell_thickness_frac = st.sidebar.slider("Shell thickness / r_core", 0.1, 0.5, 0.25, 0.01)
 core_center_x = st.sidebar.slider("Core x/L", 0.2, 0.8, 0.5, 0.01)
 core_center_y = st.sidebar.slider("Core y/L", 0.2, 0.8, 0.5, 0.01)
 
@@ -241,9 +240,8 @@ t_max_tilde = st.sidebar.number_input("t*_max", 1.0, 30.0, 15.0, 0.5)
 D_tilde = st.sidebar.number_input("D*", 0.01, 1.0, 0.1, 0.01)
 c_bulk_tilde = st.sidebar.number_input("c*_bulk", 0.1, 10.0, 1.0, 0.1)
 
-st.sidebar.header("Electrochemistry")
-Phi_anode_tilde = st.sidebar.slider("Φ*_anode", 0.1, 5.0, 2.0, 0.1)
-i0_tilde = st.sidebar.number_input("i₀*", 0.01, 1.0, 0.1, 0.01)
+st.sidebar.header("Electroless Reaction")
+k0_tilde = st.sidebar.number_input("k₀* (reaction rate)", 0.01, 1.0, 0.1, 0.01)
 c_ref_tilde = st.sidebar.number_input("c*_ref", 0.1, 10.0, 1.0, 0.1)
 
 st.sidebar.header("Coupling")
@@ -251,6 +249,11 @@ alpha_tilde = st.sidebar.number_input("α*", 0.0, 10.0, 1.0, 0.1)
 beta_tilde = st.sidebar.slider("β*", 0.1, 10.0, 1.0, 0.1)
 a_index = st.sidebar.slider("a-index", -1.0, 1.0, 0.0, 0.1)
 h = st.sidebar.slider("h", 0.0, 1.0, 0.5, 0.1)
+
+st.sidebar.header("Ratio Field")
+ratio_top_factor = st.sidebar.slider("Top-weight", 0.0, 1.0, 0.7, 0.05)
+ratio_surface_factor = st.sidebar.slider("Surface-boost", 0.0, 1.0, 0.5, 0.05)
+ratio_decay_tilde = st.sidebar.slider("Decay λ*/L", 0.01, 0.2, 0.05, 0.01)
 
 save_every = st.sidebar.number_input("Save every", 10, 100, 30, 5)
 
@@ -273,13 +276,14 @@ if run_col.button("Run"):
         status.info("Running...")
         ui = {'progress': progress, 'status': status, 'plot': plot_area, 'line': line_area, 'metrics': metrics_area}
         results = run_simulation(
-            run_id, L, Nx, Ny, eps_tilde, core_radius_frac, (core_center_x, core_center_y),
+            run_id, L, Nx, Ny, eps_tilde, core_radius_frac, shell_thickness_frac, (core_center_x, core_center_y),
             M_tilde, dt_tilde, t_max_tilde, D_tilde, c_bulk_tilde,
-            Phi_anode_tilde, alpha_tilde, i0_tilde, c_ref_tilde,
-            beta_tilde, a_index, h, save_every, ui
+            k0_tilde, c_ref_tilde, alpha_tilde, beta_tilde, a_index, h,
+            ratio_top_factor, ratio_surface_factor, ratio_decay_tilde,
+            save_every, ui
         )
         save_run(run_id, {}, results['x'], results['y'], results['phi_hist'], results['c_hist'],
-                 results['phi_l_hist'], results['t_hist'], results['psi'])
+                 results['t_hist'], results['psi'])
         st.session_state.results = results
         status.success("Done!")
 
@@ -289,13 +293,13 @@ if stop_col.button("Stop"): st.session_state.stop_sim = True
 if st.session_state.results:
     r = st.session_state.results
     x, y = r['x'], r['y']
-    phi_hist, c_hist, phi_l_hist = r['phi_hist'], r['c_hist'], r['phi_l_hist']
+    phi_hist, c_hist = r['phi_hist'], r['c_hist']
     t_hist = r['t_hist']; psi = r['psi']
 
     st.subheader("Results")
-    time_idx = st.slider("Time t*", 0, len(t_hist)-1, len(t_hist)//2)
-    var = st.selectbox("Field", ["ϕ", "c", "ϕ_l", "ψ"])
-    data = phi_hist[time_idx] if var == "ϕ" else c_hist[time_idx] if var == "c" else phi_l_hist[time_idx] if var == "ϕ_l" else psi
+    time_idx = st.slider("Time t*", 0, len(t_hist)-1, 0)
+    var = st.selectbox("Field", ["ϕ", "c", "ψ"])
+    data = phi_hist[time_idx] if var == "ϕ" else c_hist[time_idx] if var == "c" else psi
 
     fig = go.Figure(go.Contour(z=data.T, x=x/L, y=y/L, contours_coloring='heatmap',
                                colorbar=dict(title=var)))
