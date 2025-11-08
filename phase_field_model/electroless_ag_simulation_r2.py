@@ -118,7 +118,7 @@ def _distance_to_edge(psi, dx, dy):
 # -------------------- 4. Live simulation wrapper --------------------
 def run_simulation_live(
     run_id,
-    Lx, Ly,  Ly, Nx, Ny, epsilon, y0,
+    Lx, Ly, Nx, Ny, epsilon, y0,
     M, dt, t_max, c_bulk, D,
     z, F, R, T, alpha, i0, c_ref,
     M_Ag, rho_Ag, beta, a_index, h,
@@ -127,6 +127,7 @@ def run_simulation_live(
     save_every,
     ui,
 ):
+  
     dx = Lx / (Nx - 1)
     dy = Ly / (Ny - 1)
     dx2 = dx * dx
