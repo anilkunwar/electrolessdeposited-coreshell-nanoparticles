@@ -139,7 +139,7 @@ def run_simulation(
         phi_x = _grad_x(phi, h); phi_y = _grad_y(phi, h)
         grad_phi = np.sqrt(phi_x**2 + phi_y**2 + 1e-30)
         delta_int = 6.0 * phi * (1.0 - phi) * (1.0 - psi) * grad_phi
-        delta_int = np.clip(delta_int, 0.0 streak, 6.0 / eps_tilde)
+        delta_int = np.clip(delta_int, 0.0, 6.0 / eps_tilde)
 
         phi_xx = _laplacian(phi, h2)
 
