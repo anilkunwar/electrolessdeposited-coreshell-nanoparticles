@@ -1,5 +1,5 @@
 # --------------------------------------------------------------
-# ELECTROLESS Ag – SHELL-FIRST + BALANCED BULK/INTERFACE
+# ELECTROLESS Ag – SHELL-FIRST + BALANCED BULK/INTERFACE (FULLY FIXED)
 # --------------------------------------------------------------
 import streamlit as st
 import numpy as np
@@ -9,7 +9,7 @@ import pyvista as pv
 import sqlite3, pickle, hashlib
 from pathlib import Path
 import matplotlib.pyplot as plt
-from io import BytesIO
+import pandas as pd
 
 # -------------------- 1. SQLite --------------------
 DB_PATH = Path("simulations_balanced.db")
@@ -21,8 +21,7 @@ def init_db():
     with sqlite3.connect(DB_PATH) as con:
         con.execute("""CREATE TABLE IF NOT EXISTS runs (
                     run_id TEXT PRIMARY KEY, params BLOB, x BLOB, y BLOB,
-                    phi_hist BLOB, c_hist BLOB, t_hist BLOB, psi BLOB,
-                    diag BLOB
+                    phi_hist BLOB, c_hist BLOB, t_hist BLOB, psi BLOB, diag BLOB
                )""")
 
 def save_run(run_id, params, x, y, phi_hist, c_hist, t_hist, psi, diag):
@@ -70,11 +69,10 @@ def _grad_y(arr, h):
 # -------------------- 3. DOUBLE-WELL (bulk) --------------------
 @njit(parallel=True, fastmath=True)
 def f_prime_bulk(phi, psi, a_index, beta_tilde, h):
-    """Only the double-well + template harmonic part."""
     ny, nx = phi.shape
     f = np.zeros_like(phi)
-    dw  = 2.0 * beta_tilde * phi * (1.0 - phi) * (1.0 - 2.0 * phi)   # bulk
-    harm = 2.0 * beta_tilde * (phi - h)                               # template
+    dw  = 2.0 * beta_tilde * phi * (1.0 - phi) * (1.0 - 2.0 * phi)
+    harm = 2.0 * beta_tilde * (phi - h)
     for i in prange(ny):
         for j in prange(nx):
             f[i,j] = ((1.0 + a_index) * (1.0 - psi[i,j]) * dw[i,j] / 8.0 +
@@ -100,20 +98,19 @@ def run_simulation(
     dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
     psi  = (dist <= r_core).astype(np.float32)
 
-    # ---- Shell (sharp inside, smoothed interfaces) ----
+    # ---- Shell: sharp interior, smooth interfaces ----
     r_inner = r_core
     r_outer = r_core * (1.0 + shell_thickness_frac)
-    # sharp interior
     phi = np.where(dist <= r_inner, 0.0,
             np.where(dist <= r_outer, 1.0, 0.0)).astype(np.float32)
-    # smooth the *two* interfaces with tanh of width eps
-    phi = phi * (1.0 - 0.5*(1.0-np.tanh((dist-r_inner)/eps_tilde))) \
-            * (1.0 - 0.5*(1.0+np.tanh((dist-r_outer)/eps_tilde)))
+    # Smooth interfaces
+    phi = phi * (1.0 - 0.5*(1.0 - np.tanh((dist - r_inner) / eps_tilde))) \
+            * (1.0 - 0.5*(1.0 + np.tanh((dist - r_outer) / eps_tilde)))
     phi = np.clip(phi, 0.0, 1.0)
 
     # ---- Concentration & ratio ----
     c = c_bulk_tilde * (Y / L) * (1.0 - phi) * (1.0 - psi)
-    surface = np.exp(-np.abs(dist - (r_inner+r_outer)/2) / ratio_decay_tilde)
+    surface = np.exp(-np.abs(dist - (r_inner + r_outer)/2) / ratio_decay_tilde)
     vertical = Y / L
     ratio = (1.0 - ratio_surface_factor)*(0.2 + 0.8*vertical) + ratio_surface_factor*surface
     ratio = np.clip(ratio, 0.1, 8.0)
@@ -131,21 +128,26 @@ def run_simulation(
     for step in range(n_steps + 1):
         t = step * dt_tilde
 
-        # ---- BCs ----
-        phi[:,0] = phi[:,1]; phi[:,-1] = phi[:,-2]
-        phi[0,:] = phi[1,:]; phi[-1,:] = phi[-2:]
-
-        # ---- Gradients & interface indicator ----
-        phi_x = _grad_x(phi, h); phi_y = _grad_y(phi, h)
+        # ---- Compute gradients BEFORE BCs ----
+        phi_x = _grad_x(phi, h)
+        phi_y = _grad_y(phi, h)
         grad_phi = np.sqrt(phi_x**2 + phi_y**2 + 1e-30)
+
+        # ---- Interface indicator ----
         delta_int = 6.0 * phi * (1.0 - phi) * (1.0 - psi) * grad_phi
         delta_int = np.clip(delta_int, 0.0, 6.0 / eps_tilde)
+
+        # ---- Apply Neumann BCs AFTER gradients ----
+        phi[0, :]  = phi[1, :]
+        phi[-1, :] = phi[-2, :]
+        phi[:, 0]  = phi[:, 1]
+        phi[:, -1] = phi[:, -2]
 
         phi_xx = _laplacian(phi, h2)
 
         # ---- Free-energy terms ----
-        f_bulk = f_prime_bulk(phi, psi, a_index, beta_tilde, h)          # bulk
-        grad_term = -W_tilde * eps_tilde**2 * phi_xx                     # interfacial
+        f_bulk = f_prime_bulk(phi, psi, a_index, beta_tilde, h)
+        grad_term = -W_tilde * eps_tilde**2 * phi_xx
         mu = grad_term + f_bulk - alpha_tilde * c
         mu_xx = _laplacian(mu, h2)
 
@@ -216,7 +218,7 @@ def run_simulation(
         'x': x, 'y': y,
         'phi_hist': np.array(phi_hist), 'c_hist': np.array(c_hist),
         't_hist': np.array(t_hist), 'psi': psi,
-        'diag': np.array(diag_hist)   # (bulk, grad, conc) per saved step
+        'diag': np.array(diag_hist)
     }
 
 # -------------------- 5. UI --------------------
@@ -303,7 +305,7 @@ if st.session_state.results:
     x, y = r['x'], r['y']
     phi_hist, c_hist = r['phi_hist'], r['c_hist']
     t_hist = r['t_hist']; psi = r['psi']
-    diag = r['diag']                     # (bulk, grad, conc) per saved step
+    diag = r['diag']
 
     st.subheader("Results")
     time_idx = st.slider("Time t*", 0, len(t_hist)-1, 0, format="t* = %.3f")
@@ -316,30 +318,27 @@ if st.session_state.results:
     fig.update_layout(height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---- Line plot ----
+    # Line plot
     mid = Nx//2
     fig2, ax = plt.subplots()
     ax.plot(y/L, data[mid,:], label=var)
     ax.set_xlabel('y/L'); ax.grid(True); ax.legend()
     st.pyplot(fig2); plt.close(fig2)
 
-    # ---- Diagnostics ----
+    # Diagnostics
     st.subheader("Energy-Term Balance (L² norms)")
     bulk_norm, grad_norm, conc_norm = diag.T
-    df = {
-        "t*": t_hist[::save_every],
+    df = pd.DataFrame({
+        "t*": t_hist,
         "‖bulk‖₂": bulk_norm,
         "‖grad‖₂": grad_norm,
         "‖αc‖": conc_norm
-    }
-    import pandas as pd
-    df = pd.DataFrame(df)
+    })
     st.dataframe(df.style.format("{:.2e}"))
 
-    # Plot norms vs time
     fig3 = go.Figure()
-    fig3.add_trace(go.Scatter(x=t_hist[::save_every], y=bulk_norm, name='bulk'))
-    fig3.add_trace(go.Scatter(x=t_hist[::save_every], y=grad_norm, name='gradient'))
-    fig3.add_trace(go.Scatter(x=t_hist[::save_every], y=conc_norm, name='αc'))
+    fig3.add_trace(go.Scatter(x=t_hist, y=bulk_norm, name='bulk'))
+    fig3.add_trace(go.Scatter(x=t_hist, y=grad_norm, name='gradient'))
+    fig3.add_trace(go.Scatter(x=t_hist, y=conc_norm, name='αc'))
     fig3.update_layout(xaxis_title='t*', yaxis_type='log', height=400)
     st.plotly_chart(fig3, use_container_width=True)
