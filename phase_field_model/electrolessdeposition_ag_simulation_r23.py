@@ -104,7 +104,7 @@ if use_edl:
     alpha_edl = st.sidebar.slider("EDL strength α", 0.0, 10.0, 3.0, 0.1)
     kinetic_factor = st.sidebar.number_input(
         "k_EDL (Kinetic Factor, e.g., 1e-5)",
-        min_value=1e-8,
+        min_value=0.0,
         max_value=1e-4,
         value=1e-5,
         format="%.1e"
