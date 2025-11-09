@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ELECTROLESS Ag — DAMPED EDL + FULLY COMPATIBLE WITH ORIGINAL
-* GPU (CuPy) when available → 10–20× speed-up
-* CPU fallback (NumPy) → works on Streamlit Cloud
-* Damped EDL: λ_edl ∈ [0,1] → λ_edl=0 recovers original behavior
-* Batch, VTU/PVD/ZIP, GIF, PNG, CSV, material & potential proxy
+ELECTROLESS Ag — NUCLEATION-ONLY EDL (DECAYS TO ZERO)
+* EDL active only in early nucleation phase
+* λ_edl(t) = λ₀ * exp(-t / τ_edl) → full at t=0, zero after ~5τ_edl
+* 100% matches original model when EDL decays
+* GPU/CPU safe, batch, VTU/PVD/ZIP, GIF, PNG, CSV, material proxy
 """
 
 import streamlit as st
@@ -49,8 +49,8 @@ except Exception:
     GIF_AVAILABLE = False
 
 # ------------------- PAGE -------------------
-st.set_page_config(page_title="Electroless Ag — Damped EDL", layout="wide")
-st.title("Electroless Ag — Damped EDL Phase-Field Model")
+st.set_page_config(page_title="Electroless Ag — Nucleation EDL", layout="wide")
+st.title("Electroless Ag — Nucleation-Only EDL Phase-Field Model")
 
 plt.style.use("seaborn-v0_8-paper")
 plt.rcParams.update({
@@ -95,15 +95,16 @@ M_nd     = st.sidebar.slider("M", 1e-3, 1.0, 0.2, 1e-3)
 D_nd     = st.sidebar.slider("D", 0.0, 1.0, 0.05, 0.005)
 alpha_nd = st.sidebar.slider("α (proxy)", 0.0, 10.0, 2.0, 0.1)
 
-st.sidebar.header("Damped EDL")
-use_edl = st.sidebar.checkbox("Enable EDL", True)
+st.sidebar.header("Nucleation-Only EDL")
+use_edl = st.sidebar.checkbox("Enable Nucleation EDL", True)
 if use_edl:
-    lambda_edl = st.sidebar.slider("λ_edl (damping)", 0.0, 1.0, 0.1, 0.01, help="0 = no EDL, 1 = full EDL")
+    lambda0_edl = st.sidebar.slider("λ₀ (initial strength)", 0.0, 1.0, 0.5, 0.05)
+    tau_edl_nd = st.sidebar.slider("τ_edl (decay time, nd)", 1e-3, 1.0, 0.05, 0.005)
     kappa_cm = st.sidebar.slider("Debye length κ", 1e-8, 1e-6, 1e-7, 1e-8)
     alpha_edl = st.sidebar.slider("EDL α", 1e2, 1e5, 1e3, 1e2)
     eta_mob = st.sidebar.slider("Mobility boost η", 0.0, 5.0, 1.0, 0.1)
 else:
-    lambda_edl = kappa_cm = alpha_edl = eta_mob = 0.0
+    lambda0_edl = tau_edl_nd = kappa_cm = alpha_edl = eta_mob = 0.0
 
 use_fft = st.sidebar.checkbox("Use FFT Laplacian", GPU_AVAILABLE)
 cmap_choice = st.sidebar.selectbox("Colormap", CMAPS, CMAPS.index("viridis"))
@@ -127,6 +128,12 @@ def scale_time(t): return t * tau0
 def nd_to_real(x): return x * L0
 def to_cpu(arr): return cp.asnumpy(arr) if GPU_AVAILABLE else arr
 def to_gpu(arr): return cp.asarray(arr) if GPU_AVAILABLE else arr
+
+# ------------------- TIME-DECAYING EDL -------------------
+def get_lambda_edl(t_nd):
+    if not use_edl or lambda0_edl <= 0 or tau_edl_nd <= 0:
+        return 0.0
+    return lambda0_edl * cp.exp(-t_nd / tau_edl_nd)
 
 # ------------------- LAPLACIAN -------------------
 def laplacian(u, dx):
@@ -198,7 +205,8 @@ def run_simulation(c_bulk_val):
     mu_nd = D_nd * 38.9  # Einstein relation (z=1, 298K)
 
     for step in range(n_steps + 1):
-        t = step * dt_nd
+        t_nd = step * dt_nd
+        lambda_edl_t = get_lambda_edl(t_nd)
 
         grad_phi = cp.gradient(phi, dx)
         gphi = cp.sqrt(sum(g**2 for g in grad_phi) + 1e-30)
@@ -217,17 +225,17 @@ def run_simulation(c_bulk_val):
             dphi = cp.maximum(dphi, 0)
         phi = cp.clip(phi + dphi, 0, 1)
 
-        # CONCENTRATION: DAMPED EDL
+        # CONCENTRATION: TIME-DECAYING EDL
         lap_c = laplacian(c, dx)
         div_D_grad_c = D_nd * lap_c
 
         div_mu_c_grad_V = 0.0
-        if use_edl and lambda_edl > 0 and kappa_nd > 0:
+        if use_edl and lambda_edl_t > 0 and kappa_nd > 0:
             lap2_c = laplacian(lap_c, dx)
             V = -alpha_nd_edl * c + kappa_nd * lap2_c
             grad_V = cp.gradient(V, dx)
             flux_edl = sum(mu_nd * cp.maximum(c, 1e-12) * g for g in grad_V)
-            div_mu_c_grad_V = lambda_edl * flux_edl  # DAMPED
+            div_mu_c_grad_V = lambda_edl_t * flux_edl  # ← DECAYS
 
         c += dt_nd * (div_D_grad_c + div_mu_c_grad_V - i_loc)
         c = cp.clip(c, 0, c_bulk_val)
@@ -269,9 +277,9 @@ def run_simulation(c_bulk_val):
             c_max = float(cp.max(c))
             total_ag = float(cp.sum(i_loc) * dt_nd)
 
-            snapshots.append((t, phi_cpu, c_cpu, psi_cpu))
-            diags.append((t, c_mean, c_max, total_ag, float(bulk_norm), float(grad_norm), edl_flux))
-            thick.append((t, max_th, nd_to_real(max_th), c_mean, c_max, total_ag))
+            snapshots.append((t_nd, phi_cpu, c_cpu, psi_cpu))
+            diags.append((t_nd, c_mean, c_max, total_ag, float(bulk_norm), float(grad_norm), edl_flux))
+            thick.append((t_nd, max_th, nd_to_real(max_th), c_mean, c_max, total_ag))
 
     return c_bulk_val, snapshots, diags, thick, coords
 
@@ -305,7 +313,7 @@ if run_single_button and selected_labels:
         st.session_state.selected_c = c
         st.success("Done")
 
-# ------------------- BATCH COMPARISON -------------------
+# ------------------- BATCH COMPARISON + EDL DECAY -------------------
 if len(st.session_state.history) > 1:
     st.header("Batch Comparison")
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
@@ -326,10 +334,21 @@ if len(st.session_state.history) > 1:
         if any(e != 0 for e in edl):
             ax3.plot(tdiag, edl, label=f"EDL flux", color=colors[idx], ls=':', lw=2)
 
-    ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
+    ax1.set_xlabel("Time (s)"); ax1.set.ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
     ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²-norm"); ax2.legend(); ax2.grid(True, alpha=0.3)
     ax3.set_xlabel("Time (s)"); ax3.set_ylabel("EDL Flux"); ax3.legend(); ax3.grid(True, alpha=0.3)
     st.pyplot(fig)
+
+    # EDL Decay Plot
+    st.subheader("EDL Decay Profile")
+    t_nd_range = np.linspace(0, n_steps * dt_nd, 200)
+    lambda_t = [float(to_cpu(get_lambda_edl(t))) for t in t_nd_range]
+    fig_decay, ax = plt.subplots()
+    ax.plot([scale_time(t) for t in t_nd_range], lambda_t, 'r-', lw=2)
+    ax.set_xlabel("Time (s)"); ax.set_ylabel("λ_edl(t)")
+    ax.set_title(f"λ₀={lambda0_edl}, τ_edl={tau_edl_nd*tau0:.2e} s")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig_decay)
 
 # ------------------- PLAYBACK -------------------
 if st.session_state.history:
@@ -349,8 +368,8 @@ if st.session_state.history:
     interval = st.number_input("Interval (s)", 0.1, 5.0, 0.4, 0.1)
     field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)"])
 
-    t, phi, c, psi = snaps[frame]
-    t_real = scale_time(t)
+    t_nd, phi, c, psi = snaps[frame]
+    t_real = scale_time(t_nd)
     th_nm = thick[frame][2] * 1e9
     c_mean, c_max, total_ag, bulk_norm, grad_norm, edl_flux = diag[frame][1:]
 
@@ -486,7 +505,7 @@ if st.session_state.history:
             with open(pvd_path, "w") as f:
                 f.write('<VTKFile type="Collection" version="0.1">\n <Collection>\n')
                 for idx, v in enumerate(vtus):
-                    f.write(f'  <DataSet timestep="{scale_time(idx * dt_nd * save_every):.3e}" file="{os.path.basename(v)}"/>\n')
+                    f.write(f'  <DataSet timestep="{scale_time(snaps[idx][0]):.3e}" file="{os.path.basename(v)}"/>\n')
                 f.write(' </Collection>\n</VTKFile>\n')
 
             zipbuf = io.BytesIO()
