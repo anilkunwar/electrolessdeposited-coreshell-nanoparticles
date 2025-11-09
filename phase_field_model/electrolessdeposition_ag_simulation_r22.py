@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag — FULLY INTEGRATED SAFE SIMULATOR
-Works on:
-  • Local GPU (CuPy) — Fast
-  • Local CPU (NumPy) — Safe
-  • Streamlit Cloud (CPU) — No crash
+* GPU (CuPy) when available → 10-20× speed-up
+* Automatic CPU fallback (NumPy) → works on Streamlit Cloud
+* Batch runs, VTU/PVD/ZIP, GIF, PNG, CSV, material & potential proxy
 """
 
 import streamlit as st
@@ -25,7 +24,7 @@ GPU_AVAILABLE = False
 try:
     import cupy as cp
     cp.cuda.Device(0).use()
-    cp.zeros(1)
+    cp.zeros(1)                     # force context init
     GPU_AVAILABLE = True
     st.sidebar.success("GPU (CuPy) detected and ready!")
 except Exception as e:
@@ -81,11 +80,11 @@ max_res = 1024 if GPU_AVAILABLE else 512
 max_steps = 4000 if GPU_AVAILABLE else 2000
 Nx = st.sidebar.slider("Nx", 64, max_res, 256, 32)
 Ny = st.sidebar.slider("Ny", 64, max_res, 256, 32) if mode == "2D (planar)" else Nx
-Nz = st.sidebar.slider("Nz", 32, max_res//4, 64, 8) if mode != "2D (planar)" else 1
+Nz = st.sidebar.slider("Nz", 32, max_res // 4, 64, 8) if mode != "2D (planar)" else 1
 
 dt_nd = st.sidebar.number_input("dt (nd)", 1e-6, 1e-2, 1e-4, format="%.6f")
 n_steps = st.sidebar.slider("Steps", 50, max_steps, 1000, 50)
-save_every = st.sidebar.slider("Save every", 1, 200, max(1, n_steps//20), 1)
+save_every = st.sidebar.slider("Save every", 1, 200, max(1, n_steps // 20), 1)
 
 st.sidebar.header("Physics (nd)")
 gamma_nd = st.sidebar.slider("γ", 1e-4, 0.5, 0.02, 1e-4)
@@ -147,33 +146,35 @@ def laplacian(u, dx):
 
 # ------------------- SIMULATION CORE -------------------
 def run_simulation(c_bulk_val):
-    L = 1.0; dx = L/(Nx-1)
+    L = 1.0
+    dx = L / (Nx - 1)
     x = np.linspace(0, L, Nx)
     x_gpu = to_gpu(x)
 
     if mode == "2D (planar)":
-        y = np.linspace(0, L, Ny); y_gpu = to_gpu(y)
+        y = np.linspace(0, L, Ny)
+        y_gpu = to_gpu(y)
         X, Y = np.meshgrid(x, y, indexing='ij')
         Xg, Yg = to_gpu(X), to_gpu(Y)
-        dist = cp.sqrt((Xg-0.5)**2 + (Yg-0.5)**2)
+        dist = cp.sqrt((Xg - 0.5)**2 + (Yg - 0.5)**2)
         coords = (x, y)
     else:
         X, Y, Z = np.meshgrid(x, x, x, indexing='ij')
         Xg, Yg, Zg = to_gpu(X), to_gpu(Y), to_gpu(Z)
-        dist = cp.sqrt((Xg-0.5)**2 + (Yg-0.5)**2 + (Zg-0.5)**2)
+        dist = cp.sqrt((Xg - 0.5)**2 + (Yg - 0.5)**2 + (Zg - 0.5)**2)
         coords = (x, x, x)
 
-    psi = (dist <= core_radius_frac*L).astype(cp.float64)
+    psi = (dist <= core_radius_frac * L).astype(cp.float64)
     r_core = core_radius_frac * L
     r_outer = r_core * (1 + shell_thickness_frac)
     phi = cp.where(dist <= r_core, 0.0, cp.where(dist <= r_outer, 1.0, 0.0))
-    eps = max(4*dx, 1e-6)
-    phi = phi * (1 - 0.5*(1 - cp.tanh((dist-r_core)/eps))) \
-              * (1 - 0.5*(1 + cp.tanh((dist-r_outer)/eps)))
+    eps = max(4 * dx, 1e-6)
+    phi = phi * (1 - 0.5 * (1 - cp.tanh((dist - r_core) / eps))) \
+              * (1 - 0.5 * (1 + cp.tanh((dist - r_outer) / eps)))
     phi = cp.clip(phi, 0, 1)
 
-    c = c_bulk_val * (Yg/L if mode == "2D (planar)" else Zg/L) * (1 - phi) * (1 - psi) if bc_type == "Neumann (zero flux)" else \
-        c_bulk_val * (1 - phi) * (1 - psi)
+    c = c_bulk_val * (Yg / L if mode == "2D (planar)" else Zg / L) * (1 - phi) * (1 - psi) \
+        if bc_type == "Neumann (zero flux)" else c_bulk_val * (1 - phi) * (1 - psi)
     c = cp.clip(c, 0, c_bulk_val)
 
     snapshots, diags, thick = [], [], []
@@ -185,42 +186,54 @@ def run_simulation(c_bulk_val):
 
         grad_phi = cp.gradient(phi, dx)
         gphi = cp.sqrt(sum(g**2 for g in grad_phi) + 1e-30)
-        delta_int = 6*phi*(1-phi)*(1-psi)*gphi
-        delta_int = cp.clip(delta_int, 0, 6/max(eps,dx))
+        delta_int = 6 * phi * (1 - phi) * (1 - psi) * gphi
+        delta_int = cp.clip(delta_int, 0, 6 / max(eps, dx))
         f_bulk = 2 * beta_nd * phi * (1 - phi) * (1 - 2 * phi)
-        i_loc = k0_nd * c * (1-phi) * (1-psi) * delta_int
+        i_loc = k0_nd * c * (1 - phi) * (1 - psi) * delta_int
         i_loc = cp.clip(i_loc, 0, 1e6)
 
         lap_phi = laplacian(phi, dx)
         dep = M_nd * i_loc
         curv = M_nd * gamma_nd * lap_phi
         dphi = dt_nd * (dep + cp.maximum(curv, 0) - softness * M_nd * f_bulk)
-        if softness == 0: dphi = cp.maximum(dphi, 0)
+        if softness == 0:
+            dphi = cp.maximum(dphi, 0)
         phi = cp.clip(phi + dphi, 0, 1)
 
         lap_c = laplacian(c, dx)
         c += dt_nd * (D_nd * lap_c - i_loc)
         c = cp.clip(c, 0, c_bulk_val)
+
         if bc_type == "Neumann (zero flux)":
-            if mode == "2D (planar)": c[:,-1] = c_bulk_val
-            else: c[:,:,-1] = c_bulk_val
+            if mode == "2D (planar)":
+                c[:, -1] = c_bulk_val
+            else:
+                c[:, :, -1] = c_bulk_val
         else:
             if mode == "2D (planar)":
-                c[[0,-1],:] = c[:,[0,-1]] = c_bulk_val
+                c[[0, -1], :] = c_bulk_val
+                c[:, [0, -1]] = c_bulk_val
             else:
-                c[[0,-1],:,:] = c[:,[0,-1],:] = c[:,:,[0,-1]] = c_bulk_val
+                c[[0, -1], :, :] = c_bulk_val
+                c[:, [0, -1], :] = c_bulk_val
+                c[:, :, [0, -1]] = c_bulk_val
 
         bulk_norm = cp.sqrt(cp.mean(f_bulk**2))
-        grad_norm = cp.sqrt(cp.mean((M_nd*gamma_nd*lap_phi)**2))
+        grad_norm = cp.sqrt(cp.mean((M_nd * gamma_nd * lap_phi)**2))
 
         if step % save_every == 0 or step == n_steps:
             phi_cpu = to_cpu(phi)
             psi_cpu = to_cpu(psi)
             c_cpu = to_cpu(c)
 
-            # Thickness on CPU
-            Xc, Yc, Zc = np.meshgrid(x, y if mode == "2D (planar)" else x, x if mode != "2D (planar)" else [0.5], indexing='ij')
-            dist_cpu = np.sqrt((Xc-0.5)**2 + (Yc-0.5)**2 + (Zc-0.5)**2)
+            # Thickness (CPU)
+            Xc, Yc, Zc = np.meshgrid(
+                x,
+                y if mode == "2D (planar)" else x,
+                x if mode != "2D (planar)" else [0.5],
+                indexing='ij'
+            )
+            dist_cpu = np.sqrt((Xc - 0.5)**2 + (Yc - 0.5)**2 + (Zc - 0.5)**2)
             mask = (phi_cpu > phi_threshold) & (psi_cpu < 0.5)
             th_nd = np.max(dist_cpu[mask]) - core_radius_frac if np.any(mask) else 0.0
             max_th = max(max_th, th_nd)
@@ -241,22 +254,24 @@ if "history" not in st.session_state:
 if "selected_c" not in st.session_state:
     st.session_state.selected_c = None
 
-# ------------------- RUN -------------------
+# ------------------- BATCH RUN -------------------
 if run_batch_button and c_bulk_list:
     with st.spinner(f"Running BATCH ({'GPU' if GPU_AVAILABLE else 'CPU'})..."):
         results = []
         with ProcessPoolExecutor() as executor:
             futures = [executor.submit(run_simulation, c) for c in c_bulk_list]
             for future in as_completed(futures):
-                try: results.append(future.result())
-                except Exception as e: st.error(f"Sim failed: {e}")
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    st.error(f"Sim failed: {e}")
         for c, s, d, t, co in results:
             st.session_state.history[c] = {"snaps": s, "diag": d, "thick": t, "coords": co}
-        if results: st.session_state.selected
-
-_c = results[0][0]
+        if results:
+            st.session_state.selected_c = results[0][0]
         st.success(f"Batch done: {len(results)} runs")
 
+# ------------------- SINGLE RUN -------------------
 if run_single_button and selected_labels:
     c_val = c_options[selected_labels[-1]]
     with st.spinner(f"Running SINGLE c = {c_val}..."):
@@ -274,7 +289,7 @@ if len(st.session_state.history) > 1:
 
     for idx, (c, data) in enumerate(st.session_state.history.items()):
         times = [scale_time(t) for t, _, _, _, _, _ in data["thick"]]
-        ths   = [th*1e9 for _, _, th, _, _, _ in data["thick"]]
+        ths   = [th * 1e9 for _, _, th, _, _, _ in data["thick"]]
         ax1.plot(times, ths, label=f"c = {c:.3g}", color=colors[idx], lw=2)
 
         tdiag = [scale_time(t) for t, _, _, _, _, _, _ in data["diag"]]
@@ -290,14 +305,17 @@ if len(st.session_state.history) > 1:
 # ------------------- PLAYBACK -------------------
 if st.session_state.history:
     st.header("Select Run for Playback")
-    selected_c = st.selectbox("Choose run", sorted(st.session_state.history.keys(), reverse=True),
-                              index=sorted(st.session_state.history.keys(), reverse=True).index(st.session_state.selected_c)
-                              if st.session_state.selected_c in st.session_state.history else 0)
+    selected_c = st.selectbox(
+        "Choose run",
+        sorted(st.session_state.history.keys(), reverse=True),
+        index=sorted(st.session_state.history.keys(), reverse=True).index(st.session_state.selected_c)
+        if st.session_state.selected_c in st.session_state.history else 0
+    )
     st.session_state.selected_c = selected_c
     data = st.session_state.history[selected_c]
     snaps, thick, diag, coords = data["snaps"], data["thick"], data["diag"], data["coords"]
 
-    frame = st.slider("Frame", 0, len(snaps)-1, len(snaps)-1)
+    frame = st.slider("Frame", 0, len(snaps) - 1, len(snaps) - 1)
     auto = st.checkbox("Autoplay", False)
     interval = st.number_input("Interval (s)", 0.1, 5.0, 0.4, 0.1)
     field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)"])
@@ -309,24 +327,27 @@ if st.session_state.history:
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.write(f"**c = {selected_c:.3g}** | **t = {t_real:.3e} s** | **Th = {th_nm:.2f} nm** | "
-                 f"**||bulk||₂ = {bulk_norm:.2e}** | **||grad||₂ = {grad_norm:.2e}**")
-
-        fig, ax = plt.subplots(figsize=(6,5))
+        st.write(
+            f"**c = {selected_c:.3g}** | **t = {t_real:.3e} s** | **Th = {th_nm:.2f} nm** | "
+            f"**||bulk||₂ = {bulk_norm:.2e}** | **||grad||₂ = {grad_norm:.2e}**"
+        )
+        fig, ax = plt.subplots(figsize=(6, 5))
         field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
         vmin = 0
         vmax = 1 if field != "c (concentration)" else selected_c
-        im = ax.imshow(field_data.T if mode=="2D (planar)" else field_data[field_data.shape[0]//2],
-                       cmap=cmap_choice, vmin=vmin, vmax=vmax, origin='lower')
+        im = ax.imshow(
+            field_data.T if mode == "2D (planar)" else field_data[field_data.shape[0] // 2],
+            cmap=cmap_choice, vmin=vmin, vmax=vmax, origin='lower'
+        )
         plt.colorbar(im, ax=ax, label=field.split()[0])
         ax.set_title(f"{field} @ t = {t_real:.3e} s")
         st.pyplot(fig)
 
     with col2:
         st.subheader("Thickness")
-        times = [scale_time(t) for t,_,_,_,_,_ in thick]
-        ths   = [th*1e9 for _,_,th,_,_,_ in thick]
-        fig, ax = plt.subplots(figsize=(4,3))
+        times = [scale_time(t) for t, _, _, _, _, _ in thick]
+        ths   = [th * 1e9 for _, _, th, _, _, _ in thick]
+        fig, ax = plt.subplots(figsize=(4, 3))
         ax.plot(times, ths, 'b-', lw=2)
         ax.set_xlabel("Time (s)"); ax.set_ylabel("nm"); ax.grid(True, alpha=0.3)
         st.pyplot(fig)
@@ -341,10 +362,12 @@ if st.session_state.history:
     st.subheader("Material & Potential Proxy")
     col_a, col_b, col_c = st.columns([2, 2, 2])
     with col_a:
-        material_method = st.selectbox("Interpolation", [
-            "phi + 2*psi (simple)", "phi*(1-psi) + 2*psi",
-            "h·(phi² + psi²)", "h·(4*phi² + 2*psi²)", "max(phi, psi) + psi"
-        ], index=3)
+        material_method = st.selectbox(
+            "Interpolation",
+            ["phi + 2*psi (simple)", "phi*(1-psi) + 2*psi",
+             "h·(phi² + psi²)", "h·(4*phi² + 2*psi²)", "max(phi, psi) + psi"],
+            index=3
+        )
     with col_b:
         show_potential = st.checkbox("Show -α·c", True)
     with col_c:
@@ -352,10 +375,14 @@ if st.session_state.history:
 
     def build_material(phi, psi, method, h=1.0):
         phi, psi = np.array(phi), np.array(psi)
-        if method == "phi + 2*psi (simple)": return phi + 2.0*psi
-        elif method == "phi*(1-psi) + 2*psi": return phi*(1.0-psi) + 2.0*psi
-        elif method == "h·(phi² + psi²)": return h*(phi**2 + psi**2)
-        elif method == "h·(4*phi² + 2*psi²)": return h*(4.0*phi**2 + 2.0*psi**2)
+        if method == "phi + 2*psi (simple)":
+            return phi + 2.0 * psi
+        elif method == "phi*(1-psi) + 2*psi":
+            return phi * (1.0 - psi) + 2.0 * psi
+        elif method == "h·(phi² + psi²)":
+            return h * (phi**2 + psi**2)
+        elif method == "h·(4*phi² + 2*psi²)":
+            return h * (4.0 * phi**2 + 2.0 * psi**2)
         elif method == "max(phi, psi) + psi":
             return np.where(psi > 0.5, 2.0, np.where(phi > 0.5, 1.0, 0.0))
         return phi
@@ -371,26 +398,29 @@ if st.session_state.history:
         vmin_mat = vmax_mat = None
 
     if mode == "2D (planar)":
-        fig_mat, ax = plt.subplots(figsize=(6,5))
-        im = ax.imshow(material.T, origin='lower', extent=[0,1,0,1], cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
+        fig_mat, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(material.T, origin='lower', extent=[0, 1, 0, 1],
+                       cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
         if "max" in material_method or "2*psi" in material_method:
-            cbar = plt.colorbar(im, ax=ax, ticks=[0,1,2])
-            cbar.ax.set_yticklabels(['electrolyte','Ag','Cu'])
+            cbar = plt.colorbar(im, ax=ax, ticks=[0, 1, 2])
+            cbar.ax.set_yticklabels(['electrolyte', 'Ag', 'Cu'])
         else:
             plt.colorbar(im, ax=ax, label="material")
         ax.set_title("Material")
         st.pyplot(fig_mat)
 
         if show_potential:
-            fig_pot, ax = plt.subplots(figsize=(6,5))
-            im = ax.imshow(potential.T, origin='lower', extent=[0,1,0,1], cmap="RdBu_r")
+            fig_pot, ax = plt.subplots(figsize=(6, 5))
+            im = ax.imshow(potential.T, origin='lower', extent=[0, 1, 0, 1], cmap="RdBu_r")
             plt.colorbar(im, ax=ax, label="-α·c")
             ax.set_title("Potential Proxy")
             st.pyplot(fig_pot)
     else:
-        cx = phi.shape[0]//2
-        fig, axes = plt.subplots(1,3,figsize=(12,4))
-        for ax, sl, label in zip(axes, [material[cx,:,:], material[:,cx,:], material[:,:,cx]], ["x","y","z"]):
+        cx = phi.shape[0] // 2
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        for ax, sl, label in zip(axes,
+                                 [material[cx, :, :], material[:, cx, :], material[:, :, cx]],
+                                 ["x", "y", "z"]):
             ax.imshow(sl.T, origin='lower', cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
             ax.set_title(label); ax.axis('off')
         fig.suptitle("Material (3D slices)")
@@ -434,44 +464,64 @@ if st.session_state.history:
                 for p in vtus + [pvd_path]:
                     zf.write(p, arcname=os.path.basename(p))
             zipbuf.seek(0)
-            st.download_button("Download VTU/PVD ZIP", zipbuf.read(), f"frames_{datetime.now():%Y%m%d_%H%M%S}.zip", "application/zip")
+            st.download_button(
+                "Download VTU/PVD ZIP",
+                zipbuf.read(),
+                f"frames_{datetime.now():%Y%m%d_%H%M%S}.zip",
+                "application/zip"
+            )
 
     # ------------------- GIF -------------------
     if st.sidebar.button("Generate GIF") and GIF_AVAILABLE:
         with st.spinner("Generating GIF..."):
-            fig, ax = plt.subplots(figsize=(6,5))
+            fig, ax = plt.subplots(figsize=(6, 5))
             field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
             vmin = 0
             vmax = 1 if field != "c (concentration)" else selected_c
-            im = ax.imshow(field_data.T if mode=="2D (planar)" else field_data[field_data.shape[0]//2],
-                           cmap=cmap_choice, vmin=vmin, vmax=vmax, origin='lower', animated=True)
+            im = ax.imshow(
+                field_data.T if mode == "2D (planar)" else field_data[field_data.shape[0] // 2],
+                cmap=cmap_choice, vmin=vmin, vmax=vmax, origin='lower', animated=True
+            )
             plt.colorbar(im, ax=ax)
 
             def animate(i):
-                t, phi_f, c_f, psi_f = snaps[i]
-                data = {"phi (shell)": phi_f, "c (concentration)": c_f, "psi (core)": psi_f}[field]
-                im.set_array(data.T if mode=="2D (planar)" else data[data.shape[0]//2])
-                ax.set_title(f"{field} @ t = {scale_time(t):.3e} s")
+                t_i, phi_i, c_i, psi_i = snaps[i]
+                data = {"phi (shell)": phi_i, "c (concentration)": c_i, "psi (core)": psi_i}[field]
+                im.set_array(data.T if mode == "2D (planar)" else data[data.shape[0] // 2])
+                ax.set_title(f"{field} @ t = {scale_time(t_i):.3e} s")
                 return [im]
 
             anim = FuncAnimation(fig, animate, frames=len(snaps), interval=200, blit=True)
             gif_buf = io.BytesIO()
             anim.save(gif_buf, writer='pillow', fps=5)
             gif_buf.seek(0)
-            st.download_button("Download GIF", gif_buf.read(), f"animation_{field.split()[0]}.gif", "image/gif")
+            st.download_button(
+                "Download GIF",
+                gif_buf.read(),
+                f"animation_{field.split()[0]}.gif",
+                "image/gif"
+            )
 
     # ------------------- PNG SNAPSHOT -------------------
     if st.sidebar.button("Download PNG Snapshot"):
-        fig_snap, ax = plt.subplots(figsize=(6,5))
+        fig_snap, ax = plt.subplots(figsize=(6, 5))
         data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
-        im = ax.imshow(data.T if mode=="2D (planar)" else data[data.shape[0]//2],
-                       cmap=cmap_choice, vmin=0, vmax=1 if field != "c (concentration)" else selected_c, origin='lower')
+        im = ax.imshow(
+            data.T if mode == "2D (planar)" else data[data.shape[0] // 2],
+            cmap=cmap_choice, vmin=0, vmax=1 if field != "c (concentration)" else selected_c,
+            origin='lower'
+        )
         plt.colorbar(im, ax=ax)
         ax.set_title(f"{field} @ t = {t_real:.3e} s")
         buf = io.BytesIO()
         fig_snap.savefig(buf, format='png', dpi=150, bbox_inches='tight')
         buf.seek(0)
-        st.download_button("Download PNG", buf.read(), f"snapshot_{field.split()[0]}.png", "image/png")
+        st.download_button(
+            "Download PNG",
+            buf.read(),
+            f"snapshot_{field.split()[0]}.png",
+            "image/png"
+        )
 
     if auto:
         for i in range(frame, len(snaps)):
@@ -480,7 +530,10 @@ if st.session_state.history:
 
     col_clear, col_del = st.columns([1, 1])
     with col_clear:
-        if st.button("Clear ALL"): st.session_state.history.clear(); st.session_state.selected_c = None; st.rerun()
+        if st.button("Clear ALL"):
+            st.session_state.history.clear()
+            st.session_state.selected_c = None
+            st.rerun()
     with col_del:
         if st.button(f"Delete c = {selected_c:.3g}"):
             del st.session_state.history[selected_c]
@@ -488,4 +541,4 @@ if st.session_state.history:
             st.rerun()
 
 else:
-    st.info("Run a simulation to see results.")
+    st.info("Run a simulation (single or batch) to see results.")
