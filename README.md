@@ -22,6 +22,8 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm6-streamlit-red)](https://electrolessdeposition-phasefieldsimulation6.streamlit.app/) # postprocessed-2D/3D numba (dimensionalized)
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm7-streamlit-red)](https://electrolessdeposition-phasefieldsimulation7.streamlit.app/) # postprocessed-2D/3D numba , Ag shell thickness (dimensionalized)
+
 
 
 
