@@ -42,6 +42,8 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm18-streamlit-red)](https://electrolessdeposition-phasefieldsimulation18.streamlit.app/) # single simulations only with memory store for comparison of Ag shell thickness, diagnostics for comparison of bulk and gradient free energy terms, interpolation of psi and phi to display Cu core variable and Ag shell variable in a single image
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm19-streamlit-red)](https://electrolessdeposition-phasefieldsimulation19.streamlit.app/) # pfm18 + file download options in VTU format
+
 
 
 
