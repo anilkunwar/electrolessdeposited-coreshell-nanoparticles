@@ -3,12 +3,18 @@
 """
 streamlit_electroless_enhanced.py
 --------------------------------
-2-D / 3-D phase-field electroless Ag deposition
-* dimensional scaling (L₀, E₀, τ₀)
-* molar-ratio control
-* selectable BCs
-* automatic shell-thickness tracking
-* multi-ratio sweep + plots + CSV export
+2-D / 3-D phase-field electroless Ag deposition.
+All non-dimensional parameters are kept exactly as in the original
+script; three user-adjustable scales (length, energy, time) convert
+the simulation to real physical units while preserving numerical
+behaviour and convergence.
+
+NEW FEATURES (from the second code):
+* molar-ratio control ([Ag]/[Cu])
+* selectable BCs (Neumann / Dirichlet)
+* automatic shell-thickness tracking (non-dim + nm)
+* multi-ratio sweep + plots + CSV
+* thickness-evolution plot for single run
 """
 import streamlit as st
 import numpy as np
@@ -43,7 +49,7 @@ st.title("Electroless Ag — Enhanced Simulator (2D / 3D)")
 # ------------------- colormap list -------------------
 CMAPS = [c for c in plt.colormaps() if c not in {"jet", "jet_r"}]
 
-# ------------------- sidebar – physical scales -------------------
+# ------------------- sidebar – scales -------------------
 st.sidebar.header("Physical scales (change units)")
 L0 = st.sidebar.number_input(
     "Length scale L₀ (nm)", min_value=1.0, max_value=1e6, value=20.0, step=1.0,
@@ -57,11 +63,9 @@ tau0 = st.sidebar.number_input(
     "Time scale τ₀ (×10⁻⁴ s)", min_value=1e-6, max_value=1e6, value=1.0, step=0.1,
     help="Reference time step scaling."
 )
-
-# conversion factors (non-dim → real)
-L0 = L0 * 1e-9               # nm → m
-E0 = E0 * 1e-14              # ×10⁻¹⁴ J → J
-tau0 = tau0 * 1e-4           # ×10⁻⁴ s → s
+L0 = L0 * 1e-9          # nm → m
+E0 = E0 * 1e-14         # ×10⁻¹⁴ J → J
+tau0 = tau0 * 1e-4      # ×10⁻⁴ s → s
 
 # ------------------- molar-ratio control -------------------
 st.sidebar.header("Molar Ratio & Concentration")
@@ -77,9 +81,9 @@ else:
     st.sidebar.markdown("**Preset Ag:Cu ratios** (1:5 → 1:1)")
     molar_ratio_values = np.array([1/5, 1/4, 1/3, 1/2, 1.0])
     st.sidebar.write("Active ratios → [Ag]/[Cu] =", molar_ratio_values.round(3))
-    c_bulk_nd = molar_ratio_values[0]               # start value for single run
+    c_bulk_nd = molar_ratio_values[0]   # start value for single run
 
-# ------------------- boundary condition selection -------------------
+# ------------------- boundary-condition selector -------------------
 st.sidebar.header("Boundary Conditions")
 bc_type = st.sidebar.selectbox(
     "Boundary condition type",
@@ -220,7 +224,7 @@ def grad_mag_2d(u, dx):
     ux[:,1:-1] = (u[:,2:] - u[:,:-2]) / (2*dx)
     ux[:,0] = (u[:,1] - u[:,0]) / dx; ux[:,-1] = (u[:,-1] - u[:,-2]) / dx
     uy[1:-1,:] = (u[2:,:] - u[:-2,:]) / (2*dx)
-    uy[0,:] = (u[1,:] - u[0,:]) / dx; uy[-1,:] = (u[-1,:] - u[-2,:]) / dx
+    uy[0,:] = (u[1,:] - u[:,0]) / dx; uy[-1,:] = (u[-1,:] - u[-2,:]) / dx
     return np.sqrt(ux**2 + uy**2 + 1e-30)
 
 # ------------------- simulation core -------------------
@@ -542,7 +546,7 @@ if st.session_state.multiple_results:
         mime="text/csv"
     )
 
-# ------------------- single-run playback -------------------
+# ------------------- single-run playback & post-processing -------------------
 if st.session_state.snapshots and st.session_state.thickness_data:
     snapshots = st.session_state.snapshots
     diagnostics = st.session_state.diagnostics
@@ -625,7 +629,120 @@ if st.session_state.snapshots and st.session_state.thickness_data:
         ax_th.grid(True, alpha=0.3); ax_th.set_title('Growth curve')
         st.pyplot(fig_th)
 
-    # ---- download diagnostics + thickness ----
+    # --------------------------------------------------------------
+    # POST-PROCESSOR : material field + electric-potential proxy
+    # --------------------------------------------------------------
+    st.subheader("Material composition & electric-potential proxy")
+    col_a, col_b, col_c = st.columns([2, 2, 2])
+    with col_a:
+        material_method = st.selectbox(
+            "Material interpolation",
+            ["phi + 2*psi (simple)",
+             "phi*(1-psi) + 2*psi",
+             "h·(phi² + psi²)",
+             "h·(4*phi² + 2*psi²)",
+             "max(phi, psi) + psi"],
+            index=3,
+            help="Choose how the two phase fields are merged into one colour map."
+        )
+    with col_b:
+        show_potential = st.checkbox("Overlay electric-potential proxy (-α·c)", value=True)
+    with col_c:
+        if "h·" in material_method:
+            h_factor = st.slider("h (scaling)", 0.1, 2.0, 0.5, 0.05,
+                                 help="Scale factor for continuous material fields")
+        else:
+            h_factor = 1.0
+
+    # ---------- build material ----------
+    def build_material(phi, psi, method, h=1.0):
+        if method == "phi + 2*psi (simple)":
+            return phi + 2.0*psi
+        elif method == "phi*(1-psi) + 2*psi":
+            return phi*(1.0-psi) + 2.0*psi
+        elif method == "h·(phi² + psi²)":
+            return h*(phi**2 + psi**2)
+        elif method == "h·(4*phi² + 2*psi²)":
+            return h*(4.0*phi**2 + 2.0*psi**2)
+        elif method == "max(phi, psi) + psi":
+            return np.where(psi > 0.5, 2.0,
+                   np.where(phi > 0.5, 1.0, 0.0))
+        else:
+            raise ValueError("unknown material method")
+
+    material = build_material(phi_view, psi_view, material_method, h=h_factor)
+    potential = -alpha_nd * c_view
+
+    # ---------- colormap logic ----------
+    if material_method in ["phi + 2*psi (simple)",
+                           "phi*(1-psi) + 2*psi",
+                           "max(phi, psi) + psi"]:
+        cmap_mat = plt.cm.get_cmap("Set1", 3)
+        vmin_mat, vmax_mat = 0, 2
+    else:
+        cmap_mat = cmap_choice
+        vmin_mat = vmax_mat = None
+
+    # ---------- 2-D visualisation ----------
+    if mode.startswith("2D"):
+        fig_mat, ax_mat = plt.subplots(figsize=(6,5))
+        im_mat = ax_mat.imshow(material.T, origin='lower', extent=[0,1,0,1],
+                               cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
+        if material_method in ["phi + 2*psi (simple)",
+                               "phi*(1-psi) + 2*psi",
+                               "max(phi, psi) + psi"]:
+            cbar = plt.colorbar(im_mat, ax=ax_mat, ticks=[0,1,2])
+            cbar.ax.set_yticklabels(['electrolyte','Ag shell','Cu core'])
+        else:
+            plt.colorbar(im_mat, ax=ax_mat, label="material")
+        ax_mat.set_title(f"Material @ t = {t_real:.3e} s")
+        st.pyplot(fig_mat)
+
+        if show_potential:
+            fig_pot, ax_pot = plt.subplots(figsize=(6,5))
+            im_pot = ax_pot.imshow(potential.T, origin='lower', extent=[0,1,0,1],
+                                   cmap="RdBu_r")
+            plt.colorbar(im_pot, ax=ax_pot, label="Potential proxy -α·c")
+            ax_pot.set_title(f"Potential proxy @ t = {t_real:.3e} s")
+            st.pyplot(fig_pot)
+
+            fig_comb, ax_comb = plt.subplots(figsize=(6,5))
+            ax_comb.imshow(material.T, origin='lower', extent=[0,1,0,1],
+                           cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat, alpha=0.7)
+            cs = ax_comb.contour(potential.T, levels=12, cmap="plasma",
+                                 linewidths=0.8, alpha=0.9)
+            ax_comb.clabel(cs, inline=True, fontsize=7, fmt="%.2f")
+            ax_comb.set_title("Material + Potential contours")
+            st.pyplot(fig_comb)
+
+    # ---------- 3-D visualisation ----------
+    else:
+        cx = phi_view.shape[0]//2
+        cy = phi_view.shape[1]//2
+        cz = phi_view.shape[2]//2
+        fig_mat, axes = plt.subplots(1,3, figsize=(12,4))
+        for ax, sl, label in zip(axes,
+                                 [material[cx,:,:], material[:,cy,:], material[:,:,cz]],
+                                 ["x-slice","y-slice","z-slice"]):
+            im = ax.imshow(sl.T, origin='lower',
+                           cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
+            ax.set_title(label); ax.axis('off')
+        fig_mat.suptitle(f"Material (3-D slices) @ t = {t_real:.3e} s")
+        st.pyplot(fig_mat)
+
+        if show_potential:
+            fig_pot, axes = plt.subplots(1,3, figsize=(12,4))
+            for ax, sl, label in zip(axes,
+                                     [potential[cx,:,:], potential[:,cy,:], potential[:,:,cz]],
+                                     ["x-slice","y-slice","z-slice"]):
+                im = ax.imshow(sl.T, origin='lower', cmap="RdBu_r")
+                ax.set_title(label); ax.axis('off')
+            fig_pot.suptitle(f"Potential proxy (-α·c) @ t = {t_real:.3e} s")
+            plt.colorbar(im, ax=axes, orientation='horizontal',
+                         fraction=0.05, label="-α·c")
+            st.pyplot(fig_pot)
+
+    # ------------------- diagnostics + thickness export -------------------
     if download_diags_button:
         csv_buf = io.StringIO()
         writer = csv.writer(csv_buf)
@@ -639,6 +756,7 @@ if st.session_state.snapshots and st.session_state.thickness_data:
             mime="text/csv"
         )
 
+        # thickness CSV (single run)
         csv_th = io.StringIO()
         writer_th = csv.writer(csv_th)
         writer_th.writerow(["t (s)","Thickness_nd","Thickness_nm"])
@@ -651,65 +769,89 @@ if st.session_state.snapshots and st.session_state.thickness_data:
             mime="text/csv"
         )
 
-# ------------------- VTU export (unchanged, just uses real coordinates) -------------------
-if export_vtu_button and MESHIO_AVAILABLE:
-    tmpdir = tempfile.mkdtemp()
-    vtus = []
-    # pick the *last* saved frame of the *last* run (single or multi)
-    if st.session_state.snapshots:
-        src = st.session_state
-    elif st.session_state.multiple_results:
-        last_ratio = list(st.session_state.multiple_results.keys())[-1]
-        src = st.session_state.multiple_results[last_ratio]
-    else:
-        st.error("No data to export.")
-        st.stop()
-
-    for idx, (t_nd, phi_s, c_s, psi_s) in enumerate(src['snapshots']):
-        fname = os.path.join(tmpdir, f"frame_{idx:04d}.vtu")
-        if mode.startswith("2D"):
-            xv, yv = src['coords']
-            Xg, Yg = np.meshgrid(xv, yv, indexing='ij')
-            points = np.column_stack([nd_to_real(Xg.ravel()),
-                                      nd_to_real(Yg.ravel()),
-                                      np.zeros_like(Xg.ravel())])
+    # ------------------- PNG snapshot -------------------
+    img_buf = io.BytesIO()
+    if mode.startswith("2D"):
+        fig_snap, ax_snap = plt.subplots(figsize=(5,4))
+        if field == "phi (shell)":
+            ax_snap.imshow(phi_view.T, origin='lower', extent=[0,1,0,1], cmap=cmap_choice)
+        elif field == "c (concentration)":
+            ax_snap.imshow(c_view.T, origin='lower', extent=[0,1,0,1], cmap=cmap_choice)
         else:
-            xv, yv, zv = src['coords']
-            Xg, Yg, Zg = np.meshgrid(xv, yv, zv, indexing='ij')
-            points = np.column_stack([nd_to_real(Xg.ravel()),
-                                      nd_to_real(Yg.ravel()),
-                                      nd_to_real(Zg.ravel())])
-        # material field (same as post-processor)
-        mat_s = 4.0*phi_s**2 + 2.0*psi_s**2
-        point_data = {
-            "phi": phi_s.ravel().astype(np.float32),
-            "c": c_s.ravel().astype(np.float32),
-            "psi": psi_s.ravel().astype(np.float32),
-            "material": mat_s.ravel().astype(np.float32)
-        }
-        meshio.write_points_cells(fname, points, [], point_data=point_data)
-        vtus.append(fname)
-
-    pvd_path = os.path.join(tmpdir, "collection.pvd")
-    with open(pvd_path, "w") as f:
-        f.write("<VTKFile type=\"Collection\" version=\"0.1\" byte_order=\"LittleEndian\">\n")
-        f.write(" <Collection>\n")
-        for idx, v in enumerate(vtus):
-            f.write(f' <DataSet timestep="{scale_time(idx*params_base["dt"]):.3e}" file="{os.path.basename(v)}"/>\n')
-        f.write(" </Collection>\n")
-        f.write("</VTKFile>\n")
-
-    zipbuf = io.BytesIO()
-    with zipfile.ZipFile(zipbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in vtus:
-            zf.write(p, arcname=os.path.basename(p))
-        zf.write(pvd_path, arcname=os.path.basename(pvd_path))
-    zipbuf.seek(0)
+            ax_snap.imshow(psi_view.T, origin='lower', extent=[0,1,0,1], cmap=cmap_choice)
+        ax_snap.set_title(f"{field} t = {t_real:.3e} s")
+        plt.colorbar(ax_snap.images[0], ax=ax_snap)
+        fig_snap.tight_layout()
+        fig_snap.savefig(img_buf, format='png', dpi=150); plt.close(fig_snap)
+    else:
+        fig_snap, axes_snap = plt.subplots(1,3,figsize=(10,3))
+        cx = phi_view.shape[0]//2; cy = phi_view.shape[1]//2; cz = phi_view.shape[2]//2
+        for ax, sl, title in zip(axes_snap,
+                                 [phi_view[cx,:,:], phi_view[:,cy,:], phi_view[:,:,cz]],
+                                 ["x","y","z"]):
+            ax.imshow(sl.T, origin='lower', cmap=cmap_choice); ax.set_title(title); ax.axis('off')
+        fig_snap.suptitle(f"{field} t = {t_real:.3e} s")
+        fig_snap.tight_layout()
+        fig_snap.savefig(img_buf, format='png', dpi=150); plt.close(fig_snap)
+    img_buf.seek(0)
     st.download_button(
-        "Download VTU/PVD ZIP",
-        zipbuf.read(),
-        file_name=f"frames_{datetime.now():%Y%m%d_%H%M%S}.zip",
-        mime="application/zip"
+        "Download current snapshot (PNG)",
+        img_buf,
+        file_name=f"snapshot_t{t_real:.3e}s.png",
+        mime="image/png"
     )
+
+    # ------------------- VTU / PVD / ZIP -------------------
+    if export_vtu_button:
+        if not MESHIO_AVAILABLE:
+            st.error("`meshio` not installed — VTU export disabled.")
+        else:
+            tmpdir = tempfile.mkdtemp()
+            vtus = []
+            for idx, (t_nd, phi_s, c_s, psi_s) in enumerate(snapshots):
+                fname = os.path.join(tmpdir, f"frame_{idx:04d}.vtu")
+                if mode.startswith("2D"):
+                    xv, yv = coords
+                    Xg, Yg = np.meshgrid(xv, yv, indexing='ij')
+                    points = np.column_stack([nd_to_real(Xg.ravel()),
+                                             nd_to_real(Yg.ravel()),
+                                             np.zeros_like(Xg.ravel())])
+                else:
+                    xv, yv, zv = coords
+                    Xg, Yg, Zg = np.meshgrid(xv, yv, zv, indexing='ij')
+                    points = np.column_stack([nd_to_real(Xg.ravel()),
+                                             nd_to_real(Yg.ravel()),
+                                             nd_to_real(Zg.ravel())])
+                mat_s = build_material(phi_s, psi_s, material_method, h=h_factor)
+                point_data = {
+                    "phi": phi_s.ravel().astype(np.float32),
+                    "c": c_s.ravel().astype(np.float32),
+                    "psi": psi_s.ravel().astype(np.float32),
+                    "material": mat_s.ravel().astype(np.float32)
+                }
+                meshio.write_points_cells(fname, points, [], point_data=point_data)
+                vtus.append(fname)
+
+            pvd_path = os.path.join(tmpdir, "collection.pvd")
+            with open(pvd_path, "w") as f:
+                f.write("<VTKFile type=\"Collection\" version=\"0.1\" byte_order=\"LittleEndian\">\n")
+                f.write(" <Collection>\n")
+                for idx, v in enumerate(vtus):
+                    f.write(f' <DataSet timestep="{scale_time(idx*params_base["dt"]):.3e}" file="{os.path.basename(v)}"/>\n')
+                f.write(" </Collection>\n")
+                f.write("</VTKFile>\n")
+
+            zipbuf = io.BytesIO()
+            with zipfile.ZipFile(zipbuf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in vtus:
+                    zf.write(p, arcname=os.path.basename(p))
+                zf.write(pvd_path, arcname=os.path.basename(pvd_path))
+            zipbuf.seek(0)
+            st.download_button(
+                "Download VTU/PVD ZIP",
+                zipbuf.read(),
+                file_name=f"frames_{datetime.now():%Y%m%d_%H%M%S}.zip",
+                mime="application/zip"
+            )
 else:
     st.info("Run a simulation to see results. Tip: keep 3D grid ≤ 40 for fast runs.")
