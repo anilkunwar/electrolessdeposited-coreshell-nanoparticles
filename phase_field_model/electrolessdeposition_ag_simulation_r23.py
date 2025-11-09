@@ -13,7 +13,8 @@ ELECTROLESS Ag — FULLY UPGRADED & BACKWARD-COMPATIBLE SIMULATOR
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker,ScalarFormatter
+import matplotlib.ticker as mticker
+from matplotlib.ticker import ScalarFormatter
 import pandas as pd
 import time
 import io
