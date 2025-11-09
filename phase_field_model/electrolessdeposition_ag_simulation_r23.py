@@ -13,6 +13,7 @@ ELECTROLESS Ag — FULLY UPGRADED & BACKWARD-COMPATIBLE SIMULATOR
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import pandas as pd
 import time
 import io
@@ -307,6 +308,7 @@ if run_single_button and selected_labels:
         st.success("Done")
 
 # ------------------- BATCH COMPARISON + EDL DECAY -------------------
+# ------------------- BATCH COMPARISON + EDL DECAY -------------------
 if len(st.session_state.history) > 1:
     st.header("Batch Comparison")
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
@@ -314,35 +316,51 @@ if len(st.session_state.history) > 1:
     colors = cmap(np.linspace(0, 1, len(st.session_state.history)))
 
     for idx, (c, data) in enumerate(st.session_state.history.items()):
+        # Thickness
         times_th = [scale_time(t) for t, _, _, _, _, _ in data["thick"]]
         ths_nm   = [th * 1e9 for _, _, th, _, _, _ in data["thick"]]
         ax1.plot(times_th, ths_nm, label=f"c = {c:.3g}", color=colors[idx], lw=2)
 
+        # Diagnostics
         tdiag = [scale_time(t) for t, _, _, _, _, _, _ in data["diag"]]
         bulk  = [b for _, _, _, _, b, _, _ in data["diag"]]
         grad  = [g for _, _, _, _, _, g, _ in data["diag"]]
         edl   = [e for _, _, _, _, _, _, e in data["diag"]]
+
         ax2.semilogy(tdiag, np.maximum(bulk, 1e-30), label=f"bulk", color=colors[idx], lw=1.5)
         ax2.semilogy(tdiag, np.maximum(grad, 1e-30), label=f"grad", color=colors[idx], ls='--', lw=1.5)
         if any(e != 0 for e in edl):
             ax3.plot(tdiag, edl, label=f"EDL boost", color=colors[idx], ls=':', lw=2)
 
-    ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
-    ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²-norm"); ax2.legend(); ax2.grid(True, alpha=0.3)
-    ax3.set_xlabel("Time (s)"); ax3.set_ylabel("EDL Boost"); ax3.legend(); ax3.grid(True, alpha=0.3)
+    # Set labels, legends, grids
+    for ax in [ax1, ax2, ax3]:
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_formatter(mticker.ScalarFormatter(useMathText=True))
+        ax.xaxis.get_major_formatter().set_powerlimits((-1, 1))
+
+    ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Thickness (nm)"); ax1.legend()
+    ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²-norm"); ax2.legend()
+    ax3.set_xlabel("Time (s)"); ax3.set_ylabel("EDL Boost"); ax3.legend()
     st.pyplot(fig)
 
-    # EDL Decay Plot
+    # ------------------- EDL Decay Plot -------------------
     if use_edl:
         st.subheader("EDL Catalyst Decay")
         t_nd_range = np.linspace(0, n_steps * dt_nd, 200)
         lambda_t = [float(to_cpu(get_edl_factor(t, True, lambda0_edl, tau_edl_nd))) for t in t_nd_range]
+
         fig_decay, ax = plt.subplots()
         ax.plot([scale_time(t) for t in t_nd_range], lambda_t, 'r-', lw=2)
         ax.set_xlabel("Time (s)"); ax.set_ylabel("λ_edl(t)")
         ax.set_title(f"λ₀={lambda0_edl}, τ_edl={tau_edl_nd*tau0:.2e} s")
         ax.grid(True, alpha=0.3)
+
+        # Force scientific notation for time axis
+        ax.xaxis.set_major_formatter(mticker.ScalarFormatter(useMathText=True))
+        ax.xaxis.get_major_formatter().set_powerlimits((-1, 1))
+
         st.pyplot(fig_decay)
+
 
 # ------------------- PLAYBACK -------------------
 if st.session_state.history:
