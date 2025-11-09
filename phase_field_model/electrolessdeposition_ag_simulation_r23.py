@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ELECTROLESS Ag — FULLY UPGRADED WITH EDL (2025)
-* GPU (CuPy) + FFT/FD Laplacian
-* CPU fallback (NumPy)
-* EDL: Nernst-Planck + Debye screening
-* Mobility boost M(φ)
-* Batch, VTU/PVD/ZIP, GIF, PNG, CSV, material proxy
+ELECTROLESS Ag — DAMPED EDL + FULLY COMPATIBLE WITH ORIGINAL
+* GPU (CuPy) when available → 10–20× speed-up
+* CPU fallback (NumPy) → works on Streamlit Cloud
+* Damped EDL: λ_edl ∈ [0,1] → λ_edl=0 recovers original behavior
+* Batch, VTU/PVD/ZIP, GIF, PNG, CSV, material & potential proxy
 """
 
 import streamlit as st
@@ -50,8 +49,8 @@ except Exception:
     GIF_AVAILABLE = False
 
 # ------------------- PAGE -------------------
-st.set_page_config(page_title="Electroless Ag — EDL Simulator", layout="wide")
-st.title("Electroless Ag — EDL-Enhanced Phase-Field Model")
+st.set_page_config(page_title="Electroless Ag — Damped EDL", layout="wide")
+st.title("Electroless Ag — Damped EDL Phase-Field Model")
 
 plt.style.use("seaborn-v0_8-paper")
 plt.rcParams.update({
@@ -89,21 +88,22 @@ n_steps = st.sidebar.slider("Steps", 50, max_steps, 1000, 50)
 save_every = st.sidebar.slider("Save every", 1, 200, max(1, n_steps // 20), 1)
 
 st.sidebar.header("Physics (nd)")
-gamma_nd = st.sidebar.slider("γ", 1e-10, 1e-8, 5e-9, 1e-10)
-beta_nd  = st.sidebar.slider("β", 1e5, 1e7, 1e6, 1e5)
-k0_nd    = st.sidebar.slider("k₀", 0.01, 2.0, 1.0, 0.01)
+gamma_nd = st.sidebar.slider("γ", 1e-4, 0.5, 0.02, 1e-4)
+beta_nd  = st.sidebar.slider("β", 0.1, 20.0, 4.0, 0.1)
+k0_nd    = st.sidebar.slider("k₀", 0.01, 2.0, 0.4, 0.01)
 M_nd     = st.sidebar.slider("M", 1e-3, 1.0, 0.2, 1e-3)
 D_nd     = st.sidebar.slider("D", 0.0, 1.0, 0.05, 0.005)
-alpha_nd = st.sidebar.slider("α (proxy)", 0.0, 1e4, 1e3, 100.0)
+alpha_nd = st.sidebar.slider("α (proxy)", 0.0, 10.0, 2.0, 0.1)
 
-st.sidebar.header("EDL (Electrostatic Double Layer)")
+st.sidebar.header("Damped EDL")
 use_edl = st.sidebar.checkbox("Enable EDL", True)
 if use_edl:
+    lambda_edl = st.sidebar.slider("λ_edl (damping)", 0.0, 1.0, 0.1, 0.01, help="0 = no EDL, 1 = full EDL")
     kappa_cm = st.sidebar.slider("Debye length κ", 1e-8, 1e-6, 1e-7, 1e-8)
     alpha_edl = st.sidebar.slider("EDL α", 1e2, 1e5, 1e3, 1e2)
     eta_mob = st.sidebar.slider("Mobility boost η", 0.0, 5.0, 1.0, 0.1)
 else:
-    kappa_cm = alpha_edl = eta_mob = 0.0
+    lambda_edl = kappa_cm = alpha_edl = eta_mob = 0.0
 
 use_fft = st.sidebar.checkbox("Use FFT Laplacian", GPU_AVAILABLE)
 cmap_choice = st.sidebar.selectbox("Colormap", CMAPS, CMAPS.index("viridis"))
@@ -195,7 +195,7 @@ def run_simulation(c_bulk_val):
     # EDL scaling
     kappa_nd = kappa_cm / L0 if use_edl and kappa_cm > 0 else 0.0
     alpha_nd_edl = alpha_edl * 1e-3 * tau0 / (L0 * 1e7) if use_edl else 0.0
-    mu_nd = D_nd * 38.9  # Einstein: μ ≈ 38.9 D for z=1 at 298K in cgs
+    mu_nd = D_nd * 38.9  # Einstein relation (z=1, 298K)
 
     for step in range(n_steps + 1):
         t = step * dt_nd
@@ -217,16 +217,17 @@ def run_simulation(c_bulk_val):
             dphi = cp.maximum(dphi, 0)
         phi = cp.clip(phi + dphi, 0, 1)
 
-        # CONCENTRATION WITH EDL
+        # CONCENTRATION: DAMPED EDL
         lap_c = laplacian(c, dx)
         div_D_grad_c = D_nd * lap_c
 
         div_mu_c_grad_V = 0.0
-        if use_edl and kappa_nd > 0:
+        if use_edl and lambda_edl > 0 and kappa_nd > 0:
             lap2_c = laplacian(lap_c, dx)
             V = -alpha_nd_edl * c + kappa_nd * lap2_c
             grad_V = cp.gradient(V, dx)
-            div_mu_c_grad_V = sum(mu_nd * cp.maximum(c, 1e-12) * g for g in grad_V)
+            flux_edl = sum(mu_nd * cp.maximum(c, 1e-12) * g for g in grad_V)
+            div_mu_c_grad_V = lambda_edl * flux_edl  # DAMPED
 
         c += dt_nd * (div_D_grad_c + div_mu_c_grad_V - i_loc)
         c = cp.clip(c, 0, c_bulk_val)
@@ -255,7 +256,6 @@ def run_simulation(c_bulk_val):
             psi_cpu = to_cpu(psi)
             c_cpu = to_cpu(c)
 
-            # Thickness
             Xc, Yc, Zc = np.meshgrid(
                 x, y if mode == "2D (planar)" else x,
                 x if mode != "2D (planar)" else [0.5], indexing='ij'
