@@ -24,7 +24,7 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm7-streamlit-red)](https://electrolessdeposition-phasefieldsimulation7.streamlit.app/) # postprocessed-2D/3D numba , Ag shell thickness (dimensionalized)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm10-streamlit-red)](https://electrolessdeposition-phasefieldsimulation10.streamlit.app/) # a context where f_int decrease drastically with time and so bulk phi diffuses
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm10-streamlit-red)](https://electrolessdeposition-phasefieldsimulation10.streamlit.app/) # a context where f_int decrease drastically with time and so bulk phi diffuses (compare with pfm9 for learning about phase design)
 
 
 
