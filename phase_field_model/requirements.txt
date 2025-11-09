@@ -4,3 +4,4 @@ plotly
 pyvista
 numba
 meshio
+cupy-cuda12x
