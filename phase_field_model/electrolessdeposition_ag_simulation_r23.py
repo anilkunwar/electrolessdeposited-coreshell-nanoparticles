@@ -102,6 +102,13 @@ if use_edl:
     lambda0_edl = st.sidebar.slider("λ₀ (initial boost)", 0.0, 5.0, 2.0, 0.1)
     tau_edl_nd = st.sidebar.slider("τ_edl (decay time, nd)", 1e-3, 1.0, 0.05, 0.005)
     alpha_edl = st.sidebar.slider("EDL strength α", 0.0, 10.0, 3.0, 0.1)
+    kinetic_factor = st.sidebar.number_input(
+        "k_EDL (Kinetic Factor, e.g., 1e-5)",
+        min_value=1e-8,
+        max_value=1e-4,
+        value=1e-5,
+        format="%.1e"
+    )
 else:
     lambda0_edl = tau_edl_nd = alpha_edl = 0.0
 
@@ -208,7 +215,7 @@ def run_simulation(c_bulk_val):
         delta_int = cp.clip(delta_int, 0, 6 / max(eps, dx))
 
         # EDL CATALYST: interface-localized boost
-        edl_boost = 1.0 + lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
+        edl_boost = 1.0 + kinetic_factor *lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
         i_loc = k0_nd * c * (1 - phi) * (1 - psi) * delta_int * edl_boost
         i_loc = cp.clip(i_loc, 0, 1e6)
 
