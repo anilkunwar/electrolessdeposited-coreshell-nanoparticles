@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ELECTROLESS Ag — NUCLEATION-ONLY EDL (DECAYS TO ZERO)
-* EDL active only in early nucleation phase
-* λ_edl(t) = λ₀ * exp(-t / τ_edl) → full at t=0, zero after ~5τ_edl
-* 100% matches original model when EDL decays
-* GPU/CPU safe, batch, VTU/PVD/ZIP, GIF, PNG, CSV, material proxy
+ELECTROLESS Ag — STABLE NUCLEATION-ONLY EDL
+* EDL: ∇·(μ c ∇V), V = -α c → conservative drift
+* λ_edl(t) = λ₀ * exp(-t/τ_edl) → decays to zero
+* NO ∇⁴c → no stiffness
+* 100% matches original when EDL off
+* GPU/CPU, batch, VTU/PVD, GIF, PNG, CSV
 """
 
 import streamlit as st
@@ -49,8 +50,8 @@ except Exception:
     GIF_AVAILABLE = False
 
 # ------------------- PAGE -------------------
-st.set_page_config(page_title="Electroless Ag — Nucleation EDL", layout="wide")
-st.title("Electroless Ag — Nucleation-Only EDL Phase-Field Model")
+st.set_page_config(page_title="Electroless Ag — Stable EDL", layout="wide")
+st.title("Electroless Ag — Stable Nucleation-Only EDL Phase-Field Model")
 
 plt.style.use("seaborn-v0_8-paper")
 plt.rcParams.update({
@@ -100,11 +101,10 @@ use_edl = st.sidebar.checkbox("Enable Nucleation EDL", True)
 if use_edl:
     lambda0_edl = st.sidebar.slider("λ₀ (initial strength)", 0.0, 1.0, 0.5, 0.05)
     tau_edl_nd = st.sidebar.slider("τ_edl (decay time, nd)", 1e-3, 1.0, 0.05, 0.005)
-    kappa_cm = st.sidebar.slider("Debye length κ", 1e-8, 1e-6, 1e-7, 1e-8)
-    alpha_edl = st.sidebar.slider("EDL α", 1e2, 1e5, 1e3, 1e2)
+    alpha_edl = st.sidebar.slider("EDL strength α (nd)", 0.0, 50.0, 5.0, 0.5)
     eta_mob = st.sidebar.slider("Mobility boost η", 0.0, 5.0, 1.0, 0.1)
 else:
-    lambda0_edl = tau_edl_nd = kappa_cm = alpha_edl = eta_mob = 0.0
+    lambda0_edl = tau_edl_nd = alpha_edl = eta_mob = 0.0
 
 use_fft = st.sidebar.checkbox("Use FFT Laplacian", GPU_AVAILABLE)
 cmap_choice = st.sidebar.selectbox("Colormap", CMAPS, CMAPS.index("viridis"))
@@ -199,10 +199,9 @@ def run_simulation(c_bulk_val):
     softness = 0.01 if "B" in growth_model else 0.0
     max_th = 0.0
 
-    # EDL scaling
-    kappa_nd = kappa_cm / L0 if use_edl and kappa_cm > 0 else 0.0
-    alpha_nd_edl = alpha_edl * 1e-3 * tau0 / (L0 * 1e7) if use_edl else 0.0
-    mu_nd = D_nd * 38.9  # Einstein relation (z=1, 298K)
+    # EDL scaling (FIXED)
+    alpha_nd_edl = alpha_edl  # clean nondimensional
+    mu_nd = D_nd * 38.9  # Einstein relation: μ = D / (kT/e), kT/e ≈ 0.0257 V → 1/0.0257 ≈ 38.9
 
     for step in range(n_steps + 1):
         t_nd = step * dt_nd
@@ -225,17 +224,19 @@ def run_simulation(c_bulk_val):
             dphi = cp.maximum(dphi, 0)
         phi = cp.clip(phi + dphi, 0, 1)
 
-        # CONCENTRATION: TIME-DECAYING EDL
+        # CONCENTRATION: DIFFUSION + EDL DRIFT
         lap_c = laplacian(c, dx)
         div_D_grad_c = D_nd * lap_c
 
+        # EDL: ∇·(μ c ∇V), V = -α c
         div_mu_c_grad_V = 0.0
-        if use_edl and lambda_edl_t > 0 and kappa_nd > 0:
-            lap2_c = laplacian(lap_c, dx)
-            V = -alpha_nd_edl * c + kappa_nd * lap2_c
+        if use_edl and lambda_edl_t > 0 and alpha_nd_edl > 0:
+            V = -alpha_nd_edl * c
             grad_V = cp.gradient(V, dx)
-            flux_edl = sum(mu_nd * cp.maximum(c, 1e-12) * g for g in grad_V)
-            div_mu_c_grad_V = lambda_edl_t * flux_edl  # ← DECAYS
+            c_safe = cp.maximum(c, 1e-12)
+            flux_edl = [mu_nd * c_safe * g for g in grad_V]
+            div_mu_c_grad_V = sum(cp.gradient(f, dx)[i] for i, f in enumerate(flux_edl))
+            div_mu_c_grad_V *= lambda_edl_t  # time decay
 
         c += dt_nd * (div_D_grad_c + div_mu_c_grad_V - i_loc)
         c = cp.clip(c, 0, c_bulk_val)
@@ -334,7 +335,7 @@ if len(st.session_state.history) > 1:
         if any(e != 0 for e in edl):
             ax3.plot(tdiag, edl, label=f"EDL flux", color=colors[idx], ls=':', lw=2)
 
-    ax1.set_xlabel("Time (s)"); ax1.set.ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
+    ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
     ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²-norm"); ax2.legend(); ax2.grid(True, alpha=0.3)
     ax3.set_xlabel("Time (s)"); ax3.set_ylabel("EDL Flux"); ax3.legend(); ax3.grid(True, alpha=0.3)
     st.pyplot(fig)
