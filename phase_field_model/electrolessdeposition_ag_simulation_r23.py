@@ -215,7 +215,7 @@ def run_simulation(c_bulk_val):
         delta_int = cp.clip(delta_int, 0, 6 / max(eps, dx))
 
         # EDL CATALYST: interface-localized boost
-        edl_boost = 1.0 #+ kinetic_factor *lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
+        edl_boost = 1.0 + kinetic_factor *lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
         i_loc = k0_nd * c * (1 - phi) * (1 - psi) * delta_int * edl_boost
         i_loc = cp.clip(i_loc, 0, 1e6)
 
