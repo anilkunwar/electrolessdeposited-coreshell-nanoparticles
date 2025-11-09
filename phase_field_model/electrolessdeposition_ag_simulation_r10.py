@@ -136,7 +136,7 @@ def scale_time(t): return t * tau0
 def compute_thickness(phi, psi, coords, mode="2D", thresh=0.5):
     if mode.startswith("2D"):
         x, y = coords
-        X, Y = np.meshgrid(x,, y, indexing='ij')
+        X, Y = np.meshgrid(x, y, indexing='ij')
         dist = np.sqrt((X-0.5)**2 + (Y-0.5)**2)
     else:
         x, y, z = coords
