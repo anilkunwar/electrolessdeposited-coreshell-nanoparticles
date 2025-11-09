@@ -134,6 +134,7 @@ def compute_thickness(phi, psi, coords, core_frac, thresh):
     return np.max(dist[mask]) - core_frac if np.any(mask) else 0.0
 
 # ------------------- 2D SIMULATION -------------------
+# ------------------- 2D SIMULATION -------------------
 def run_2d():
     L = 1.0; dx = L/(Nx-1)
     x = np.linspace(0, L, Nx)
@@ -166,7 +167,7 @@ def run_2d():
         gphi = np.sqrt(gx**2 + gy**2 + 1e-30)
         delta_int = 6*phi*(1-phi)*(1-psi)*gphi
         delta_int = np.clip(delta_int, 0, 6/max(eps,dx))
-        f_bulk = 2*beta_nd  nd*phi*(1-phi)*(1-2*phi)
+        f_bulk = 2 * beta_nd * phi * (1 - phi) * (1 - 2 * phi)  # ← FIXED LINE
         i_loc = k0_nd * c * (1-phi) * (1-psi) * delta_int
         i_loc = np.clip(i_loc, 0, 1e6)
 
