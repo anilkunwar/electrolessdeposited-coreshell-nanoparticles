@@ -14,6 +14,13 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+plt.rcParams.update({
+    "font.size": font_size,
+    "axes.linewidth": axes_lw,
+    "xtick.major.width": tick_lw,
+    "ytick.major.width": tick_lw,
+    "lines.linewidth": curve_lw,
+})
 import pandas as pd
 import time
 import io
