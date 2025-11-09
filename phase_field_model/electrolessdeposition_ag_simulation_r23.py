@@ -14,13 +14,6 @@ import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-plt.rcParams.update({
-    "font.size": font_size,
-    "axes.linewidth": axes_lw,
-    "xtick.major.width": tick_lw,
-    "ytick.major.width": tick_lw,
-    "lines.linewidth": curve_lw,
-})
 import pandas as pd
 import time
 import io
@@ -319,30 +312,29 @@ if run_single_button and selected_labels:
 if len(st.session_state.history) > 1:
     st.header("Batch Comparison")
 
-    # ------------------- VISUALIZATION CONTROLS -------------------
-    st.sidebar.header("Visualization Quality")
-    curve_lw = st.sidebar.slider("Curve line width", 0.5, 5.0, 2.0, 0.1)
-    axes_lw = st.sidebar.slider("Axes / box line width", 0.5, 5.0, 1.0, 0.1)
-    tick_lw  = st.sidebar.slider("Tick width", 0.5, 3.0, 1.0, 0.1)
-    font_size = st.sidebar.slider("Font size", 6, 20, 12, 1)
-    cmap_choice_line = st.sidebar.selectbox("Colormap for curves", CMAPS, index=CMAPS.index("viridis"))
-    cmap_choice_img  = st.sidebar.selectbox("Colormap for images", CMAPS, index=CMAPS.index("viridis"))
+    # --- Styling sliders ---
+    st.sidebar.subheader("Plot Styling")
+    font_size   = st.sidebar.slider("Font size", 8, 20, 12)
+    axes_lw     = st.sidebar.slider("Axes linewidth", 0.5, 3.0, 1.0)
+    tick_lw     = st.sidebar.slider("Tick width", 0.5, 3.0, 1.0)
+    curve_lw    = st.sidebar.slider("Curve linewidth", 0.5, 5.0, 2.0)
+    cmap_choice_curves = st.sidebar.selectbox("Curve Colormap", plt.colormaps(), index=plt.colormaps().index("viridis"))
 
-    # Update matplotlib rcParams dynamically
+    # Apply styling
     plt.rcParams.update({
         "font.size": font_size,
         "axes.linewidth": axes_lw,
-        "xtick.width": tick_lw,
-        "ytick.width": tick_lw,
+        "xtick.major.width": tick_lw,
+        "ytick.major.width": tick_lw,
         "lines.linewidth": curve_lw,
     })
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-    cmap = plt.get_cmap(cmap_choice_line)
+    cmap = plt.get_cmap(cmap_choice_curves)
     colors = cmap(np.linspace(0, 1, len(st.session_state.history)))
 
     for idx, (c, data) in enumerate(st.session_state.history.items()):
-        # Thickness plot
+        # Thickness
         times_th = [scale_time(t) for t, _, _, _, _, _ in data["thick"]]
         ths_nm   = [th * 1e9 for _, _, th, _, _, _ in data["thick"]]
         ax1.plot(times_th, ths_nm, label=f"c = {c:.3g}", color=colors[idx], lw=curve_lw)
@@ -352,12 +344,12 @@ if len(st.session_state.history) > 1:
         bulk  = [b for _, _, _, _, b, _, _ in data["diag"]]
         grad  = [g for _, _, _, _, _, g, _ in data["diag"]]
         edl   = [e for _, _, _, _, _, _, e in data["diag"]]
+
         ax2.semilogy(tdiag, np.maximum(bulk, 1e-30), label=f"bulk", color=colors[idx], lw=curve_lw)
         ax2.semilogy(tdiag, np.maximum(grad, 1e-30), label=f"grad", color=colors[idx], ls='--', lw=curve_lw)
         if any(e != 0 for e in edl):
             ax3.plot(tdiag, edl, label=f"EDL boost", color=colors[idx], ls=':', lw=curve_lw)
 
-    # Axes labels and grid
     ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
     ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²-norm"); ax2.legend(); ax2.grid(True, alpha=0.3)
     ax3.set_xlabel("Time (s)"); ax3.set_ylabel("EDL Boost"); ax3.legend(); ax3.grid(True, alpha=0.3)
@@ -371,11 +363,11 @@ if len(st.session_state.history) > 1:
 
         fig_decay, ax = plt.subplots()
         ax.plot([scale_time(t) for t in t_nd_range], lambda_t, 'r-', lw=curve_lw)
+
         ax.set_xlabel("Time (s)"); ax.set_ylabel("λ_edl(t)")
         ax.set_title(f"λ₀={lambda0_edl}, τ_edl={tau_edl_nd*tau0:.2e} s")
+        ax.ticklabel_format(style='sci', axis='x', scilimits=(0,0))  # Always scientific format for time
         ax.grid(True, alpha=0.3)
-        # Force exponential format for x-axis
-        ax.ticklabel_format(axis='x', style='sci', scilimits=(0,0))
         st.pyplot(fig_decay)
 
 
