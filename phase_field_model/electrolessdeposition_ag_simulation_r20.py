@@ -296,7 +296,7 @@ if len(st.session_state.history) > 1:
         ths   = [th*1e9 for _, _, th, _, _, _ in data["thick"]]
         ax1.plot(times, ths, label=f"c = {c:.3g}", color=colors[idx], lw=2)
 
-        tdiag = [scale_time(t) for t, _, _, _, _, _, _ in data["diag"]]
+        tdiag = [scale_time(t) for t, _, _, _, _, _ in data["diag"]]
         bulk  = [b for _, _, _, _, b, _ in data["diag"]]
         grad  = [g for _, _, _, _, _, g in data["diag"]]
         ax2.semilogy(tdiag, np.maximum(bulk, 1e-30), label=f"c={c:.3g} bulk", color=colors[idx], lw=1.5)
