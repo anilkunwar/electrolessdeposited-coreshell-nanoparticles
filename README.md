@@ -44,6 +44,10 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm19-streamlit-red)](https://electrolessdeposition-phasefieldsimulation19.streamlit.app/) # pfm18 + file download options in VTU format
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm20-streamlit-red)](https://electrolessdeposition-phasefieldsimulation20.streamlit.app/)  # integrated single concentration + batch simulations 
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm21-streamlit-red)](https://electrolessdeposition-phasefieldsimulation21.streamlit.app/)  # pfm20 + gpu accelereation with CuPy
+
 
 
 
