@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ELECTROLESS Ag — STABLE NUCLEATION-ONLY EDL
-* EDL: ∇·(μ c ∇V), V = -α c → conservative drift
-* λ_edl(t) = λ₀ * exp(-t/τ_edl) → decays to zero
-* NO ∇⁴c → no stiffness
+ELECTROLESS Ag — EDL AS KINETIC CATALYST
+* EDL boosts reaction rate i_loc via λ_edl(t) = λ₀ exp(-t/τ_edl)
+* Localized at interface via delta_int = 6ϕ(1-ϕ)|∇ϕ|
+* No ∇·(μc∇V) → stable, no ion migration
 * 100% matches original when EDL off
 * GPU/CPU, batch, VTU/PVD, GIF, PNG, CSV
 """
@@ -50,8 +50,8 @@ except Exception:
     GIF_AVAILABLE = False
 
 # ------------------- PAGE -------------------
-st.set_page_config(page_title="Electroless Ag — Stable EDL", layout="wide")
-st.title("Electroless Ag — Stable Nucleation-Only EDL Phase-Field Model")
+st.set_page_config(page_title="Electroless Ag — EDL Catalyst", layout="wide")
+st.title("Electroless Ag — EDL as Nucleation Catalyst")
 
 plt.style.use("seaborn-v0_8-paper")
 plt.rcParams.update({
@@ -96,15 +96,14 @@ M_nd     = st.sidebar.slider("M", 1e-3, 1.0, 0.2, 1e-3)
 D_nd     = st.sidebar.slider("D", 0.0, 1.0, 0.05, 0.005)
 alpha_nd = st.sidebar.slider("α (proxy)", 0.0, 10.0, 2.0, 0.1)
 
-st.sidebar.header("Nucleation-Only EDL")
-use_edl = st.sidebar.checkbox("Enable Nucleation EDL", True)
+st.sidebar.header("EDL as Catalyst")
+use_edl = st.sidebar.checkbox("Enable EDL Catalyst", True)
 if use_edl:
-    lambda0_edl = st.sidebar.slider("λ₀ (initial strength)", 0.0, 1.0, 0.5, 0.05)
+    lambda0_edl = st.sidebar.slider("λ₀ (initial boost)", 0.0, 5.0, 2.0, 0.1)
     tau_edl_nd = st.sidebar.slider("τ_edl (decay time, nd)", 1e-3, 1.0, 0.05, 0.005)
-    alpha_edl = st.sidebar.slider("EDL strength α (nd)", 0.0, 50.0, 5.0, 0.5)
-    eta_mob = st.sidebar.slider("Mobility boost η", 0.0, 5.0, 1.0, 0.1)
+    alpha_edl = st.sidebar.slider("EDL strength α", 0.0, 10.0, 3.0, 0.1)
 else:
-    lambda0_edl = tau_edl_nd = alpha_edl = eta_mob = 0.0
+    lambda0_edl = tau_edl_nd = alpha_edl = 0.0
 
 use_fft = st.sidebar.checkbox("Use FFT Laplacian", GPU_AVAILABLE)
 cmap_choice = st.sidebar.selectbox("Colormap", CMAPS, CMAPS.index("viridis"))
@@ -129,8 +128,8 @@ def nd_to_real(x): return x * L0
 def to_cpu(arr): return cp.asnumpy(arr) if GPU_AVAILABLE else arr
 def to_gpu(arr): return cp.asarray(arr) if GPU_AVAILABLE else arr
 
-# ------------------- TIME-DECAYING EDL -------------------
-def get_lambda_edl(t_nd):
+# ------------------- EDL CATALYST -------------------
+def get_edl_factor(t_nd):
     if not use_edl or lambda0_edl <= 0 or tau_edl_nd <= 0:
         return 0.0
     return lambda0_edl * cp.exp(-t_nd / tau_edl_nd)
@@ -199,46 +198,32 @@ def run_simulation(c_bulk_val):
     softness = 0.01 if "B" in growth_model else 0.0
     max_th = 0.0
 
-    # EDL scaling (FIXED)
-    alpha_nd_edl = alpha_edl  # clean nondimensional
-    mu_nd = D_nd * 38.9  # Einstein relation: μ = D / (kT/e), kT/e ≈ 0.0257 V → 1/0.0257 ≈ 38.9
-
     for step in range(n_steps + 1):
         t_nd = step * dt_nd
-        lambda_edl_t = get_lambda_edl(t_nd)
+        lambda_edl_t = get_edl_factor(t_nd)
 
         grad_phi = cp.gradient(phi, dx)
         gphi = cp.sqrt(sum(g**2 for g in grad_phi) + 1e-30)
         delta_int = 6 * phi * (1 - phi) * (1 - psi) * gphi
         delta_int = cp.clip(delta_int, 0, 6 / max(eps, dx))
-        f_bulk = 2 * beta_nd * phi * (1 - phi) * (1 - 2 * phi)
-        i_loc = k0_nd * c * (1 - phi) * (1 - psi) * delta_int
+
+        # EDL CATALYST: interface-localized boost
+        edl_boost = 1.0 + lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
+        i_loc = k0_nd * c * (1 - phi) * (1 - psi) * delta_int * edl_boost
         i_loc = cp.clip(i_loc, 0, 1e6)
 
+        f_bulk = 2 * beta_nd * phi * (1 - phi) * (1 - 2 * phi)
         lap_phi = laplacian(phi, dx)
         dep = M_nd * i_loc
         curv = M_nd * gamma_nd * lap_phi
-        M_local = M_nd * (1 + eta_mob * phi)
-        dphi = dt_nd * M_local * (dep + cp.maximum(curv, 0) - softness * f_bulk)
+        dphi = dt_nd * (dep + cp.maximum(curv, 0) - softness * M_nd * f_bulk)
         if softness == 0:
             dphi = cp.maximum(dphi, 0)
         phi = cp.clip(phi + dphi, 0, 1)
 
-        # CONCENTRATION: DIFFUSION + EDL DRIFT
+        # CONCENTRATION: PURE DIFFUSION + CONSUMPTION
         lap_c = laplacian(c, dx)
-        div_D_grad_c = D_nd * lap_c
-
-        # EDL: ∇·(μ c ∇V), V = -α c
-        div_mu_c_grad_V = 0.0
-        if use_edl and lambda_edl_t > 0 and alpha_nd_edl > 0:
-            V = -alpha_nd_edl * c
-            grad_V = cp.gradient(V, dx)
-            c_safe = cp.maximum(c, 1e-12)
-            flux_edl = [mu_nd * c_safe * g for g in grad_V]
-            div_mu_c_grad_V = sum(cp.gradient(f, dx)[i] for i, f in enumerate(flux_edl))
-            div_mu_c_grad_V *= lambda_edl_t  # time decay
-
-        c += dt_nd * (div_D_grad_c + div_mu_c_grad_V - i_loc)
+        c += dt_nd * (D_nd * lap_c - i_loc)
         c = cp.clip(c, 0, c_bulk_val)
 
         # BCs
@@ -258,7 +243,7 @@ def run_simulation(c_bulk_val):
 
         bulk_norm = cp.sqrt(cp.mean(f_bulk**2))
         grad_norm = cp.sqrt(cp.mean((M_nd * gamma_nd * lap_phi)**2))
-        edl_flux = float(cp.sum(div_mu_c_grad_V)) if use_edl else 0.0
+        edl_flux = float(cp.sum(edl_boost - 1.0)) if use_edl else 0.0
 
         if step % save_every == 0 or step == n_steps:
             phi_cpu = to_cpu(phi)
@@ -333,17 +318,17 @@ if len(st.session_state.history) > 1:
         ax2.semilogy(tdiag, np.maximum(bulk, 1e-30), label=f"bulk", color=colors[idx], lw=1.5)
         ax2.semilogy(tdiag, np.maximum(grad, 1e-30), label=f"grad", color=colors[idx], ls='--', lw=1.5)
         if any(e != 0 for e in edl):
-            ax3.plot(tdiag, edl, label=f"EDL flux", color=colors[idx], ls=':', lw=2)
+            ax3.plot(tdiag, edl, label=f"EDL boost", color=colors[idx], ls=':', lw=2)
 
     ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
     ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²-norm"); ax2.legend(); ax2.grid(True, alpha=0.3)
-    ax3.set_xlabel("Time (s)"); ax3.set_ylabel("EDL Flux"); ax3.legend(); ax3.grid(True, alpha=0.3)
+    ax3.set_xlabel("Time (s)"); ax3.set_ylabel("EDL Boost"); ax3.legend(); ax3.grid(True, alpha=0.3)
     st.pyplot(fig)
 
     # EDL Decay Plot
-    st.subheader("EDL Decay Profile")
+    st.subheader("EDL Catalyst Decay")
     t_nd_range = np.linspace(0, n_steps * dt_nd, 200)
-    lambda_t = [float(to_cpu(get_lambda_edl(t))) for t in t_nd_range]
+    lambda_t = [float(to_cpu(get_edl_factor(t))) for t in t_nd_range]
     fig_decay, ax = plt.subplots()
     ax.plot([scale_time(t) for t in t_nd_range], lambda_t, 'r-', lw=2)
     ax.set_xlabel("Time (s)"); ax.set_ylabel("λ_edl(t)")
@@ -378,7 +363,7 @@ if st.session_state.history:
     with col1:
         st.write(
             f"**c = {selected_c:.3g}** | **t = {t_real:.3e} s** | **Th = {th_nm:.2f} nm** | "
-            f"**||bulk||₂ = {bulk_norm:.2e}** | **||grad||₂ = {grad_norm:.2e}** | **EDL = {edl_flux:.2e}**"
+            f"**||bulk||₂ = {bulk_norm:.2e}** | **||grad||₂ = {grad_norm:.2e}** | **EDL boost = {edl_flux:.2e}**"
         )
         fig, ax = plt.subplots(figsize=(6, 5))
         field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
@@ -403,7 +388,7 @@ if st.session_state.history:
 
         st.subheader("Diagnostics")
         df = pd.DataFrame(diag,
-            columns=["t", "c_mean", "c_max", "total_Ag", "||bulk||₂", "||grad||₂", "EDL_flux"])
+            columns=["t", "c_mean", "c_max", "total_Ag", "||bulk||₂", "||grad||₂", "EDL_boost"])
         st.dataframe(df.tail(10).style.format("{:.3e}"))
         csv = df.to_csv(index=False).encode()
         st.download_button("Download CSV", csv, f"diag_c_{selected_c:.3g}.csv", "text/csv")
