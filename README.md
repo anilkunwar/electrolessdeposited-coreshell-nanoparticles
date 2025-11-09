@@ -48,6 +48,8 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm21-streamlit-red)](https://electrolessdeposition-phasefieldsimulation21.streamlit.app/)  # pfm20 + gpu accelereation with CuPy
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm22-streamlit-red)](https://electrolessdeposition-phasefieldsimulation22.streamlit.app/)  # pfm21 adjusted to work with numpy (cpu) if gpu is not available
+
 
 
 
