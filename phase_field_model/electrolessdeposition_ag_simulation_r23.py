@@ -312,18 +312,24 @@ if run_single_button and selected_labels:
 # ------------------- BATCH COMPARISON + EDL DECAY -------------------
 # ------------------- BATCH COMPARISON + EDL DECAY -------------------
 # ------------------- BATCH COMPARISON + EDL DECAY -------------------
+# ------------------- BATCH COMPARISON + EDL DECAY -------------------
 if len(st.session_state.history) > 1:
     st.header("Batch Comparison")
 
     # --- Styling sliders ---
     st.sidebar.subheader("Plot Styling")
-    font_size   = st.sidebar.slider("Font size", 8, 20, 12)
-    axes_lw     = st.sidebar.slider("Axes linewidth", 0.5, 3.0, 1.0)
-    tick_lw     = st.sidebar.slider("Tick width", 0.5, 3.0, 1.0)
-    curve_lw    = st.sidebar.slider("Curve linewidth", 0.5, 5.0, 2.0)
+    font_size        = st.sidebar.slider("Font size", 8, 20, 12)
+    axes_lw          = st.sidebar.slider("Axes linewidth", 0.5, 3.0, 1.0)
+    tick_lw          = st.sidebar.slider("Tick width", 0.5, 3.0, 1.0)
+    curve_lw         = st.sidebar.slider("Curve linewidth", 0.5, 5.0, 2.0)
+    figsize_x        = st.sidebar.slider("Figure width", 8, 24, 18)
+    figsize_y        = st.sidebar.slider("Figure height", 4, 12, 6)
+    hspace           = st.sidebar.slider("Horizontal spacing", 0.1, 1.0, 0.3)
+    legend_loc       = st.sidebar.selectbox("Legend location", ["best", "upper right", "upper left", "lower right", "lower left", "none"], index=0)
     cmap_choice_curves = st.sidebar.selectbox("Curve Colormap", plt.colormaps(), index=plt.colormaps().index("viridis"))
 
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(figsize_x, figsize_y))
+    fig.subplots_adjust(wspace=hspace)  # horizontal spacing
 
     cmap = plt.get_cmap(cmap_choice_curves)
     colors = cmap(np.linspace(0, 1, len(st.session_state.history)))
@@ -350,20 +356,23 @@ if len(st.session_state.history) > 1:
         ax.set_xlabel("Time (s)", fontsize=font_size)
         ax.tick_params(width=tick_lw, labelsize=font_size)
         ax.yaxis.set_tick_params(width=tick_lw, labelsize=font_size)
-        ax.spines['top'].set_linewidth(axes_lw)
-        ax.spines['right'].set_linewidth(axes_lw)
-        ax.spines['bottom'].set_linewidth(axes_lw)
-        ax.spines['left'].set_linewidth(axes_lw)
+        for spine in ax.spines.values():
+            spine.set_linewidth(axes_lw)
         ax.grid(True, alpha=0.3)
 
-    ax1.set_ylabel("Thickness (nm)", fontsize=font_size); ax1.legend(fontsize=font_size)
-    ax2.set_ylabel("L²-norm", fontsize=font_size); ax2.legend(fontsize=font_size)
-    ax3.set_ylabel("EDL Boost", fontsize=font_size); ax3.legend(fontsize=font_size)
-
-    # Force exponential format for x-axis
-    for ax in [ax1, ax2, ax3]:
+        # Force exponential format for x-axis
         ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
-        ax.xaxis.get_major_formatter().set_powerlimits((0, 0))
+        ax.xaxis.get_major_formatter().set_powerlimits((0, 0))  # always scientific notation
+
+        # Legend on/off
+        if legend_loc != "none":
+            ax.legend(fontsize=font_size, loc=legend_loc)
+        else:
+            ax.legend_.remove() if ax.legend_ else None
+
+    ax1.set_ylabel("Thickness (nm)", fontsize=font_size)
+    ax2.set_ylabel("L²-norm", fontsize=font_size)
+    ax3.set_ylabel("EDL Boost", fontsize=font_size)
 
     st.pyplot(fig)
 
@@ -373,18 +382,16 @@ if len(st.session_state.history) > 1:
         t_nd_range = np.linspace(0, n_steps * dt_nd, 200)
         lambda_t = [float(to_cpu(get_edl_factor(t, True, lambda0_edl, tau_edl_nd))) for t in t_nd_range]
 
-        fig_decay, ax = plt.subplots()
+        fig_decay, ax = plt.subplots(figsize=(figsize_x/2, figsize_y))  # smaller figure
         ax.plot([scale_time(t) for t in t_nd_range], lambda_t, 'r-', lw=curve_lw)
 
         ax.set_xlabel("Time (s)", fontsize=font_size)
         ax.set_ylabel("λ_edl(t)", fontsize=font_size)
         ax.tick_params(width=tick_lw, labelsize=font_size)
-        ax.yaxis.set_tick_params(width=tick_lw, labelsize=font_size)
-        ax.spines['top'].set_linewidth(axes_lw)
-        ax.spines['right'].set_linewidth(axes_lw)
-        ax.spines['bottom'].set_linewidth(axes_lw)
-        ax.spines['left'].set_linewidth(axes_lw)
+        for spine in ax.spines.values():
+            spine.set_linewidth(axes_lw)
         ax.grid(True, alpha=0.3)
+
         ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
         ax.xaxis.get_major_formatter().set_powerlimits((0, 0))  # always scientific notation
         ax.set_title(f"λ₀={lambda0_edl}, τ_edl={tau_edl_nd*tau0:.2e} s", fontsize=font_size)
