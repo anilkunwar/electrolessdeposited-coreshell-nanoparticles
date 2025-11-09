@@ -237,8 +237,7 @@ def run_simulation(c_bulk_val):
             total_ag = np.sum(i_loc) * dt_nd
 
             snapshots.append((t, phi.copy(), c.copy(), psi.copy()))
-            #diags.append((t, c_mean, c_max, total_ag, bulk_norm, grad_norm))
-            diags.append((t, c_mean, c_max, total_ag, float(bulk_norm), float(grad_norm)))
+            diags.append((t, c_mean, c_max, total_ag, bulk_norm, grad_norm))
             thick.append((t, max_th, nd_to_real(max_th), c_mean, c_max, total_ag))
 
     return c_bulk_val, snapshots, diags, thick, coords
