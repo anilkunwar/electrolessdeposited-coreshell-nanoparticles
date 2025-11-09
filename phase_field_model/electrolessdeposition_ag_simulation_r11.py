@@ -4,18 +4,9 @@
 streamlit_electroless_enhanced.py
 --------------------------------
 2-D / 3-D phase-field electroless Ag deposition.
-All non-dimensional parameters are kept exactly as in the original
-script; three user-adjustable scales (length, energy, time) convert
-the simulation to real physical units while preserving numerical
-behaviour and convergence.
-
-NEW FEATURES (from the second code):
-* molar-ratio control ([Ag]/[Cu])
-* selectable BCs (Neumann / Dirichlet)
-* automatic shell-thickness tracking (non-dim + nm)
-* multi-ratio sweep + plots + CSV
-* thickness-evolution plot for single run
+Modified to use only one concentration with 1:1 molar ratio.
 """
+
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -67,25 +58,10 @@ L0 = L0 * 1e-9          # nm → m
 E0 = E0 * 1e-14         # ×10⁻¹⁴ J → J
 tau0 = tau0 * 1e-4      # ×10⁻⁴ s → s
 
-# ------------------- FIXED: Molar ratio control -------------------
-st.sidebar.header("Molar Ratio & Concentration")
-molar_ratio_mode = st.sidebar.selectbox(
-    "Concentration control mode",
-    ["Fixed c_bulk", "Molar ratio c = [Ag]/[Cu]"]
-)
-
-# Base reservoir concentration
-c_bulk_reservoir = st.sidebar.slider("Base reservoir concentration c_bulk", 0.1, 10.0, 2.0, 0.1)
-
-if molar_ratio_mode == "Fixed c_bulk":
-    c_bulk_nd = c_bulk_reservoir
-    molar_ratio_values = [1.0]  # Single ratio for fixed mode
-else:
-    st.sidebar.markdown("**Preset Ag:Cu ratios** (1:5 → 1:1)")
-    molar_ratios = np.array([1/5, 1/4, 1/3, 1/2, 1.0])
-    molar_ratio_values = [c_bulk_reservoir * ratio for ratio in molar_ratios]
-    st.sidebar.write("Active concentrations → c_bulk =", [f"{x:.3f}" for x in molar_ratio_values])
-    c_bulk_nd = molar_ratio_values[0]  # start value for single run
+# ------------------- concentration control -------------------
+st.sidebar.header("Concentration")
+c_bulk_nd = st.sidebar.slider("c_bulk ([Ag]/[Cu] = 1:1)", 0.1, 10.0, 1.0, 0.1,
+                             help="Fixed concentration with 1:1 molar ratio")
 
 # ------------------- boundary-condition selector -------------------
 st.sidebar.header("Boundary Conditions")
@@ -108,17 +84,9 @@ else:
     Ny = Nx
     Nz = st.sidebar.slider("Nz", 16, 80, 40, 4)
 
-# FIXED: Set simulation time to approximately 150 seconds
-desired_real_time = 150.0  # seconds
-dt_nd = st.sidebar.number_input("dt (non-dim)", 1e-6, 2e-2, 1e-3, format="%.6f")
-# Calculate n_steps to achieve ~150 seconds
-n_steps_target = int(desired_real_time / (dt_nd * tau0))
-n_steps = st.sidebar.slider("n_steps", 50, 10000, min(n_steps_target, 10000), 50)
+dt_nd = st.sidebar.number_input("dt (non-dim)", 1e-6, 2e-2, 2e-4, format="%.6f")
+n_steps = st.sidebar.slider("n_steps", 50, 8000, 800, 50)
 save_every = st.sidebar.slider("save every (frames)", 1, 400, max(1, n_steps//20), 1)
-
-# Display estimated simulation time
-estimated_time = n_steps * dt_nd * tau0
-st.sidebar.write(f"Estimated simulation time: {estimated_time:.1f} s")
 
 # ------------------- physics (non-dimensional) -------------------
 st.sidebar.header("Physics params (non-dim)")
@@ -159,8 +127,6 @@ phi_threshold = st.sidebar.slider(
 )
 
 run_button = st.sidebar.button("Run Simulation")
-run_multiple_ratios = (st.sidebar.button("Run Multiple Molar Ratios")
-                       if molar_ratio_mode == "Molar ratio c = [Ag]/[Cu]" else None)
 export_vtu_button = st.sidebar.button("Export VTU/PVD/ZIP")
 download_diags_button = st.sidebar.button("Download diagnostics CSV")
 
@@ -430,29 +396,6 @@ def run_simulation_3d(params):
 
     return snapshots, diagnostics, thickness_data, (x, y, z)
 
-
-# ------------------- multi-ratio runner -------------------
-def run_multiple_simulations(params_base, concentrations):
-    results = {}
-    prog = st.progress(0)
-    status = st.empty()
-    for i, conc in enumerate(concentrations):
-        status.text(f"Running c_bulk = {conc:.3f} …")
-        p = params_base.copy()
-        p['c_bulk'] = conc
-        if p['mode'].startswith("2D"):
-            snapshots, diags, thick, coords = run_simulation_2d(p)
-        else:
-            snapshots, diags, thick, coords = run_simulation_3d(p)
-        results[conc] = {'snapshots': snapshots,
-                      'diagnostics': diags,
-                      'thickness': thick,
-                      'coords': coords}
-        prog.progress((i+1)/len(concentrations))
-    status.text("All simulations finished.")
-    return results
-
-
 # ------------------- pack base parameters -------------------
 params_base = {
     'Nx': Nx, 'Ny': Ny, 'Nz': Nz,
@@ -469,14 +412,14 @@ params_base = {
 }
 
 # ------------------- session state -------------------
-for key in ["snapshots","diagnostics","thickness_data","grid_coords","multiple_results"]:
+for key in ["snapshots","diagnostics","thickness_data","grid_coords"]:
     if key not in st.session_state:
         st.session_state[key] = None
 
 # ------------------- run -------------------
 if run_button:
     t0 = time.time()
-    st.info("Running single simulation …")
+    st.info("Running simulation with 1:1 molar ratio...")
     if mode.startswith("2D"):
         snapshots, diagnostics, thickness_data, coords = run_simulation_2d(params_base)
     else:
@@ -485,104 +428,7 @@ if run_button:
     st.session_state.diagnostics = diagnostics
     st.session_state.thickness_data = thickness_data
     st.session_state.grid_coords = coords
-    st.session_state.multiple_results = None
     st.success(f"Done in {time.time()-t0:.2f}s — {len(snapshots)} frames")
-
-if run_multiple_ratios and molar_ratio_mode == "Molar ratio c = [Ag]/[Cu]":
-    t0 = time.time()
-    st.info(f"Running {len(molar_ratio_values)} molar-ratio simulations …")
-    multiple_results = run_multiple_simulations(params_base, molar_ratio_values)
-    st.session_state.multiple_results = multiple_results
-    st.session_state.snapshots = None
-    st.success(f"All finished in {time.time()-t0:.2f}s")
-
-# ------------------- FIXED: multi-ratio results -------------------
-if st.session_state.multiple_results:
-    st.header("Shell Thickness vs Molar Ratio")
-    
-    # Calculate the actual molar ratios from concentrations
-    concentrations = list(st.session_state.multiple_results.keys())
-    molar_ratios = [conc / c_bulk_reservoir for conc in concentrations]
-    
-    final_nd, final_nm = [], []
-    for conc in concentrations:
-        data = st.session_state.multiple_results[conc]['thickness']
-        if data:
-            final_nd.append(data[-1][1])
-            final_nm.append(data[-1][2]*1e9)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,5))
-    
-    # Plot against molar ratios
-    ax1.plot(molar_ratios, final_nd, 'o-', lw=2, ms=8)
-    ax1.set_xlabel('[Ag]/[Cu]'); 
-    ax1.set_ylabel('Final thickness (non-dim)'); 
-    ax1.grid(True, alpha=0.3)
-    ax1.set_title('Shell Thickness vs Molar Ratio')
-    
-    ax2.plot(molar_ratios, final_nm, 's--', lw=2, ms=8, c='tab:orange')
-    ax2.set_xlabel('[Ag]/[Cu]'); 
-    ax2.set_ylabel('Final thickness (nm)'); 
-    ax2.grid(True, alpha=0.3)
-    ax2.set_title('Shell Thickness vs Molar Ratio')
-    
-    plt.tight_layout()
-    st.pyplot(fig)
-
-    # Data table with both concentrations and ratios
-    df_thick = pd.DataFrame({
-        '[Ag]/[Cu]': molar_ratios,
-        'c_bulk': concentrations,
-        'Thickness_nd': final_nd,
-        'Thickness_nm': final_nm
-    })
-    st.dataframe(df_thick.style.format({'Thickness_nm':'{:.2f}', 'c_bulk': '{:.3f}'}))
-    
-    st.download_button(
-        "Download final-thickness CSV",
-        df_thick.to_csv(index=False),
-        file_name=f"final_thickness_vs_ratio_{datetime.now():%Y%m%d_%H%M%S}.csv",
-        mime="text/csv"
-    )
-
-    st.subheader("Thickness Evolution (all ratios)")
-    fig_evo, ax_evo = plt.subplots(figsize=(10,6))
-    colors = plt.cm.viridis(np.linspace(0,1,len(concentrations)))
-    
-    for i, (conc, ratio) in enumerate(zip(concentrations, molar_ratios)):
-        data = st.session_state.multiple_results[conc]['thickness']
-        if data:
-            ts = [scale_time(t) for t,_,_ in data]
-            th = [th*1e9 for _,_,th in data]
-            ax_evo.plot(ts, th, label=f'[Ag]/[Cu] = {ratio:.3f}', color=colors[i], lw=2, marker='o', markersize=4)
-    
-    ax_evo.set_xlabel('Time (s)'); 
-    ax_evo.set_ylabel('Thickness (nm)')
-    ax_evo.set_title('Shell Growth for Different [Ag]/[Cu] Ratios')
-    ax_evo.legend(bbox_to_anchor=(1.05,1), loc='upper left')
-    ax_evo.grid(True, alpha=0.3)
-    plt.tight_layout()
-    st.pyplot(fig_evo)
-
-    # ---- full evolution CSV ----
-    evo_rows = []
-    for conc, ratio in zip(concentrations, molar_ratios):
-        for t_nd, th_nd, th_m in st.session_state.multiple_results[conc]['thickness']:
-            evo_rows.append({
-                '[Ag]/[Cu]': ratio,
-                'c_bulk': conc,
-                't_s': scale_time(t_nd),
-                'Thickness_nd': th_nd, 
-                'Thickness_nm': th_m*1e9
-            })
-    
-    evo_df = pd.DataFrame(evo_rows)
-    st.download_button(
-        "Download full evolution CSV",
-        evo_df.to_csv(index=False),
-        file_name=f"thickness_evolution_all_{datetime.now():%Y%m%d_%H%M%S}.csv",
-        mime="text/csv"
-    )
 
 # ------------------- single-run playback & post-processing -------------------
 if st.session_state.snapshots and st.session_state.thickness_data:
@@ -603,11 +449,8 @@ if st.session_state.snapshots and st.session_state.thickness_data:
         t_nd, phi_view, c_view, psi_view = snapshots[frame_idx]
         t_real = scale_time(t_nd)
         th_nd, th_m = thickness_data[frame_idx][1], thickness_data[frame_idx][2]
-        
-        # Display current molar ratio for context
-        current_ratio = params_base['c_bulk'] / c_bulk_reservoir if molar_ratio_mode == "Molar ratio c = [Ag]/[Cu]" else 1.0
-        st.write(f"**Current configuration:** [Ag]/[Cu] = {current_ratio:.3f}, c_bulk = {params_base['c_bulk']:.3f}")
         st.write(f"**Current shell thickness:** {th_nd:.4f} (non-dim) = {th_m*1e9:.2f} nm")
+        st.write(f"**Concentration (1:1 molar ratio):** {c_bulk_nd}")
 
         cmap = plt.get_cmap(cmap_choice)
         if mode.startswith("2D"):
