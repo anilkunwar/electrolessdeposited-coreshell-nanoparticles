@@ -34,4 +34,10 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm14-streamlit-red)](https://electrolessdeposition-phasefieldsimulation14.streamlit.app/) 
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm15-streamlit-red)](https://electrolessdeposition-phasefieldsimulation15.streamlit.app/) # batch simulations only
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm16-streamlit-red)](https://electrolessdeposition-phasefieldsimulation16.streamlit.app/) # single simulations only
+
+
+
 
