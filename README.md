@@ -38,6 +38,8 @@ Text based data extraction from web using attention mechanism
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm16-streamlit-red)](https://electrolessdeposition-phasefieldsimulation16.streamlit.app/) # single simulations only
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm17-streamlit-red)](https://electrolessdeposition-phasefieldsimulation17.streamlit.app/) # single simulations only with memory store for comparison of Ag shell thickness
+
 
 
 
