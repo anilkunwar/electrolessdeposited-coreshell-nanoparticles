@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag — FULLY INTEGRATED SAFE SIMULATOR
-* GPU (CuPy) when available → 10-20× speed-up
+* GPU (CuPy) when available → 10‑20× speed‑up
 * Automatic CPU fallback (NumPy) → works on Streamlit Cloud
 * Batch runs, VTU/PVD/ZIP, GIF, PNG, CSV, material & potential proxy
 """
@@ -288,18 +288,20 @@ if len(st.session_state.history) > 1:
     colors = cmap(np.linspace(0, 1, len(st.session_state.history)))
 
     for idx, (c, data) in enumerate(st.session_state.history.items()):
-        times = [scale_time(t) for t, _, _, _, _, _ in data["thick"]]
-        ths   = [th * 1e9 for _, _, th, _, _, _ in data["thick"]]
-        ax1.plot(times, ths, label=f"c = {c:.3g}", color=colors[idx], lw=2)
+        # thickness
+        times_th = [scale_time(t) for t, _, _, _, _, _ in data["thick"]]
+        ths_nm   = [th * 1e9 for _, _, th, _, _, _ in data["thick"]]
+        ax1.plot(times_th, ths_nm, label=f"c = {c:.3g}", color=colors[idx], lw=2)
 
-        tdiag = [scale_time(t) for t, _, _, _, _, _, _ in data["diag"]]
+        # diagnostics (6 items!)
+        tdiag = [scale_time(t) for t, _, _, _, _, _ in data["diag"]]
         bulk  = [b for _, _, _, _, b, _ in data["diag"]]
         grad  = [g for _, _, _, _, _, g in data["diag"]]
         ax2.semilogy(tdiag, np.maximum(bulk, 1e-30), label=f"c={c:.3g} bulk", color=colors[idx], lw=1.5)
         ax2.semilogy(tdiag, np.maximum(grad, 1e-30), label=f"c={c:.3g} grad", color=colors[idx], ls='--', lw=1.5)
 
     ax1.set_xlabel("Time (s)"); ax1.set_ylabel("Thickness (nm)"); ax1.legend(); ax1.grid(True, alpha=0.3)
-    ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²-norm"); ax2.legend(); ax2.grid(True, alpha=0.3)
+    ax2.set_xlabel("Time (s)"); ax2.set_ylabel("L²‑norm"); ax2.legend(); ax2.grid(True, alpha=0.3)
     st.pyplot(fig)
 
 # ------------------- PLAYBACK -------------------
@@ -353,7 +355,8 @@ if st.session_state.history:
         st.pyplot(fig)
 
         st.subheader("Diagnostics")
-        df = pd.DataFrame(diag, columns=["t", "c_mean", "c_max", "total_Ag", "||bulk||₂", "||grad||₂"])
+        df = pd.DataFrame(diag,
+            columns=["t", "c_mean", "c_max", "total_Ag", "||bulk||₂", "||grad||₂"])
         st.dataframe(df.tail(10).style.format("{:.3e}"))
         csv = df.to_csv(index=False).encode()
         st.download_button("Download CSV", csv, f"diag_c_{selected_c:.3g}.csv", "text/csv")
