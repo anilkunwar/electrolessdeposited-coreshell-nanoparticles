@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-streamlit_electroless_enhanced.py
---------------------------------
-2-D / 3-D phase-field electroless Ag deposition.
-Modified to study effect of decreasing c_bulk on deposition thickness.
+streamlit_electroless_enhanced_fixed.py
+--------------------------------------
+Full app with growth-model dropdown and fixes:
+ - non-reversible vs soft-reversible models
+ - concentration clipping at c_bulk
+ - running-maximum thickness reporting
+ - applied in both 2D and 3D runs
 """
 
 import streamlit as st
@@ -35,7 +38,7 @@ except Exception:
     MESHIO_AVAILABLE = False
 
 st.set_page_config(page_title="Electroless Ag — Enhanced Simulator", layout="wide")
-st.title("Electroless Ag — Enhanced Simulator (2D / 3D)")
+st.title("Electroless Ag — Enhanced Simulator (2D / 3D) — Fixed")
 
 # ------------------- colormap list -------------------
 CMAPS = [c for c in plt.colormaps() if c not in {"jet", "jet_r"}]
@@ -139,6 +142,17 @@ phi_threshold = st.sidebar.slider(
     help="phi > threshold → part of Ag shell"
 )
 
+# ------------------- growth model dropdown -------------------
+st.sidebar.header("Growth model")
+growth_model = st.sidebar.selectbox(
+    "Choose growth model",
+    ["Model A — Fully non-reversible (strictly additive)",
+     "Model B — Soft reversible (0.01× bulk smoothing)"],
+    index=0,
+    help="Model A: no bulk dissolution, φ cannot decrease. "
+         "Model B: small (1%) bulk smoothing allowed."
+)
+
 run_button = st.sidebar.button("Run Single Simulation")
 run_multiple_concentrations = (st.sidebar.button("Run Multiple Concentrations")
                        if study_mode == "Multiple concentrations (1:1 to 1:5)" else None)
@@ -156,8 +170,8 @@ def scale_energy_term(beta_nd): return beta_nd * (E0 / L0**3)
 def scale_alpha(alpha_nd):  return alpha_nd * (E0 / L0**3)
 
 # ------------------- shell-thickness computation -------------------
-def compute_shell_thickness(phi, psi, coords, threshold=0.5, mode="2D"):
-    """Return (thickness_nd, thickness_m)."""
+def compute_shell_thickness(phi, psi, coords, core_radius_frac_local, threshold=0.5, mode="2D"):
+    """Return (thickness_nd, thickness_m). Uses normalized coordinates [0,1] and local core radius fraction."""
     if mode.startswith("2D"):
         x, y = coords
         cx = cy = 0.5
@@ -172,8 +186,8 @@ def compute_shell_thickness(phi, psi, coords, threshold=0.5, mode="2D"):
     shell_mask = (phi > threshold) & (psi < 0.5)
     if np.any(shell_mask):
         max_shell_radius = np.max(distances[shell_mask])
-        core_radius = core_radius_frac
-        thickness_nd = max_shell_radius - core_radius
+        core_radius = core_radius_frac_local
+        thickness_nd = max(0.0, max_shell_radius - core_radius)
         thickness_m  = nd_to_real(thickness_nd)
         return thickness_nd, thickness_m
     return 0.0, 0.0
@@ -251,7 +265,10 @@ def run_simulation_2d(params):
     gamma = params['gamma']; beta = params['beta']; k0 = params['k0']
     M = params['M']; D = params['D']; alpha = params['alpha']
 
-    # ---- semi-implicit matrix (optional) ----
+    # running maximum thickness tracker
+    max_thickness_nd_so_far = 0.0
+
+    # semi-implicit matrix (optional)
     if params['use_semi_implicit'] and SCIPY_AVAILABLE:
         N = Nx*Ny
         A = sp.lil_matrix((N,N))
@@ -270,6 +287,9 @@ def run_simulation_2d(params):
         has_factor = True
     else:
         has_factor = False
+
+    # softness parameter (0.0 for fully non-reversible, 0.01 for soft)
+    softness = 0.0 if params['growth_model'].startswith("Model A") else 0.01
 
     for step in range(n_steps+1):
         t = step*dt
@@ -291,21 +311,38 @@ def run_simulation_2d(params):
         i_loc = k0*c_mol*delta_int
         i_loc = np.clip(i_loc, 0.0, 1e6)
 
-        deposition = M*i_loc
-        curvature = M*gamma*lap_phi
-        phi_temp = phi + dt*(deposition - M*f_bulk)
+        # deposition proportional to local [Ag]
+        deposition = M * i_loc
 
+        # curvature smoothing (only allow curvature that increases phi locally)
+        curvature = M * gamma * lap_phi
+        curvature_pos = np.maximum(curvature, 0.0)
+
+        # build delta_phi according to selected growth model
+        # Model A: softness == 0.0 -> no -M*f_bulk applied and we enforce non-negative delta
+        # Model B: softness == 0.01 -> small negative term allowed for slight smoothing
+        delta_phi = dt * (deposition + curvature_pos - softness * M * f_bulk)
+
+        if softness == 0.0:
+            # enforce strictly non-decreasing phi (no dissolution)
+            delta_phi = np.maximum(delta_phi, 0.0)
+
+        # semi-implicit handling (we keep simple update; if factorization available use it for stability)
         if has_factor:
+            # combine with implicit idea by applying factorization on the tentative phi
+            phi_temp = phi + delta_phi
             phi = lu(phi_temp.ravel()).reshape(phi.shape)
         else:
-            phi = phi_temp + dt*curvature
+            phi = phi + delta_phi
+
         phi = np.clip(phi, 0.0, 1.0)
 
         # ---- concentration update ----
         lap_c = laplacian_explicit_2d(c, dx)
         sink = i_loc
         c += dt*(D*lap_c - sink)
-        c = np.clip(c, 0.0, params['c_bulk']*5.0)
+        # concentration must not exceed nominal bulk concentration
+        c = np.clip(c, 0.0, params['c_bulk'])
 
         # ---- BCs for c (after update) ----
         if params['bc_type'] == "Dirichlet (fixed values)":
@@ -321,14 +358,15 @@ def run_simulation_2d(params):
 
         if step % save_every == 0 or step == n_steps:
             thickness_nd, thickness_m = compute_shell_thickness(
-                phi, psi, (x, y), params['phi_threshold'], "2D"
+                phi, psi, (x, y), params['core_radius_frac'], params['phi_threshold'], "2D"
             )
+            # enforce running maximum so reported thickness never falls
+            max_thickness_nd_so_far = max(max_thickness_nd_so_far, thickness_nd)
             snapshots.append((t, phi.copy(), c.copy(), psi.copy()))
             diagnostics.append((t, bulk_norm, grad_norm_raw, grad_norm_phys, alpha_c_norm))
-            thickness_data.append((t, thickness_nd, thickness_m))
+            thickness_data.append((t, max_thickness_nd_so_far, nd_to_real(max_thickness_nd_so_far)))
 
     return snapshots, diagnostics, thickness_data, (x, y)
-
 
 def run_simulation_3d(params):
     Nx, Ny, Nz = params['Nx'], params['Ny'], params['Nz']
@@ -359,6 +397,9 @@ def run_simulation_3d(params):
     gamma = params['gamma']; beta = params['beta']; k0 = params['k0']
     M = params['M']; D = params['D']; alpha = params['alpha']
 
+    max_thickness_nd_so_far = 0.0
+    softness = 0.0 if params['growth_model'].startswith("Model A") else 0.01
+
     for step in range(n_steps+1):
         t = step*dt
         lap_phi = laplacian_explicit_3d(phi, dx)
@@ -382,13 +423,20 @@ def run_simulation_3d(params):
 
         deposition = M*i_loc
         curvature = M*gamma*lap_phi
-        phi += dt*(deposition + curvature - M*f_bulk)
+        curvature_pos = np.maximum(curvature, 0.0)
+
+        delta_phi = dt*(deposition + curvature_pos - softness * M * f_bulk)
+
+        if softness == 0.0:
+            delta_phi = np.maximum(delta_phi, 0.0)
+
+        phi += delta_phi
         phi = np.clip(phi, 0.0, 1.0)
 
         lap_c = laplacian_explicit_3d(c, dx)
         sink = i_loc
         c += dt*(D*lap_c - sink)
-        c = np.clip(c, 0.0, params['c_bulk']*5.0)
+        c = np.clip(c, 0.0, params['c_bulk'])
 
         # ---- BCs c ----
         if params['bc_type'] == "Dirichlet (fixed values)":
@@ -403,11 +451,12 @@ def run_simulation_3d(params):
 
         if step % save_every == 0 or step == n_steps:
             thickness_nd, thickness_m = compute_shell_thickness(
-                phi, psi, (x, y, z), params['phi_threshold'], "3D"
+                phi, psi, (x, y, z), params['core_radius_frac'], params['phi_threshold'], "3D"
             )
+            max_thickness_nd_so_far = max(max_thickness_nd_so_far, thickness_nd)
             snapshots.append((t, phi.copy(), c.copy(), psi.copy()))
             diagnostics.append((t, bulk_norm, grad_norm_raw, grad_norm_phys, alpha_c_norm))
-            thickness_data.append((t, thickness_nd, thickness_m))
+            thickness_data.append((t, max_thickness_nd_so_far, nd_to_real(max_thickness_nd_so_far)))
 
     return snapshots, diagnostics, thickness_data, (x, y, z)
 
@@ -446,7 +495,8 @@ params_base = {
     'use_numba': use_numba,
     'bc_type': bc_type,
     'phi_threshold': phi_threshold,
-    'mode': mode
+    'mode': mode,
+    'growth_model': growth_model
 }
 
 # ------------------- session state -------------------
@@ -625,7 +675,8 @@ if st.session_state.snapshots and st.session_state.thickness_data:
         t_real = scale_time(t_nd)
         th_nd, th_m = thickness_data[frame_idx][1], thickness_data[frame_idx][2]
         st.write(f"**Current shell thickness:** {th_nd:.4f} (non-dim) = {th_m*1e9:.2f} nm")
-        st.write(f"**Concentration (c_bulk):** {c_bulk_nd}")
+        st.write(f"**Concentration (c_bulk):** {params_base['c_bulk']}")
+        st.write(f"**Growth model:** {params_base['growth_model']}")
 
         cmap = plt.get_cmap(cmap_choice)
         if mode.startswith("2D"):
@@ -688,9 +739,6 @@ if st.session_state.snapshots and st.session_state.thickness_data:
         ax_th.set_xlabel('Time (s)'); ax_th.set_ylabel('Thickness (nm)')
         ax_th.grid(True, alpha=0.3); ax_th.set_title('Growth curve')
         st.pyplot(fig_th)
-
-    # Rest of the single-run visualization code remains the same...
-    # [The remaining visualization code for single runs is unchanged from previous version]
 
 else:
     st.info("Run a simulation to see results. Tip: keep 3D grid ≤ 40 for fast runs.")
