@@ -89,7 +89,7 @@ Nz = st.sidebar.slider("Nz", 32, max_res // 4, 64, 8) if mode != "2D (planar)" e
 
 dt_nd = st.sidebar.number_input("dt (nd)", 1e-6, 1e-2, 1e-4, format="%.6f")
 #n_steps = st.sidebar.slider("Steps", 50, max_steps, 1000, 50)
-n_steps = st.sidebar.slider("Steps", 50, max_steps, 50000, 50)
+n_steps = st.sidebar.slider("Steps", 50, max_steps, 100000, 50)
 save_every = st.sidebar.slider("Save every", 1, 200, max(1, n_steps // 20), 1)
 
 st.sidebar.header("Physics (nd)")
