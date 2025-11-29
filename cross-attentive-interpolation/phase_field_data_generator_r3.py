@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ELECTROLESS Ag — MODIFIED DEPOSITION RATE + VARIANT CONTROL
-* Modified deposition rate: max(phi, psi+psi)
+* Modified deposition rate: max(phi, psi) + psi
 * Variants controlled via c_bulk and lengths (domain sizes)
 * Auto-saves .pkl after every run
 * Domain multiplier increases effective distance to boundary
@@ -51,7 +51,7 @@ except:
 
 # ------------------- PAGE CONFIG -------------------
 st.set_page_config(page_title="Electroless Ag — MODIFIED DEPOSITION", layout="wide")
-st.title("Electroless Ag — MODIFIED DEPOSITION RATE (max(φ, ψ+ψ))")
+st.title("Electroless Ag — MODIFIED DEPOSITION RATE (max(φ, ψ) + ψ)")
 
 plt.style.use("seaborn-v0_8-paper")
 plt.rcParams.update({
@@ -233,10 +233,10 @@ def run_simulation(c_bulk_val, domain_multiplier_val):
         edl_boost = 1.0 + lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
         edl_boost = cp.where(use_edl, edl_boost, 1.0)
 
-        # ========== MODIFIED DEPOSITION RATE ==========
+        # ========== CORRECTED DEPOSITION RATE ==========
         # Original: i_loc = k0_nd * c * (1 - phi) * (1 - psi) * delta_int * edl_boost
-        # Modified: Use max(phi, psi+psi) in the deposition calculation
-        deposition_factor = cp.maximum(phi, psi + psi)  # max(phi, 2*psi)
+        # Modified: Use max(phi, psi) + psi in the deposition calculation
+        deposition_factor = cp.maximum(phi, psi) + psi  # CORRECTED: max(phi, psi) + psi
         i_loc = k0_nd * c * deposition_factor * delta_int * edl_boost
         i_loc = cp.clip(i_loc, 0, 1e6)
 
@@ -317,7 +317,7 @@ def run_simulation(c_bulk_val, domain_multiplier_val):
             "mode": mode,
             "use_edl": use_edl,
             "timestamp": datetime.now().isoformat(),
-            "deposition_model": "MODIFIED_max_phi_2psi",
+            "deposition_model": "MODIFIED_max_phi_psi_plus_psi",  # Updated description
         },
         "parameters": {
             "gamma_nd": float(gamma_nd), "beta_nd": float(beta_nd),
