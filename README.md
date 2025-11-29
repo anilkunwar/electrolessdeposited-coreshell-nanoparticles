@@ -55,5 +55,14 @@ Robust models
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm23-streamlit-red)](https://electrolessdeposition-phasefieldsimulation23.streamlit.app/)  # theory of electrostatic double layer incorporated in pfm22
 
 
+Cross-Attentive Interpolator for Optimization of Deposit Concentration and Lengths
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata1-streamlit-red)](https://computational-method-data-generation1.streamlit.app/)  # developed upon pfm23
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata2-streamlit-red)](https://computational-method-data-generation2.streamlit.app/)  # developed upon pfm23
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata3-streamlit-red)](https://computational-method-data-generation3.streamlit.app/)  # developed upon pfm23
+
+
 
 
