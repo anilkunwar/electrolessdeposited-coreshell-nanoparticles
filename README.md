@@ -60,7 +60,7 @@ Cross-Attentive Interpolator for Optimization of Deposit Concentration and Lengt
 Dataset generation codes
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata1-streamlit-red)](https://computational-method-data-generation1.streamlit.app/)  # developed upon pfm23
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata2-streamlit-red)](https://computational-method-data-generation2.streamlit.app/)  # developed upon pfm23
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata2-streamlit-red)](https://computational-method-data-generation2.streamlit.app/)  # developed upon pfm23, has some figures but not all required
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata3-streamlit-red)](https://computational-method-data-generation3.streamlit.app/)  # developed upon pfm23
 
