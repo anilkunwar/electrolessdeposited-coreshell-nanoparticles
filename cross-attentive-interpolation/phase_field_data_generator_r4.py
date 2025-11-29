@@ -79,7 +79,6 @@ scale_core_with_domain = st.sidebar.checkbox("Scale core/shell with domain?", Fa
 st.sidebar.subheader("k0_nd Variants (Kinetic Coefficient)")
 k0_variants = st.sidebar.multiselect(
     "Choose k0_nd values",
-   
     [0.2, 0.4, 0.6, 0.8, 1.0],
     default=[0.4],
     help="Higher k0 increases reaction rate, accelerating shell growth"
@@ -402,6 +401,7 @@ if run_batch_button:
            
             if successful_runs > 0:
                 st.success(f"Batch completed: {successful_runs}/{total_runs} successful runs")
+                # Auto-select the first successful run
                 first_successful = next((r for r in results if r[1] is not None and len(r[1]) > 0), None)
                 if first_successful:
                     st.session_state.selected_run = get_run_key(first_successful[0])
@@ -456,8 +456,7 @@ if len(st.session_state.history) > 1:
     ax3.grid(True, alpha=0.3)
     ax3.set_title("EDL Catalyst Effect")
     st.pyplot(fig)
-
-# ------------------- PLAYBACK — 100% SAFE FIXED VERSION -------------------
+# ------------------- PLAYBACK — 100% FIXED & SAFE (THIS IS THE ONLY CHANGE) -------------------
 st.header("Simulation Playback & Analysis")
 if st.session_state.history:
     selected_key = st.selectbox(
@@ -468,88 +467,115 @@ if st.session_state.history:
     data = st.session_state.history[selected_key]
     snaps, thick, diag, coords = data["snaps"], data["thick"], data["diag"], data["coords"]
     params = data["params"]
-
     # Display run parameters
     st.subheader("Run Parameters")
     col1, col2, col3, col4, col5 = st.columns(5)
-    with col1: st.metric("c_bulk", f"{params[0]:.3f}")
-    with col2: st.metric("Domain Mult", f"{params[1]:.2f}")
-    with col3: st.metric("k0_nd", f"{params[2]:.3f}")
-    with col4: st.metric("D_nd", f"{params[3]:.3f}")
-    with col5: st.metric("gamma_nd", f"{params[4]:.3f}")
-
-    # SAFE PLAYBACK — THIS IS THE ONLY CHANGE
+    with col1:
+        st.metric("c_bulk", f"{params[0]:.3f}")
+    with col2:
+        st.metric("Domain Mult", f"{params[1]:.2f}")
+    with col3:
+        st.metric("k0_nd", f"{params[2]:.3f}")
+    with col4:
+        st.metric("D_nd", f"{params[3]:.3f}")
+    with col5:
+        st.metric("gamma_nd", f"{params[4]:.3f}")
+    # --- 100% SAFE SLIDER BLOCK (FIXED FOREVER) ---
     if snaps and len(snaps) > 0:
-        max_frame = max(int(len(snaps) - 1), 0)          # ← always Python int ≥ 0
+        max_frame = max(int(len(snaps) - 1), 0)
         frame = st.slider(
             "Frame",
             min_value=0,
             max_value=max_frame,
-            value=max_frame,           # start at final frame
+            value=max_frame,
             step=1,
             format="%d"
         )
-        field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)", "material map"])
-
-        if frame < len(snaps):
-            t, phi, c_field, psi = snaps[frame]
+        field = st.selectbox(
+            "Field",
+            ["phi (shell)", "c (concentration)", "psi (core)", "material map"]
+        )
+        if 0 <= frame < len(snaps):
+            t, phi, c, psi = snaps[frame]
             t_real = scale_time(t)
-            th_nm = thick[frame][2] * 1e9 if frame < len(thick) else 0.0
-
+            th_nm = thick[frame][2] * 1e9 if (thick and frame < len(thick)) else 0.0
             if field == "material map":
-                display = compute_material_map(phi, psi)
+                field_data = compute_material_map(phi, psi)
                 vmin, vmax = 0, 3
             else:
-                display = {"phi (shell)": phi, "c (concentration)": c_field, "psi (core)": psi}[field]
-                vmin, vmax = (0, params[0]) if field == "c (concentration)" else (0, 1)
-
+                field_data = {
+                    "phi (shell)": phi,
+                    "c (concentration)": c,
+                    "psi (core)": psi
+                }[field]
+                if field == "c (concentration)":
+                    vmin, vmax = 0, params[0]
+                else:
+                    vmin, vmax = 0, 1
             fig, ax = plt.subplots(figsize=(8, 6))
             if mode == "2D (planar)":
-                im = ax.imshow(display.T, cmap=cmap_choice, vmin=vmin, vmax=vmax,
-                               origin="lower", extent=[0, coords[0][-1], 0, coords[1][-1]])
+                im = ax.imshow(
+                    field_data.T,
+                    cmap=cmap_choice,
+                    vmin=vmin,
+                    vmax=vmax,
+                    origin="lower",
+                    extent=[0, coords[0][-1], 0, coords[1][-1]]
+                )
+                ax.set_xlabel("x (nd)")
+                ax.set_ylabel("y (nd)")
             else:
-                mid = display.shape[2] // 2
-                im = ax.imshow(display[:, :, mid].T, cmap=cmap_choice, vmin=vmin, vmax=vmax,
-                               origin="lower", extent=[0, coords[0][-1], 0, coords[1][-1]])
-                ax.set_title(f"Slice at z = {coords[2][mid]:.3f}")
-            plt.colorbar(im, ax=ax, shrink=0.8)
-            ax.set_title(f"{field} @ t = {t_real:.3e} s | Thickness = {th_nm:.2f} nm")
+                Nz_mid = field_data.shape[2] // 2
+                im = ax.imshow(
+                    field_data[:, :, Nz_mid].T,
+                    cmap=cmap_choice,
+                    vmin=vmin,
+                    vmax=vmax,
+                    origin="lower",
+                    extent=[0, coords[0][-1], 0, coords[1][-1]]
+                )
+                ax.set_xlabel("x (nd)")
+                ax.set_ylabel("y (nd)")
+                ax.set_title(f"Slice at z = {coords[2][Nz_mid]:.2f}")
+            plt.colorbar(im, ax=ax)
+            ax.set_title(f"{field} @ t = {t_real:.3e} s | Thickness: {th_nm:.2f} nm")
             st.pyplot(fig)
         else:
-            st.warning("Frame out of range — please refresh.")
+            st.warning("Selected frame is out of range.")
     else:
-        st.warning("No snapshots available for this run.")
-
-    # Thickness curve
+        st.warning("No snapshots available for this run. The simulation may have failed or produced no output.")
+    # Thickness evolution plot
     if thick and len(thick) > 0:
-        fig, ax = plt.subplots(figsize=(8, 5))
-        times = [scale_time(e[0]) for e in thick]
-        ths = [e[2] * 1e9 for e in thick]
-        ax.plot(times, ths, 'o-', linewidth=3, color='purple')
-        ax.set_xlabel("Time (s)"); ax.set_ylabel("Thickness (nm)")
-        ax.grid(True, alpha=0.3); ax.set_title("Shell Thickness Evolution")
-        st.pyplot(fig)
-
-    # Download
+        fig_th, ax_th = plt.subplots(figsize=(8, 5))
+        times_th = [scale_time(t[0]) for t in thick]
+        ths_nm = [t[2] * 1e9 for t in thick]
+        ax_th.plot(times_th, ths_nm, 'b-', linewidth=3, label='Shell thickness')
+        ax_th.set_xlabel("Time (s)")
+        ax_th.set_ylabel("Thickness (nm)")
+        ax_th.grid(True, alpha=0.3)
+        ax_th.legend()
+        ax_th.set_title("Shell Thickness Evolution")
+        st.pyplot(fig_th)
+    # PKL Download
     fp = data.get("pkl_path")
     if fp and os.path.exists(fp):
         with open(fp, "rb") as f:
             st.download_button(
-                "Download .pkl",
+                "Download this simulation as .pkl",
                 f.read(),
                 data["pkl_name"],
                 "application/octet-stream",
                 use_container_width=True
             )
-
-    # Growth metrics
-    if data.get("growth_metrics"):
-        gm = data["growth_metrics"]
+    # Additional metrics
+    if 'growth_metrics' in data and data['growth_metrics'].get('onset_time_nd'):
         st.subheader("Growth Metrics")
-        if gm.get("onset_time_nd") is not None:
-            st.metric("Onset Time", f"{scale_time(gm['onset_time_nd']):.3e} s")
-        if gm.get("deposition_rates_nd_per_unit_time"):
-            rates = gm["deposition_rates_nd_per_unit_time"]
+        onset_time = data['growth_metrics']['onset_time_nd']
+        if onset_time:
+            st.metric("Onset Time", f"{scale_time(onset_time):.3e} s")
+       
+        if data['growth_metrics'].get('deposition_rates_nd_per_unit_time'):
+            rates = data['growth_metrics']['deposition_rates_nd_per_unit_time']
             if rates:
                 st.metric("Max Deposition Rate", f"{max(rates):.3e} nd/t")
 else:
