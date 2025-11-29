@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ELECTROLESS Ag — FULLY UPGRADED SIMULATOR (NOV 2025)
-* Preserves original theoretical model
+ELECTROLESS Ag — FULLY UPGRADED SIMULATOR WITH MODIFIED DEPOSITION
+* Modified deposition rate: max(φ, ψ) + ψ
 * Robust PKL generator with batch variants
 * Integrated postprocessed metrics: refined thickness, deposition rates, nucleations, onset
-* Fixed 3D grid, visualization, and playback (now shows pictures/plots immediately)
+* Fixed 3D grid, visualization, and playback
 * Batch comparison, playback, exports (PNG, GIF, CSV, ZIP)
 * Auto-saves .pkl with all data for interpolator
 """
@@ -50,7 +50,7 @@ except:
 
 # ------------------- PAGE CONFIG -------------------
 st.set_page_config(page_title="Electroless Ag — Upgraded Simulator", layout="wide")
-st.title("Electroless Ag — Fully Upgraded Simulator with PKL & Metrics")
+st.title("Electroless Ag — Fully Upgraded Simulator with Modified Deposition")
 
 plt.style.use("seaborn-v0_8-paper")
 plt.rcParams.update({
@@ -208,7 +208,7 @@ def compute_deposition_rates(thick_history_nd, dt_nd):
     rates = np.diff(ths) / np.diff(times) / dt_nd
     return rates.tolist()
 
-# ------------------- SIMULATION CORE -------------------
+# ------------------- MODIFIED SIMULATION CORE -------------------
 def run_simulation(params):
     try:
         c_bulk_val, domain_mult_val, k0_nd_val, D_nd_val, gamma_nd_val = params
@@ -276,7 +276,9 @@ def run_simulation(params):
             edl_boost = 1.0 + lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
             edl_boost = cp.where(use_edl, edl_boost, 1.0)
 
-            i_loc = k0_nd_val * c * (1 - phi) * (1 - psi) * delta_int * edl_boost
+            # ========== MODIFIED DEPOSITION RATE ==========
+            deposition_factor = cp.maximum(phi, psi) + psi  # max(phi, psi) + psi
+            i_loc = k0_nd_val * c * deposition_factor * delta_int * edl_boost
             i_loc = cp.clip(i_loc, 0, 1e6)
 
             lap_phi = laplacian(phi, dx)
@@ -354,7 +356,7 @@ def run_simulation(params):
         D_str = f"D{D_nd_val:.3f}".replace(".", "p")
         gamma_str = f"g{gamma_nd_val:.3f}".replace(".", "p")
 
-        filename = f"Ag_ORIG_{mode_str}_c{c_bulk_val:.3f}_{bc_str}_{edl_str}_{k0_str}_M{M_nd:.2f}_{D_str}_{gamma_str}_{dom_str}_N{Nx}x{Ny}x{Nz}_steps{step}.pkl"
+        filename = f"Ag_MOD_{mode_str}_c{c_bulk_val:.3f}_{bc_str}_{edl_str}_{k0_str}_M{M_nd:.2f}_{D_str}_{gamma_str}_{dom_str}_N{Nx}x{Ny}x{Nz}_steps{step}.pkl"
         filepath = os.path.join("electroless_pkl_solutions", filename)
 
         save_data = {
@@ -369,7 +371,7 @@ def run_simulation(params):
                 "use_edl": use_edl,
                 "scale_core_with_domain": scale_core_with_domain,
                 "timestamp": datetime.now().isoformat(),
-                "deposition_model": "ORIGINAL_theory_preserved",
+                "deposition_model": "MODIFIED_max_phi_psi_plus_psi",
                 "onset_time_nd": onset_time if onset_time else n_steps * dt_nd,
             },
             "parameters": {
@@ -403,6 +405,8 @@ def run_simulation(params):
 
     except Exception as e:
         st.error(f"Simulation failed: {str(e)}")
+        import traceback
+        st.error(f"Traceback: {traceback.format_exc()}")
         return params, None, None, None, None, None, None
 
 # ------------------- HISTORY & RUN -------------------
@@ -418,74 +422,108 @@ def get_run_key(params):
 if run_batch_button:
     variants = [(c, dom, k0, D, gamma) for c in c_bulk_list for dom in domain_variants for k0 in k0_variants for D in D_variants for gamma in gamma_variants]
     total_runs = len(variants)
-    if total_runs > 0:
+    
+    if total_runs == 0:
+        st.warning("Please select at least one variant for each parameter to run batch simulation.")
+    elif total_runs > 50:
+        st.warning(f"Too many variants ({total_runs}). Please select fewer combinations (max 50 recommended).")
+    else:
         with st.spinner(f"Running BATCH: {total_runs} variants..."):
             results = []
             progress_bar = st.progress(0)
-            with ProcessPoolExecutor() as executor:
-                futures = [executor.submit(run_simulation, p) for p in variants]
-                for i, future in enumerate(as_completed(futures)):
-                    result = future.result()
+            status_text = st.empty()
+            
+            for i, params in enumerate(variants):
+                try:
+                    status_text.text(f"Running {i+1}/{total_runs}: c={params[0]}, dom={params[1]}, k0={params[2]}, D={params[3]}, gamma={params[4]}")
+                    result = run_simulation(params)
                     results.append(result)
                     progress_bar.progress((i + 1) / total_runs)
+                except Exception as e:
+                    st.error(f"Simulation failed for params {params}: {str(e)}")
+                    results.append((params, None, None, None, None, None, None))
+            
+            # Process successful results
+            successful_runs = 0
             for p, s, d, t, co, fp, fn in results:
-                if s is not None:
+                if s is not None and len(s) > 0:
                     key = get_run_key(p)
-                    st.session_state.history[key] = {"params": p, "snaps": s, "diag": d, "thick": t, "coords": co, "pkl_path": fp, "pkl_name": fn}
-            st.success(f"Batch done: {len(results)} .pkl files generated")
-            st.rerun()  # Force refresh to show plots
+                    st.session_state.history[key] = {
+                        "params": p, "snaps": s, "diag": d, "thick": t, 
+                        "coords": co, "pkl_path": fp, "pkl_name": fn
+                    }
+                    successful_runs += 1
+            
+            if successful_runs > 0:
+                st.success(f"Batch completed: {successful_runs}/{total_runs} successful runs")
+                # Auto-select the first successful run
+                first_successful = next((r for r in results if r[1] is not None and len(r[1]) > 0), None)
+                if first_successful:
+                    st.session_state.selected_run = get_run_key(first_successful[0])
+            else:
+                st.error("No simulations completed successfully. Check parameters and error messages.")
 
 if run_single_button:
     default_params = (1.0, 1.0, 0.4, 0.05, 0.02)
     with st.spinner("Running SINGLE..."):
         p, s, d, t, co, fp, fn = run_simulation(default_params)
-        if s is not None:
+        if s is not None and len(s) > 0:
             key = get_run_key(p)
             st.session_state.history[key] = {"params": p, "snaps": s, "diag": d, "thick": t, "coords": co, "pkl_path": fp, "pkl_name": fn}
-            st.success("Single run done")
-            st.rerun()  # Force refresh to show plots
+            st.session_state.selected_run = key
+            st.success("Single run completed")
 
 # ------------------- BATCH COMPARISON -------------------
 if len(st.session_state.history) > 1:
-    st.header("Batch Comparison")
+    st.header("Batch Comparison - Modified Deposition Rate")
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
     colors = plt.cm.viridis(np.linspace(0, 1, len(st.session_state.history)))
 
     for i, (key, data) in enumerate(st.session_state.history.items()):
+        if not data["thick"] or len(data["thick"]) == 0:
+            continue
+            
         thick_data = data["thick"]
         times = [scale_time(t[0]) for t in thick_data]
         ths_nm = [t[2] * 1e9 for t in thick_data]
-        ax1.plot(times, ths_nm, label=key, color=colors[i])
+        ax1.plot(times, ths_nm, label=key, color=colors[i], linewidth=2)
 
         diag = data["diag"]
-        tdiag = [scale_time(d[0]) for d in diag]
-        bulk = [d[4] for d in diag]
-        grad = [d[5] for d in diag]
-        ax2.semilogy(tdiag, bulk, label='bulk', color=colors[i])
-        ax2.semilogy(tdiag, grad, ls='--', color=colors[i])
+        if diag and len(diag) > 0:
+            tdiag = [scale_time(d[0]) for d in diag]
+            bulk = [d[4] for d in diag]
+            grad = [d[5] for d in diag]
+            ax2.semilogy(tdiag, bulk, label=f'{key} bulk', color=colors[i])
+            ax2.semilogy(tdiag, grad, ls='--', label=f'{key} grad', color=colors[i])
 
-        if use_edl:
-            edl = [d[6] for d in diag]
-            ax3.plot(tdiag, edl, label='EDL', color=colors[i])
+            if use_edl:
+                edl = [d[6] for d in diag]
+                ax3.plot(tdiag, edl, label=key, color=colors[i])
 
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Thickness (nm)")
-    ax1.legend()
-    ax1.grid(True)
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title("Shell Thickness Evolution")
 
     ax2.set_xlabel("Time (s)")
     ax2.set_ylabel("L2-norm")
-    ax2.grid(True)
+    ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_title("Bulk and Gradient Norms")
 
     ax3.set_xlabel("Time (s)")
     ax3.set_ylabel("EDL Boost")
-    ax3.grid(True)
+    if use_edl:
+        ax3.legend(fontsize=8)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_title("EDL Catalyst Effect")
 
     st.pyplot(fig)
 
 # ------------------- PLAYBACK -------------------
-st.header("Simulation Results")
+st.header("Simulation Playback & Analysis")
 
 if st.session_state.history:
     selected_key = st.selectbox(
@@ -495,38 +533,102 @@ if st.session_state.history:
     )
     data = st.session_state.history[selected_key]
     snaps, thick, diag, coords = data["snaps"], data["thick"], data["diag"], data["coords"]
+    params = data["params"]
 
-    frame = st.slider("Frame", 0, len(snaps) - 1, len(snaps) - 1)
-    field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)"])
-    t, phi, c, psi = snaps[frame]
-    t_real = scale_time(t)
-    th_nm = thick[frame][2] * 1e9 if frame < len(thick) else 0
+    # Display run parameters
+    st.subheader("Run Parameters")
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("c_bulk", f"{params[0]:.3f}")
+    with col2:
+        st.metric("Domain Mult", f"{params[1]:.2f}")
+    with col3:
+        st.metric("k0_nd", f"{params[2]:.3f}")
+    with col4:
+        st.metric("D_nd", f"{params[3]:.3f}")
+    with col5:
+        st.metric("gamma_nd", f"{params[4]:.3f}")
 
-    fig, ax = plt.subplots(figsize=(6, 5))
-    field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
-    if mode == "2D (planar)":
-        im = ax.imshow(field_data.T, cmap=cmap_choice, vmin=0, vmax=1 if field != "c (concentration)" else data["params"][0], origin='lower')
+    # Check if we have valid snapshots
+    if snaps and len(snaps) > 0:
+        max_frame = len(snaps) - 1
+        frame = st.slider("Frame", 0, max_frame, min(max_frame, len(snaps) - 1))
+        field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)", "material map"])
+        
+        if frame < len(snaps):
+            t, phi, c, psi = snaps[frame]
+            t_real = scale_time(t)
+            th_nm = thick[frame][2] * 1e9 if frame < len(thick) else 0
+
+            # Create visualization
+            fig, ax = plt.subplots(figsize=(8, 6))
+            
+            if field == "material map":
+                m = compute_material_map(phi, psi)
+                field_data = m
+                vmin, vmax = 0, 3
+            else:
+                field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
+                vmin, vmax = (0, 1) if field != "c (concentration)" else (0, params[0])
+            
+            if mode == "2D (planar)":
+                im = ax.imshow(field_data.T, cmap=cmap_choice, 
+                              vmin=vmin, vmax=vmax, 
+                              origin='lower', 
+                              extent=[0, coords[0][-1], 0, coords[1][-1]])
+                ax.set_xlabel("x (nd)")
+                ax.set_ylabel("y (nd)")
+            else:
+                im = ax.imshow(field_data[:, :, Nz//2].T, cmap=cmap_choice,
+                              vmin=vmin, vmax=vmax,
+                              origin='lower', 
+                              extent=[0, coords[0][-1], 0, coords[1][-1]])
+                ax.set_xlabel("x (nd)")
+                ax.set_ylabel("y (nd)")
+                ax.set_title(f"Slice at z = {coords[2][Nz//2]:.2f}")
+            
+            plt.colorbar(im, ax=ax)
+            ax.set_title(f"{field} @ t = {t_real:.3e} s | Thickness: {th_nm:.2f} nm")
+            st.pyplot(fig)
+
+        # Thickness evolution plot
+        if thick and len(thick) > 0:
+            fig_th, ax_th = plt.subplots(figsize=(8, 5))
+            times_th = [scale_time(t[0]) for t in thick]
+            ths_nm = [t[2] * 1e9 for t in thick]
+            ax_th.plot(times_th, ths_nm, 'b-', linewidth=3, label='Shell thickness')
+            ax_th.set_xlabel("Time (s)")
+            ax_th.set_ylabel("Thickness (nm)")
+            ax_th.grid(True, alpha=0.3)
+            ax_th.legend()
+            ax_th.set_title("Shell Thickness Evolution")
+            st.pyplot(fig_th)
+
+        # PKL Download
+        fp = data.get("pkl_path")
+        if fp and os.path.exists(fp):
+            with open(fp, "rb") as f:
+                st.download_button(
+                    "📦 Download this simulation as .pkl", 
+                    f.read(), 
+                    data["pkl_name"], 
+                    "application/octet-stream",
+                    use_container_width=True
+                )
     else:
-        im = ax.imshow(field_data[:, :, Nz//2].T, cmap=cmap_choice, vmin=0, vmax=1 if field != "c (concentration)" else data["params"][0], origin='lower')
-    plt.colorbar(im, ax=ax)
-    ax.set_title(f"{field} @ t = {t_real:.3e} s")
-    st.pyplot(fig)
+        st.warning("No snapshots available for this run. The simulation may have failed or produced no output.")
 
-    # Thickness plot
-    fig_th, ax_th = plt.subplots(figsize=(6, 5))
-    times_th = [scale_time(t[0]) for t in thick]
-    ths_nm = [t[2] * 1e9 for t in thick]
-    ax_th.plot(times_th, ths_nm, 'b-')
-    ax_th.set_xlabel("Time (s)")
-    ax_th.set_ylabel("Thickness (nm)")
-    ax_th.grid(True)
-    st.pyplot(fig_th)
-
-    # PKL Download
-    fp = data.get("pkl_path")
-    if fp and os.path.exists(fp):
-        with open(fp, "rb") as f:
-            st.download_button("Download this .pkl", f.read(), data["pkl_name"], "application/octet-stream")
+    # Additional metrics
+    if 'growth_metrics' in data and data['growth_metrics'].get('onset_time_nd'):
+        st.subheader("Growth Metrics")
+        onset_time = data['growth_metrics']['onset_time_nd']
+        if onset_time:
+            st.metric("Onset Time", f"{scale_time(onset_time):.3e} s")
+        
+        if data['growth_metrics'].get('deposition_rates_nd_per_unit_time'):
+            rates = data['growth_metrics']['deposition_rates_nd_per_unit_time']
+            if rates:
+                st.metric("Max Deposition Rate", f"{max(rates):.3e} nd/t")
 
 else:
-    st.info("Run a simulation to see results.")
+    st.info("Run a simulation (single or batch) to see results.")
