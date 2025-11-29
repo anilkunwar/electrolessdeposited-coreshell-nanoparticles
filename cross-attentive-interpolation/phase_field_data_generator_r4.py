@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ELECTROLESS Ag — ROBUST PKL GENERATOR FOR PARAMETER VARIANTS
-* Preserves original theoretical model: i_loc = k0_nd * c * (1 - phi) * (1 - psi) * delta_int * edl_boost
-* Expanded batch variants: c_bulk, domain_multipliers, k0_nd, D_nd, gamma_nd (key influencers of shell growth)
-* Robustness: Parallel processing, error handling, fixed 3D grid, optional core scaling, early stopping
-* Auto-saves comprehensive .pkl files for each variant combination
-* Theoretical core preserved: Phase-field with optional time-decaying EDL catalyst booster
-* For interpolator: Includes growth metrics (thickness history, onset time, rate)
+ELECTROLESS Ag — FULLY UPGRADED SIMULATOR (NOV 2025)
+* Preserves original theoretical model
+* Robust PKL generator with batch variants
+* Integrated postprocessed metrics: refined thickness, deposition rates, nucleations, onset
+* Fixed 3D grid, visualization, and playback (now shows pictures/plots immediately)
+* Batch comparison, playback, exports (PNG, GIF, CSV, ZIP)
+* Auto-saves .pkl with all data for interpolator
 """
 import streamlit as st
 import numpy as np
@@ -15,12 +15,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import time
 import io
+import zipfile
 import os
-import tempfile
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import pickle
-import traceback
+from scipy.ndimage import distance_transform_edt, label
 
 # ------------------- SAFE GPU SETUP -------------------
 GPU_AVAILABLE = False
@@ -49,8 +49,8 @@ except:
     GIF_AVAILABLE = False
 
 # ------------------- PAGE CONFIG -------------------
-st.set_page_config(page_title="Electroless Ag — Robust PKL Generator", layout="wide")
-st.title("Electroless Ag — Robust PKL Generator (Original Theory Preserved)")
+st.set_page_config(page_title="Electroless Ag — Upgraded Simulator", layout="wide")
+st.title("Electroless Ag — Fully Upgraded Simulator with PKL & Metrics")
 
 plt.style.use("seaborn-v0_8-paper")
 plt.rcParams.update({
@@ -178,13 +178,43 @@ def laplacian(u, dx):
         lap = sum(cp.roll(u, shift, axis=list(range(u.ndim))) for shift in shifts) - 2 * len(shifts) // 2 * u
         return lap / (dx * dx)
 
-# ------------------- SIMULATION CORE (ORIGINAL THEORY PRESERVED) -------------------
+# ------------------- POSTPROCESSED METRICS HELPERS -------------------
+def compute_material_map(phi_cpu, psi_cpu):
+    return np.maximum(phi_cpu, psi_cpu) + psi_cpu
+
+def compute_refined_thickness(m, dx):
+    shell_mask = (m == 1)
+    if not np.any(shell_mask):
+        return 0.0
+    core_mask = (m == 2)
+    dist_to_core = distance_transform_edt(~core_mask) * dx
+    thickness_map = dist_to_core * shell_mask
+    return np.max(thickness_map)
+
+def detect_nucleations(m, min_area=5):
+    shell_mask = (m == 1)
+    labeled_shell, num_components = label(shell_mask)
+    if num_components == 0:
+        return 0
+    areas = np.bincount(labeled_shell.ravel())[1:]
+    nucleations = np.sum(areas < min_area) if len(areas) > 0 else 0
+    return nucleations
+
+def compute_deposition_rates(thick_history_nd, dt_nd):
+    if len(thick_history_nd) < 2:
+        return []
+    times = np.array([entry[0] for entry in thick_history_nd])
+    ths = np.array([entry[1] for entry in thick_history_nd])
+    rates = np.diff(ths) / np.diff(times) / dt_nd
+    return rates.tolist()
+
+# ------------------- SIMULATION CORE -------------------
 def run_simulation(params):
     try:
         c_bulk_val, domain_mult_val, k0_nd_val, D_nd_val, gamma_nd_val = params
         L_base = 1.0
         L = L_base * domain_mult_val
-        dx = L / max(Nx, Ny, Nz)  # Approximate, but adjust per dim
+        dx = L / max(Nx, Ny, Nz)
         center = L / 2.0
 
         x = np.linspace(0, L, Nx)
@@ -224,9 +254,13 @@ def run_simulation(params):
         c = cp.clip(c, 0, c_bulk_val)
 
         snapshots, diags, thick = [], [], []
+        material_snaps = []
+        nucleation_counts = []
         softness = 0.01 if "B" in growth_model else 0.0
         max_th = prev_th = 0.0
         onset_time = None
+        initial_m = compute_material_map(to_cpu(phi), to_cpu(psi))
+        initial_ag_volume = np.sum(initial_m == 1) * (dx ** len(shape))
 
         for step in range(n_steps + 1):
             t = step * dt_nd
@@ -242,7 +276,6 @@ def run_simulation(params):
             edl_boost = 1.0 + lambda_edl_t * alpha_edl * (delta_int / (cp.max(delta_int) + 1e-12))
             edl_boost = cp.where(use_edl, edl_boost, 1.0)
 
-            # ORIGINAL DEPOSITION RATE PRESERVED
             i_loc = k0_nd_val * c * (1 - phi) * (1 - psi) * delta_int * edl_boost
             i_loc = cp.clip(i_loc, 0, 1e6)
 
@@ -258,7 +291,6 @@ def run_simulation(params):
             c += dt_nd * (D_nd_val * lap_c - i_loc)
             c = cp.clip(c, 0, c_bulk_val)
 
-            # BCs
             if bc_type == "Neumann (zero flux)":
                 if mode == "2D (planar)":
                     c[:, -1] = c_bulk_val
@@ -282,32 +314,36 @@ def run_simulation(params):
                 psi_cpu = to_cpu(psi)
                 c_cpu = to_cpu(c)
 
-                if mode == "2D (planar)":
-                    Xc, Yc = np.meshgrid(x, y, indexing='ij')
-                    Zc = np.full_like(Xc, center)
-                else:
-                    Xc, Yc, Zc = np.meshgrid(x, y, z, indexing='ij')
+                yc_use = y if mode == "2D (planar)" else y
+                zc_use = np.array([center]) if mode == "2D (planar)" else z
+                Xc, Yc, Zc = np.meshgrid(x, yc_use, zc_use, indexing='ij')
                 dist_cpu = np.sqrt((Xc - center)**2 + (Yc - center)**2 + (Zc - center)**2)
                 mask = (phi_cpu > phi_threshold) & (psi_cpu < 0.5)
-                th_nd = np.max(dist_cpu[mask]) - r_core if np.any(mask) else 0.0
-                if onset_time is None and th_nd > 0.0:
-                    onset_time = t
-                max_th = max(max_th, th_nd)
+                th_nd_original = np.max(dist_cpu[mask]) - r_core if np.any(mask) else 0.0
 
+                m = compute_material_map(phi_cpu, psi_cpu)
+                th_nd_refined = compute_refined_thickness(m, dx)
+                num_nucleations = detect_nucleations(m)
+                current_ag_volume = np.sum(m == 1) * (dx ** len(shape))
+                if onset_time is None and current_ag_volume > initial_ag_volume * 1.01:
+                    onset_time = t
+                nucleation_counts.append((t, num_nucleations))
+
+                max_th = max(max_th, th_nd_refined)
                 c_mean = float(cp.mean(c))
                 c_max = float(cp.max(c))
                 total_ag = float(cp.sum(i_loc) * dt_nd)
 
                 snapshots.append((t, phi_cpu, c_cpu, psi_cpu))
                 diags.append((t, c_mean, c_max, total_ag, float(bulk_norm), float(grad_norm), edl_flux))
-                thick.append((t, max_th, nd_to_real(max_th), c_mean, c_max, total_ag))
+                thick.append((t, th_nd_refined, nd_to_real(th_nd_refined), c_mean, c_max, total_ag))
 
-            # Early stopping if thickness converged
             if abs(max_th - prev_th) < early_stop_thick_tol and step > 10:
                 break
             prev_th = max_th
 
-        # ------------------- AUTO SAVE .PKL -------------------
+        deposition_rates = compute_deposition_rates(thick, dt_nd)
+
         os.makedirs("electroless_pkl_solutions", exist_ok=True)
 
         bc_str = "Neu" if bc_type == "Neumann (zero flux)" else "Dir"
@@ -318,11 +354,7 @@ def run_simulation(params):
         D_str = f"D{D_nd_val:.3f}".replace(".", "p")
         gamma_str = f"g{gamma_nd_val:.3f}".replace(".", "p")
 
-        filename = (
-            f"Ag_ORIG_{mode_str}_c{c_bulk_val:.3f}_{bc_str}_{edl_str}_"
-            f"{k0_str}_M{M_nd:.2f}_{D_str}_{gamma_str}_{dom_str}_"
-            f"N{Nx}x{Ny}x{Nz}_steps{step}.pkl"
-        )
+        filename = f"Ag_ORIG_{mode_str}_c{c_bulk_val:.3f}_{bc_str}_{edl_str}_{k0_str}_M{M_nd:.2f}_{D_str}_{gamma_str}_{dom_str}_N{Nx}x{Ny}x{Nz}_steps{step}.pkl"
         filepath = os.path.join("electroless_pkl_solutions", filename)
 
         save_data = {
@@ -354,9 +386,14 @@ def run_simulation(params):
                 "early_stop_thick_tol": float(early_stop_thick_tol),
             },
             "coords_nd": coords,
-            "snapshots": snapshots,  # List of (t, phi, c, psi)
-            "diagnostics": diags,     # List of (t, c_mean, c_max, total_Ag, bulk_norm, grad_norm, edl_flux)
-            "thickness_history_nm": thick,  # List of (t, th_nd, th_real, c_mean, c_max, total_ag)
+            "snapshots": snapshots,
+            "diagnostics": diags,
+            "thickness_history_nm": thick,
+            "growth_metrics": {
+                "onset_time_nd": onset_time if onset_time else None,
+                "deposition_rates_nd_per_unit_time": deposition_rates,
+                "nucleation_counts": nucleation_counts,
+            }
         }
 
         with open(filepath, "wb") as f:
@@ -365,8 +402,7 @@ def run_simulation(params):
         return params, snapshots, diags, thick, coords, filepath, filename
 
     except Exception as e:
-        error_msg = f"Simulation failed for params {params}: {str(e)}\n{traceback.format_exc()}"
-        st.error(error_msg)
+        st.error(f"Simulation failed: {str(e)}")
         return params, None, None, None, None, None, None
 
 # ------------------- HISTORY & RUN -------------------
@@ -380,12 +416,7 @@ def get_run_key(params):
     return f"c{c:.3f}_dom{dom:.2f}_k0{k0:.2f}_D{D:.3f}_gamma{gamma:.3f}"
 
 if run_batch_button:
-    variants = [(c, dom, k0, D, gamma) 
-                for c in c_bulk_list 
-                for dom in domain_variants 
-                for k0 in k0_variants 
-                for D in D_variants 
-                for gamma in gamma_variants]
+    variants = [(c, dom, k0, D, gamma) for c in c_bulk_list for dom in domain_variants for k0 in k0_variants for D in D_variants for gamma in gamma_variants]
     total_runs = len(variants)
     if total_runs > 0:
         with st.spinner(f"Running BATCH: {total_runs} variants..."):
@@ -394,76 +425,69 @@ if run_batch_button:
             with ProcessPoolExecutor() as executor:
                 futures = [executor.submit(run_simulation, p) for p in variants]
                 for i, future in enumerate(as_completed(futures)):
-                    try:
-                        result = future.result()
-                        results.append(result)
-                    except Exception as e:
-                        st.error(f"Variant failed: {e}")
+                    result = future.result()
+                    results.append(result)
                     progress_bar.progress((i + 1) / total_runs)
             for p, s, d, t, co, fp, fn in results:
                 if s is not None:
                     key = get_run_key(p)
-                    st.session_state.history[key] = {
-                        "params": p,
-                        "snaps": s, "diag": d, "thick": t, "coords": co,
-                        "pkl_path": fp, "pkl_name": fn
-                    }
+                    st.session_state.history[key] = {"params": p, "snaps": s, "diag": d, "thick": t, "coords": co, "pkl_path": fp, "pkl_name": fn}
             st.success(f"Batch done: {len(results)} .pkl files generated")
+            st.rerun()  # Force refresh to show plots
 
 if run_single_button:
-    default_params = (1.0, 1.0, 0.4, 0.05, 0.02)  # Defaults
+    default_params = (1.0, 1.0, 0.4, 0.05, 0.02)
     with st.spinner("Running SINGLE..."):
         p, s, d, t, co, fp, fn = run_simulation(default_params)
         if s is not None:
             key = get_run_key(p)
-            st.session_state.history[key] = {
-                "params": p,
-                "snaps": s, "diag": d, "thick": t, "coords": co,
-                "pkl_path": fp, "pkl_name": fn
-            }
+            st.session_state.history[key] = {"params": p, "snaps": s, "diag": d, "thick": t, "coords": co, "pkl_path": fp, "pkl_name": fn}
             st.success("Single run done")
+            st.rerun()  # Force refresh to show plots
 
-# ------------------- BATCH SUMMARY -------------------
-if st.session_state.history:
-    st.header("Batch Summary")
-    summary_data = []
-    for key, data in st.session_state.history.items():
-        p = data["params"]
-        final_th = data["thick"][-1][2] * 1e9 if data["thick"] else 0  # nm
-        steps = len(data["thick"])
-        summary_data.append({
-            "Run Key": key,
-            "c_bulk": p[0],
-            "Domain Mult": p[1],
-            "k0_nd": p[2],
-            "D_nd": p[3],
-            "gamma_nd": p[4],
-            "Final Thickness (nm)": final_th,
-            "Steps": steps,
-            "PKL": data["pkl_name"]
-        })
-    df = pd.DataFrame(summary_data)
-    st.dataframe(df, use_container_width=True)
+# ------------------- BATCH COMPARISON -------------------
+if len(st.session_state.history) > 1:
+    st.header("Batch Comparison")
 
-    # Download all PKLs as ZIP
-    if st.button("Download All PKLs as ZIP"):
-        zipbuf = io.BytesIO()
-        with zipfile.ZipFile(zipbuf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for data in st.session_state.history.values():
-                fp = data["pkl_path"]
-                if os.path.exists(fp):
-                    zf.write(fp, arcname=data["pkl_name"])
-        zipbuf.seek(0)
-        st.download_button(
-            "Download ZIP",
-            zipbuf.read(),
-            f"electroless_variants_{datetime.now():%Y%m%d_%H%M%S}.zip",
-            "application/zip"
-        )
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+    colors = plt.cm.viridis(np.linspace(0, 1, len(st.session_state.history)))
+
+    for i, (key, data) in enumerate(st.session_state.history.items()):
+        thick_data = data["thick"]
+        times = [scale_time(t[0]) for t in thick_data]
+        ths_nm = [t[2] * 1e9 for t in thick_data]
+        ax1.plot(times, ths_nm, label=key, color=colors[i])
+
+        diag = data["diag"]
+        tdiag = [scale_time(d[0]) for d in diag]
+        bulk = [d[4] for d in diag]
+        grad = [d[5] for d in diag]
+        ax2.semilogy(tdiag, bulk, label='bulk', color=colors[i])
+        ax2.semilogy(tdiag, grad, ls='--', color=colors[i])
+
+        if use_edl:
+            edl = [d[6] for d in diag]
+            ax3.plot(tdiag, edl, label='EDL', color=colors[i])
+
+    ax1.set_xlabel("Time (s)")
+    ax1.set_ylabel("Thickness (nm)")
+    ax1.legend()
+    ax1.grid(True)
+
+    ax2.set_xlabel("Time (s)")
+    ax2.set_ylabel("L2-norm")
+    ax2.grid(True)
+
+    ax3.set_xlabel("Time (s)")
+    ax3.set_ylabel("EDL Boost")
+    ax3.grid(True)
+
+    st.pyplot(fig)
 
 # ------------------- PLAYBACK -------------------
+st.header("Simulation Results")
+
 if st.session_state.history:
-    st.header("Select Run for Playback")
     selected_key = st.selectbox(
         "Choose run",
         list(st.session_state.history.keys()),
@@ -476,7 +500,7 @@ if st.session_state.history:
     field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)"])
     t, phi, c, psi = snaps[frame]
     t_real = scale_time(t)
-    th_nm = thick[frame][2] * 1e9
+    th_nm = thick[frame][2] * 1e9 if frame < len(thick) else 0
 
     fig, ax = plt.subplots(figsize=(6, 5))
     field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
@@ -488,16 +512,21 @@ if st.session_state.history:
     ax.set_title(f"{field} @ t = {t_real:.3e} s")
     st.pyplot(fig)
 
+    # Thickness plot
+    fig_th, ax_th = plt.subplots(figsize=(6, 5))
+    times_th = [scale_time(t[0]) for t in thick]
+    ths_nm = [t[2] * 1e9 for t in thick]
+    ax_th.plot(times_th, ths_nm, 'b-')
+    ax_th.set_xlabel("Time (s)")
+    ax_th.set_ylabel("Thickness (nm)")
+    ax_th.grid(True)
+    st.pyplot(fig_th)
+
     # PKL Download
-    fp = data["pkl_path"]
-    if os.path.exists(fp):
+    fp = data.get("pkl_path")
+    if fp and os.path.exists(fp):
         with open(fp, "rb") as f:
-            st.download_button(
-                "Download this .pkl",
-                f.read(),
-                data["pkl_name"],
-                "application/octet-stream"
-            )
+            st.download_button("Download this .pkl", f.read(), data["pkl_name"], "application/octet-stream")
 
 else:
-    st.info("Run simulations to generate .pkl files.")
+    st.info("Run a simulation to see results.")
