@@ -549,47 +549,56 @@ if st.session_state.history:
     with col5:
         st.metric("gamma_nd", f"{params[4]:.3f}")
 
-    # Check if we have valid snapshots
-    if snaps and len(snaps) > 0:
+    # Check if we have valid snapshots with comprehensive error handling
+    if snaps is not None and len(snaps) > 0:
         max_frame = len(snaps) - 1
-        frame = st.slider("Frame", 0, max_frame, min(max_frame, len(snaps) - 1))
-        field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)", "material map"])
         
-        if frame < len(snaps):
-            t, phi, c, psi = snaps[frame]
-            t_real = scale_time(t)
-            th_nm = thick[frame][2] * 1e9 if frame < len(thick) else 0
+        # Ensure max_frame is at least 0
+        if max_frame < 0:
+            st.warning("No valid frames available for playback.")
+        else:
+            # Create slider with safe defaults
+            frame = st.slider("Frame", 0, max_frame, max_frame)
+            field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)", "material map"])
+            
+            # Double-check frame bounds
+            if 0 <= frame < len(snaps):
+                t, phi, c, psi = snaps[frame]
+                t_real = scale_time(t)
+                th_nm = thick[frame][2] * 1e9 if frame < len(thick) else 0
 
-            # Create visualization
-            fig, ax = plt.subplots(figsize=(8, 6))
-            
-            if field == "material map":
-                m = compute_material_map(phi, psi)
-                field_data = m
-                vmin, vmax = 0, 3
+                # Create visualization
+                fig, ax = plt.subplots(figsize=(8, 6))
+                
+                if field == "material map":
+                    m = compute_material_map(phi, psi)
+                    field_data = m
+                    vmin, vmax = 0, 3
+                else:
+                    field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
+                    vmin, vmax = (0, 1) if field != "c (concentration)" else (0, params[0])
+                
+                if mode == "2D (planar)":
+                    im = ax.imshow(field_data.T, cmap=cmap_choice, 
+                                  vmin=vmin, vmax=vmax, 
+                                  origin='lower', 
+                                  extent=[0, coords[0][-1], 0, coords[1][-1]])
+                    ax.set_xlabel("x (nd)")
+                    ax.set_ylabel("y (nd)")
+                else:
+                    im = ax.imshow(field_data[:, :, Nz//2].T, cmap=cmap_choice,
+                                  vmin=vmin, vmax=vmax,
+                                  origin='lower', 
+                                  extent=[0, coords[0][-1], 0, coords[1][-1]])
+                    ax.set_xlabel("x (nd)")
+                    ax.set_ylabel("y (nd)")
+                    ax.set_title(f"Slice at z = {coords[2][Nz//2]:.2f}")
+                
+                plt.colorbar(im, ax=ax)
+                ax.set_title(f"{field} @ t = {t_real:.3e} s | Thickness: {th_nm:.2f} nm")
+                st.pyplot(fig)
             else:
-                field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
-                vmin, vmax = (0, 1) if field != "c (concentration)" else (0, params[0])
-            
-            if mode == "2D (planar)":
-                im = ax.imshow(field_data.T, cmap=cmap_choice, 
-                              vmin=vmin, vmax=vmax, 
-                              origin='lower', 
-                              extent=[0, coords[0][-1], 0, coords[1][-1]])
-                ax.set_xlabel("x (nd)")
-                ax.set_ylabel("y (nd)")
-            else:
-                im = ax.imshow(field_data[:, :, Nz//2].T, cmap=cmap_choice,
-                              vmin=vmin, vmax=vmax,
-                              origin='lower', 
-                              extent=[0, coords[0][-1], 0, coords[1][-1]])
-                ax.set_xlabel("x (nd)")
-                ax.set_ylabel("y (nd)")
-                ax.set_title(f"Slice at z = {coords[2][Nz//2]:.2f}")
-            
-            plt.colorbar(im, ax=ax)
-            ax.set_title(f"{field} @ t = {t_real:.3e} s | Thickness: {th_nm:.2f} nm")
-            st.pyplot(fig)
+                st.error(f"Frame {frame} is out of bounds. Available frames: 0 to {len(snaps)-1}")
 
         # Thickness evolution plot
         if thick and len(thick) > 0:
