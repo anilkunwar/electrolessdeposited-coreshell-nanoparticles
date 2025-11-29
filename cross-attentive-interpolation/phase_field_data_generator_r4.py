@@ -549,83 +549,117 @@ if st.session_state.history:
     with col5:
         st.metric("gamma_nd", f"{params[4]:.3f}")
 
-    # Check if we have valid snapshots with comprehensive error handling
-    if snaps is not None and len(snaps) > 0:
-        max_frame = len(snaps) - 1
-        
-        # Ensure max_frame is at least 0
+    # --- Safe playback slider block (replace existing playback guard and slider) ---
+    if snaps and len(snaps) > 0:
+        # enforce Python int and non-negative
+        max_frame = int(len(snaps) - 1)
+
         if max_frame < 0:
-            st.warning("No valid frames available for playback.")
+            st.warning("No frames available for this run.")
         else:
-            # Create slider with safe defaults
-            frame = st.slider("Frame", 0, max_frame, max_frame)
-            field = st.selectbox("Field", ["phi (shell)", "c (concentration)", "psi (core)", "material map"])
-            
-            # Double-check frame bounds
+            # default to first frame or clamp to boundary
+            default_frame = 0
+
+            frame = st.slider(
+                "Frame",
+                0,
+                max_frame,
+                default_frame,
+                step=1,
+                format="%d"
+            )
+
+            field = st.selectbox(
+                "Field",
+                ["phi (shell)", "c (concentration)", "psi (core)", "material map"]
+            )
+
             if 0 <= frame < len(snaps):
+                # unpack snapshot
                 t, phi, c, psi = snaps[frame]
                 t_real = scale_time(t)
-                th_nm = thick[frame][2] * 1e9 if frame < len(thick) else 0
+                th_nm = thick[frame][2] * 1e9 if (thick and frame < len(thick)) else 0.0
 
-                # Create visualization
-                fig, ax = plt.subplots(figsize=(8, 6))
-                
+                # choose field
                 if field == "material map":
                     m = compute_material_map(phi, psi)
                     field_data = m
                     vmin, vmax = 0, 3
                 else:
-                    field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
-                    vmin, vmax = (0, 1) if field != "c (concentration)" else (0, params[0])
-                
+                    field_data = {
+                        "phi (shell)": phi,
+                        "c (concentration)": c,
+                        "psi (core)": psi
+                    }[field]
+                    if field == "c (concentration)":
+                        vmin, vmax = 0, params[0]  # c_bulk
+                    else:
+                        vmin, vmax = 0, 1
+
+                # --- Plot ---
+                fig, ax = plt.subplots(figsize=(8, 6))
+
                 if mode == "2D (planar)":
-                    im = ax.imshow(field_data.T, cmap=cmap_choice, 
-                                  vmin=vmin, vmax=vmax, 
-                                  origin='lower', 
-                                  extent=[0, coords[0][-1], 0, coords[1][-1]])
+                    im = ax.imshow(
+                        field_data.T,
+                        cmap=cmap_choice,
+                        vmin=vmin,
+                        vmax=vmax,
+                        origin="lower",
+                        extent=[0, coords[0][-1], 0, coords[1][-1]]
+                    )
                     ax.set_xlabel("x (nd)")
                     ax.set_ylabel("y (nd)")
+
                 else:
-                    im = ax.imshow(field_data[:, :, Nz//2].T, cmap=cmap_choice,
-                                  vmin=vmin, vmax=vmax,
-                                  origin='lower', 
-                                  extent=[0, coords[0][-1], 0, coords[1][-1]])
+                    # 3D: take mid slice
+                    Nz_mid = field_data.shape[2] // 2
+                    im = ax.imshow(
+                        field_data[:, :, Nz_mid].T,
+                        cmap=cmap_choice,
+                        vmin=vmin,
+                        vmax=vmax,
+                        origin="lower",
+                        extent=[0, coords[0][-1], 0, coords[1][-1]]
+                    )
                     ax.set_xlabel("x (nd)")
                     ax.set_ylabel("y (nd)")
-                    ax.set_title(f"Slice at z = {coords[2][Nz//2]:.2f}")
-                
+                    ax.set_title(f"Slice at z = {coords[2][Nz_mid]:.2f}")
+
                 plt.colorbar(im, ax=ax)
                 ax.set_title(f"{field} @ t = {t_real:.3e} s | Thickness: {th_nm:.2f} nm")
                 st.pyplot(fig)
+
             else:
-                st.error(f"Frame {frame} is out of bounds. Available frames: 0 to {len(snaps)-1}")
+                st.warning("Selected frame is out of range.")
 
-        # Thickness evolution plot
-        if thick and len(thick) > 0:
-            fig_th, ax_th = plt.subplots(figsize=(8, 5))
-            times_th = [scale_time(t[0]) for t in thick]
-            ths_nm = [t[2] * 1e9 for t in thick]
-            ax_th.plot(times_th, ths_nm, 'b-', linewidth=3, label='Shell thickness')
-            ax_th.set_xlabel("Time (s)")
-            ax_th.set_ylabel("Thickness (nm)")
-            ax_th.grid(True, alpha=0.3)
-            ax_th.legend()
-            ax_th.set_title("Shell Thickness Evolution")
-            st.pyplot(fig_th)
-
-        # PKL Download
-        fp = data.get("pkl_path")
-        if fp and os.path.exists(fp):
-            with open(fp, "rb") as f:
-                st.download_button(
-                    "📦 Download this simulation as .pkl", 
-                    f.read(), 
-                    data["pkl_name"], 
-                    "application/octet-stream",
-                    use_container_width=True
-                )
     else:
         st.warning("No snapshots available for this run. The simulation may have failed or produced no output.")
+
+    # Thickness evolution plot
+    if thick and len(thick) > 0:
+        fig_th, ax_th = plt.subplots(figsize=(8, 5))
+        times_th = [scale_time(t[0]) for t in thick]
+        ths_nm = [t[2] * 1e9 for t in thick]
+        ax_th.plot(times_th, ths_nm, 'b-', linewidth=3, label='Shell thickness')
+        ax_th.set_xlabel("Time (s)")
+        ax_th.set_ylabel("Thickness (nm)")
+        ax_th.grid(True, alpha=0.3)
+        ax_th.legend()
+        ax_th.set_title("Shell Thickness Evolution")
+        st.pyplot(fig_th)
+
+    # PKL Download
+    fp = data.get("pkl_path")
+    if fp and os.path.exists(fp):
+        with open(fp, "rb") as f:
+            st.download_button(
+                "📦 Download this simulation as .pkl", 
+                f.read(), 
+                data["pkl_name"], 
+                "application/octet-stream",
+                use_container_width=True
+            )
 
     # Additional metrics
     if 'growth_metrics' in data and data['growth_metrics'].get('onset_time_nd'):
