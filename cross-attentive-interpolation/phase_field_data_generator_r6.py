@@ -333,7 +333,7 @@ def run_simulation(c_bulk_val):
 
     # --- Include L0_nm, core fraction (fc) and shell ratio (rs) in filename ---
     filename = (
-        f"Ag_{mode_str}_c{c_bulk_val:.3f}_L0{L0_nm}nm_fc{core_radius_frac:.3f}_rs{shell_thickness_frac:.3f}_"
+        f"AgCu_{mode_str}_c{c_bulk_val:.3f}_L0{L0_nm}nm_fc{core_radius_frac:.3f}_rs{shell_thickness_frac:.3f}_"
         f"{bc_str}_{edl_str}_k{k0_nd:.2f}_M{M_nd:.2f}_D{D_nd:.3f}_"
         f"Nx{Nx}_steps{n_steps}.pkl"
     )
