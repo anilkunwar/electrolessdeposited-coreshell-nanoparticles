@@ -110,7 +110,8 @@ cmap_choice = st.sidebar.selectbox("Colormap", CMAPS, CMAPS.index("viridis"))
 
 st.sidebar.header("Geometry")
 core_radius_frac = st.sidebar.slider("Core / L", 0.05, 0.45, 0.18, 0.01)
-shell_thickness_frac = st.sidebar.slider("Δr / r_core", 0.05, 0.6, 0.2, 0.01)
+#shell_thickness_frac = st.sidebar.slider("Δr / r_core", 0.05, 0.6, 0.2, 0.01)
+shell_thickness_frac = st.sidebar.slider("Δr / r_core", 0.01, 0.6, 0.2, 0.01)
 phi_threshold = st.sidebar.slider("φ threshold", 0.1, 0.9, 0.5, 0.05)
 
 growth_model = st.sidebar.selectbox("Model", ["Model A (irreversible)", "Model B (soft reversible)"])
