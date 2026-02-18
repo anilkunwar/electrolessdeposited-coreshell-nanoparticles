@@ -11,6 +11,7 @@ ELECTROLESS Ag — FULLY UPGRADED & BACKWARD‑COMPATIBLE SIMULATOR
 * **PKL export** – auto‑saves every run, one‑click download
 * **Phase statistics** – area/volume of electrolyte, Ag, Cu (threshold‑based)
 * **Default material proxy** = max(ϕ,ψ) + ψ with discrete colourmap
+* **All spatial plots now show axes in nanometres (nm)** – converted using L₀
 """
 
 import streamlit as st
@@ -26,7 +27,7 @@ import os
 import tempfile
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import pickle                       # <-- for PKL export
+import pickle                       # for PKL export
 
 # ------------------- SAFE GPU SETUP -------------------
 GPU_AVAILABLE = False
@@ -114,7 +115,7 @@ phi_threshold = st.sidebar.slider("φ threshold", 0.1, 0.9, 0.5, 0.05)
 growth_model = st.sidebar.selectbox("Model", ["Model A (irreversible)", "Model B (soft reversible)"])
 
 st.sidebar.header("Physical Scales")
-L0 = st.sidebar.number_input("L₀ (nm)", 1.0, 1e6, 20.0) * 1e-9   # nm → cm
+L0 = st.sidebar.number_input("L₀ (nm)", 1.0, 1e6, 20.0) * 1e-9   # nm → m
 tau0 = st.sidebar.number_input("τ₀ (×10⁻⁴ s)", 1e-6, 1e6, 1.0) * 1e-4
 
 # ------------------- EDL CATALYST (OPTIONAL) -------------------
@@ -523,6 +524,10 @@ if st.session_state.history:
     th_nm = thick[frame][2] * 1e9
     c_mean, c_max, total_ag, bulk_norm, grad_norm, edl_flux = diag[frame][1:]
 
+    # Real‑space extent for plots (nm)
+    L_nm = L0 * 1e9          # domain side length in nanometres
+    extent_nm = [0, L_nm, 0, L_nm]
+
     col1, col2 = st.columns([2, 1])
     with col1:
         st.write(
@@ -533,11 +538,17 @@ if st.session_state.history:
         field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
         vmin = 0
         vmax = 1 if field != "c (concentration)" else selected_c
-        im = ax.imshow(
-            field_data.T if mode == "2D (planar)" else field_data[field_data.shape[0] // 2],
-            cmap=cmap_choice, vmin=vmin, vmax=vmax, origin='lower'
-        )
+        if mode == "2D (planar)":
+            im = ax.imshow(field_data.T, cmap=cmap_choice, vmin=vmin, vmax=vmax,
+                           origin='lower', extent=extent_nm)
+        else:
+            # 3D: show middle slice, same extent for the slice plane
+            slice_data = field_data[field_data.shape[0] // 2, :, :].T
+            im = ax.imshow(slice_data, cmap=cmap_choice, vmin=vmin, vmax=vmax,
+                           origin='lower', extent=extent_nm)
         plt.colorbar(im, ax=ax, label=field.split()[0])
+        ax.set_xlabel("x (nm)")
+        ax.set_ylabel("y (nm)")
         ax.set_title(f"{field} @ t = {t_real:.3e} s")
         st.pyplot(fig)
 
@@ -557,7 +568,7 @@ if st.session_state.history:
         csv = df.to_csv(index=False).encode()
         st.download_button("Download CSV", csv, f"diag_c_{selected_c:.3g}.csv", "text/csv")
 
-    # ------------------- PHASE STATISTICS (new) -------------------
+    # ------------------- PHASE STATISTICS (current frame) -------------------
     st.subheader("Phase Statistics (current frame)")
     L_dom = 1.0
     dx = L_dom / (Nx - 1)
@@ -596,7 +607,7 @@ if st.session_state.history:
             "Interpolation",
             ["phi + 2*psi (simple)", "phi*(1-psi) + 2*psi",
              "h·(phi² + psi²)", "h·(4*phi² + 2*psi²)", "max(phi, psi) + psi"],
-            index=4                    # <-- default to max(phi,psi)+psi
+            index=4                    # default to max(phi,psi)+psi
         )
     with col_b:
         show_potential = st.checkbox("Show -α·c", True)
@@ -629,20 +640,24 @@ if st.session_state.history:
 
     if mode == "2D (planar)":
         fig_mat, ax = plt.subplots(figsize=(6, 5))
-        im = ax.imshow(material.T, origin='lower', extent=[0, 1, 0, 1],
+        im = ax.imshow(material.T, origin='lower', extent=extent_nm,
                        cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
         if "max" in material_method or "2*psi" in material_method:
             cbar = plt.colorbar(im, ax=ax, ticks=[0, 1, 2])
             cbar.ax.set_yticklabels(['electrolyte', 'Ag', 'Cu'])
         else:
             plt.colorbar(im, ax=ax, label="material")
+        ax.set_xlabel("x (nm)")
+        ax.set_ylabel("y (nm)")
         ax.set_title("Material")
         st.pyplot(fig_mat)
 
         if show_potential:
             fig_pot, ax = plt.subplots(figsize=(6, 5))
-            im = ax.imshow(potential.T, origin='lower', extent=[0, 1, 0, 1], cmap="RdBu_r")
+            im = ax.imshow(potential.T, origin='lower', extent=extent_nm, cmap="RdBu_r")
             plt.colorbar(im, ax=ax, label="-α·c")
+            ax.set_xlabel("x (nm)")
+            ax.set_ylabel("y (nm)")
             ax.set_title("Potential Proxy")
             st.pyplot(fig_pot)
     else:
@@ -651,8 +666,12 @@ if st.session_state.history:
         for ax, sl, label in zip(axes,
                                  [material[cx, :, :], material[:, cx, :], material[:, :, cx]],
                                  ["x", "y", "z"]):
-            ax.imshow(sl.T, origin='lower', cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
-            ax.set_title(label); ax.axis('off')
+            # For 3D slices, we still use the same extent for the slice plane
+            im = ax.imshow(sl.T, origin='lower', extent=extent_nm,
+                           cmap=cmap_mat, vmin=vmin_mat, vmax=vmax_mat)
+            ax.set_title(f"{label}‑slice")
+            ax.set_xlabel("(nm)")
+            ax.set_ylabel("(nm)")
         fig.suptitle("Material (3D slices)")
         st.pyplot(fig)
 
@@ -709,16 +728,22 @@ if st.session_state.history:
             field_data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
             vmin = 0
             vmax = 1 if field != "c (concentration)" else selected_c
-            im = ax.imshow(
-                field_data.T if mode == "2D (planar)" else field_data[field_data.shape[0] // 2],
-                cmap=cmap_choice, vmin=vmin, vmax=vmax, origin='lower', animated=True
-            )
+            if mode == "2D (planar)":
+                im = ax.imshow(field_data.T, cmap=cmap_choice, vmin=vmin, vmax=vmax,
+                               origin='lower', extent=extent_nm, animated=True)
+            else:
+                slice_data = field_data[field_data.shape[0] // 2, :, :].T
+                im = ax.imshow(slice_data, cmap=cmap_choice, vmin=vmin, vmax=vmax,
+                               origin='lower', extent=extent_nm, animated=True)
             plt.colorbar(im, ax=ax)
 
             def animate(i):
                 t_i, phi_i, c_i, psi_i = snaps[i]
                 data = {"phi (shell)": phi_i, "c (concentration)": c_i, "psi (core)": psi_i}[field]
-                im.set_array(data.T if mode == "2D (planar)" else data[data.shape[0] // 2])
+                if mode == "2D (planar)":
+                    im.set_array(data.T)
+                else:
+                    im.set_array(data[data.shape[0] // 2, :, :].T)
                 ax.set_title(f"{field} @ t = {scale_time(t_i):.3e} s")
                 return [im]
 
@@ -737,12 +762,18 @@ if st.session_state.history:
     if st.sidebar.button("Download PNG Snapshot"):
         fig_snap, ax = plt.subplots(figsize=(6, 5))
         data = {"phi (shell)": phi, "c (concentration)": c, "psi (core)": psi}[field]
-        im = ax.imshow(
-            data.T if mode == "2D (planar)" else data[data.shape[0] // 2],
-            cmap=cmap_choice, vmin=0, vmax=1 if field != "c (concentration)" else selected_c,
-            origin='lower'
-        )
+        vmin = 0
+        vmax = 1 if field != "c (concentration)" else selected_c
+        if mode == "2D (planar)":
+            im = ax.imshow(data.T, cmap=cmap_choice, vmin=vmin, vmax=vmax,
+                           origin='lower', extent=extent_nm)
+        else:
+            slice_data = data[data.shape[0] // 2, :, :].T
+            im = ax.imshow(slice_data, cmap=cmap_choice, vmin=vmin, vmax=vmax,
+                           origin='lower', extent=extent_nm)
         plt.colorbar(im, ax=ax)
+        ax.set_xlabel("x (nm)")
+        ax.set_ylabel("y (nm)")
         ax.set_title(f"{field} @ t = {t_real:.3e} s")
         buf = io.BytesIO()
         fig_snap.savefig(buf, format='png', dpi=150, bbox_inches='tight')
