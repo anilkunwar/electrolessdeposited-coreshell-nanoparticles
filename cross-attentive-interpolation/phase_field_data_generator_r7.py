@@ -85,7 +85,7 @@ c_bulk_list = [c_options[l] for l in selected_labels]
 
 st.sidebar.header("Simulation")
 mode = st.sidebar.selectbox("Mode", ["2D (planar)", "3D (spherical)"])
-bc_type = st.sidebar.selectbox("BC", ["Neumann (zero flux in sides and bottom)", "Dirichlet (fixed values at all sides)"])
+bc_type = st.sidebar.selectbox("BC", ["Neumann (zero flux in 3 edges)", "Dirichlet (fixed values all sides)"])
 
 max_res = 1024 if GPU_AVAILABLE else 512
 max_steps = 4000 if GPU_AVAILABLE else 2000
