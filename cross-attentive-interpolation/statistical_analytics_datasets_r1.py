@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ROBUST EDITION)
-✓ Safe column handling (no unhashable object crashes)
-✓ Safe correlation calculations (no NaN/invalid data crashes)
+Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (FULLY ROBUST EDITION)
+✓ Fixed Plotly fillcolor validation error
+✓ Fixed multiselect default value error
+✓ Fixed nunique() crash on unhashable objects
+✓ Fixed correlation calculation on invalid data
 ✓ Simple directory setup (numerical_solutions)
 ✓ Radar charts, sunburst hierarchies, summary tables
 ✓ Dataset gap detection & experimental design recommendations
@@ -73,7 +75,7 @@ st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designe
 # GLOBAL CONSTANTS & CONFIGURATION
 # =============================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# ✅ SIMPLE DIRECTORY PATTERN (like your working example)
+# ✅ SIMPLE DIRECTORY PATTERN (like your working interpolation code)
 SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "numerical_solutions")
 os.makedirs(SOLUTIONS_DIR, exist_ok=True)
 
@@ -104,7 +106,17 @@ COLOR_SCHEMES = {
     "continuous": px.colors.sequential.Viridis,
     "categorical": px.colors.qualitative.Set2,
     "diverging": px.colors.diverging.RdBu,
-    "radar": ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+    # ✅ FIXED: Use rgba format for transparency instead of hex+alpha concatenation
+    "radar": [
+        'rgba(31, 119, 180, 0.7)',
+        'rgba(255, 127, 14, 0.7)',
+        'rgba(44, 160, 44, 0.7)',
+        'rgba(214, 39, 40, 0.7)',
+        'rgba(148, 103, 189, 0.7)',
+        'rgba(140, 86, 75, 0.7)',
+        'rgba(227, 119, 194, 0.7)',
+        'rgba(127, 127, 127, 0.7)'
+    ]
 }
 
 # =============================================
@@ -123,22 +135,28 @@ def get_safe_columns_for_nunique(df: pd.DataFrame) -> List[str]:
     """Get columns that are safe to call nunique() on."""
     safe_cols = []
     for c in df.columns:
-        # Numeric columns are always safe
-        if pd.api.types.is_numeric_dtype(df[c]):
-            safe_cols.append(c)
-        # Object/category columns need hashability check
-        elif pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_categorical_dtype(df[c]):
-            if is_hashable_column(df[c]):
+        try:
+            # Numeric columns are always safe
+            if pd.api.types.is_numeric_dtype(df[c]):
                 safe_cols.append(c)
+            # Object/category columns need hashability check
+            elif pd.api.types.is_object_dtype(df[c]) or pd.api.types.is_categorical_dtype(df[c]):
+                if is_hashable_column(df[c]):
+                    safe_cols.append(c)
+        except Exception:
+            continue
     return safe_cols
 
 def get_numeric_columns_safe(df: pd.DataFrame) -> List[str]:
     """Get only numeric columns that are safe for correlation."""
     numeric_cols = []
     for c in df.select_dtypes(include=['number']).columns:
-        # Check column has valid numeric data
-        if df[c].notna().any() and df[c].std() > 0:
-            numeric_cols.append(c)
+        try:
+            # Check column has valid numeric data
+            if df[c].notna().any() and df[c].std() > 0:
+                numeric_cols.append(c)
+        except Exception:
+            continue
     return numeric_cols
 
 def safe_nunique(series: pd.Series, max_unique: int = 10) -> bool:
@@ -149,6 +167,15 @@ def safe_nunique(series: pd.Series, max_unique: int = 10) -> bool:
         return series.dropna().nunique() <= max_unique
     except Exception:
         return False
+
+def clean_value_for_plotly(val) -> float:
+    """Clean a value to be Plotly-compatible."""
+    try:
+        if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+            return 0.0
+        return float(val)
+    except Exception:
+        return 0.0
 
 # =============================================
 # PKL FILE LOADER WITH ENHANCED METADATA
@@ -168,7 +195,10 @@ class EnhancedPKLLoader:
         if not os.path.exists(self.pkl_dir):
             os.makedirs(self.pkl_dir, exist_ok=True)
             return []
-        return [f for f in os.listdir(self.pkl_dir) if f.endswith('.pkl')]
+        try:
+            return [f for f in os.listdir(self.pkl_dir) if f.endswith('.pkl')]
+        except Exception:
+            return []
     
     def extract_filename_metadata(self, filename: str) -> Dict[str, Any]:
         """Parse parameters from standardized filename format."""
@@ -187,10 +217,13 @@ class EnhancedPKLLoader:
             'lambda0_edl': r'EDL([0-9.]+)',
         }
         for key, pattern in patterns.items():
-            match = re.search(pattern, filename)
-            if match:
-                val = match.group(1)
-                metadata[key] = float(val) if '.' in val else int(val)
+            try:
+                match = re.search(pattern, filename)
+                if match:
+                    val = match.group(1)
+                    metadata[key] = float(val) if '.' in val else int(val)
+            except Exception:
+                continue
         
         # Categorical parameters
         if '2D' in filename:
@@ -364,12 +397,8 @@ class RadarChartBuilder:
                 # Try derived metrics first, then direct columns
                 col_name = f"metric_{param}" if param in DERIVED_METRICS else param
                 val = row.get(col_name) or row.get(param) or 0
-                # Ensure value is numeric
-                try:
-                    val = float(val) if val is not None and pd.notna(val) else 0
-                except (TypeError, ValueError):
-                    val = 0
-                values.append(val)
+                # ✅ FIXED: Clean value for Plotly compatibility
+                values.append(clean_value_for_plotly(val))
             
             # Normalize to [0, 1] if requested
             if normalize:
@@ -382,20 +411,24 @@ class RadarChartBuilder:
             radar_data.append({
                 'name': f"#{idx}: {row.get('filename', 'Unknown')[:30]}",
                 'values': values,
-                'c_bulk': row.get('c_bulk', 0),
-                'thickness': row.get('metric_thickness_nm', 0)
+                'c_bulk': clean_value_for_plotly(row.get('c_bulk', 0)),
+                'thickness': clean_value_for_plotly(row.get('metric_thickness_nm', 0))
             })
         
         # Build Plotly figure
         fig = go.Figure()
         for i, entry in enumerate(radar_data):
+            # ✅ FIXED: Use rgba colors from COLOR_SCHEMES directly (no concatenation)
+            fillcolor = COLOR_SCHEMES['radar'][i % len(COLOR_SCHEMES['radar'])]
+            linecolor = fillcolor.replace('0.7', '1.0')  # Full opacity for line
+            
             fig.add_trace(go.Scatterpolar(
                 r=entry['values'],
                 theta=selected_params,
                 fill='toself',
                 name=entry['name'],
-                line=dict(color=COLOR_SCHEMES['radar'][i % len(COLOR_SCHEMES['radar'])], width=2),
-                fillcolor=COLOR_SCHEMES['radar'][i % len(COLOR_SCHEMES['radar'])] + '40',
+                line=dict(color=linecolor, width=2),
+                fillcolor=fillcolor,  # ✅ FIXED: Valid rgba format
                 hovertemplate='<br>'.join([
                     '%{theta}: %{r:.3f}',
                     'c_bulk: ' + str(entry['c_bulk']),
@@ -530,8 +563,11 @@ class SummaryTableBuilder:
         for p in params:
             col_name = f'metric_{p}' if p in DERIVED_METRICS else p
             if col_name in df.columns:
-                if pd.api.types.is_numeric_dtype(df[col_name]) and df[col_name].notna().any():
-                    numeric_cols.append(col_name)
+                try:
+                    if pd.api.types.is_numeric_dtype(df[col_name]) and df[col_name].notna().any():
+                        numeric_cols.append(col_name)
+                except Exception:
+                    continue
         
         if len(numeric_cols) < 2:
             return go.Figure().add_annotation(text="Need ≥2 numeric parameters for correlation")
@@ -543,7 +579,10 @@ class SummaryTableBuilder:
             return go.Figure().add_annotation(text="Insufficient data points for correlation (need ≥3)")
         
         # ✅ SAFE: Check for zero variance columns
-        numeric_df = numeric_df.loc[:, numeric_df.std() > 0]
+        try:
+            numeric_df = numeric_df.loc[:, numeric_df.std() > 0]
+        except Exception:
+            return go.Figure().add_annotation(text="Error computing variance")
         
         if len(numeric_df.columns) < 2:
             return go.Figure().add_annotation(text="Need ≥2 columns with non-zero variance")
@@ -589,9 +628,12 @@ class DatasetImprovementAnalyzer:
                 continue
             
             # ✅ SAFE: Check column is numeric and hashable
-            if not pd.api.types.is_numeric_dtype(df[col]):
-                continue
-            if not is_hashable_column(df[col]):
+            try:
+                if not pd.api.types.is_numeric_dtype(df[col]):
+                    continue
+                if not is_hashable_column(df[col]):
+                    continue
+            except Exception:
                 continue
                 
             values = df[col].dropna()
@@ -708,7 +750,7 @@ def main():
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 📁 Data Management")
         
-        # ✅ SIMPLE DIRECTORY INPUT (like your working example)
+        # ✅ SIMPLE DIRECTORY INPUT (like your working interpolation code)
         pkl_dir = st.text_input("PKL Directory", value=SOLUTIONS_DIR,
                                help="Directory containing .pkl simulation files")
         
@@ -759,24 +801,38 @@ def main():
         normalize_radar = st.checkbox("Normalize radar chart values", value=True)
         top_n_table = st.slider("Top N simulations in table", 5, 50, 20, 5)
         
-        # ✅ SAFE: Only use parameters that exist in the dataframe for correlation
+        # ✅ SAFE & FIXED: Only use parameters that exist in the dataframe for correlation
         available_corr_params = []
         if not st.session_state.metadata_df.empty:
             for cat_params in PARAM_CATEGORIES.values():
                 for p in cat_params:
                     col_name = f'metric_{p}' if p in DERIVED_METRICS else p
                     if col_name in st.session_state.metadata_df.columns:
-                        if pd.api.types.is_numeric_dtype(st.session_state.metadata_df[col_name]):
-                            available_corr_params.append(p)
+                        try:
+                            if pd.api.types.is_numeric_dtype(st.session_state.metadata_df[col_name]):
+                                available_corr_params.append(p)
+                        except Exception:
+                            continue
         
+        # ✅ FIXED: Only set defaults that exist in available options
         default_corr = [p for p in ['c_bulk', 'core_radius_frac', 'k0_nd'] if p in available_corr_params]
         
-        correlation_params = st.multiselect(
-            "Parameters for correlation analysis",
-            available_corr_params if available_corr_params else ["No numeric parameters available"],
-            default=default_corr if default_corr else [],
-            help="Select numeric parameters to compute correlations"
-        )
+        # ✅ FIXED: Handle empty options gracefully
+        if available_corr_params:
+            correlation_params = st.multiselect(
+                "Parameters for correlation analysis",
+                available_corr_params,
+                default=default_corr if default_corr else available_corr_params[:3],
+                help="Select numeric parameters to compute correlations"
+            )
+        else:
+            correlation_params = st.multiselect(
+                "Parameters for correlation analysis",
+                ["No numeric parameters available"],
+                default=[],
+                help="Load data first to see available parameters",
+                disabled=True
+            )
         st.markdown('</div>', unsafe_allow_html=True)
     
     # ================= MAIN CONTENT AREA =================
@@ -952,13 +1008,16 @@ def main():
         with col_r1:
             if available_params and compare_btn:
                 radar_builder = RadarChartBuilder()
-                fig = radar_builder.create_comparison_radar(
-                    df, 
-                    selected_params=available_params[:8],  # Limit for readability
-                    selected_indices=selected_indices,
-                    normalize=normalize_radar
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                try:
+                    fig = radar_builder.create_comparison_radar(
+                        df, 
+                        selected_params=available_params[:8],  # Limit for readability
+                        selected_indices=selected_indices,
+                        normalize=normalize_radar
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Radar chart error: {e}")
                 
                 # Interpretation help
                 with st.expander("💡 How to interpret this radar chart"):
@@ -1004,13 +1063,16 @@ def main():
         
         if primary_dim and secondary_dim:
             sunburst_builder = SunburstBuilder()
-            fig = sunburst_builder.create_parameter_hierarchy(
-                df, 
-                primary_dim=primary_dim, 
-                secondary_dim=secondary_dim, 
-                value_col=target
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = sunburst_builder.create_parameter_hierarchy(
+                    df, 
+                    primary_dim=primary_dim, 
+                    secondary_dim=secondary_dim, 
+                    value_col=target
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Sunburst chart error: {e}")
             
             # Key insights from sunburst
             with st.expander("📊 Key Insights from Hierarchy"):
@@ -1041,8 +1103,11 @@ def main():
         
         if valid_corr_params:
             corr_builder = SummaryTableBuilder()
-            fig = corr_builder.create_correlation_matrix(df, valid_corr_params)
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = corr_builder.create_correlation_matrix(df, valid_corr_params)
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Correlation matrix error: {e}")
             
             # Highlight strong correlations
             with st.expander("🎯 Strong Correlations with Target"):
@@ -1207,7 +1272,7 @@ with st.expander("❓ Help & Documentation"):
 
 st.markdown("""
 <div style="text-align: center; padding: 1rem; color: #64748b; font-size: 0.9rem;">
-🧪 Electroless Deposition Dataset Designer v2.0 (Robust) • 
+🧪 Electroless Deposition Dataset Designer v3.0 (Fully Robust) • 
 Built with Streamlit + Plotly + Pandas • 
 <em>Design smarter simulations, faster</em>
 </div>
