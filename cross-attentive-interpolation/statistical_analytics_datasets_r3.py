@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDITION)
-✓ 50+ colormap options with preview
+✓ 50+ colormap options with safe loading
 ✓ Full font/typography controls (size, family, weight, color, angle)
 ✓ Line/curve/marker thickness controls for all visualizations
 ✓ N-dimensional hierarchical sunburst (tertiary, quaternary, + dimensions)
 ✓ Advanced design panel: grid, legend, hover, annotations, backgrounds
 ✓ All previous robustness fixes maintained
+✓ Safe colormap library with fallback handling
 """
 import streamlit as st
 import numpy as np
@@ -92,78 +93,99 @@ div[data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 60
 st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designer Pro</h1>', unsafe_allow_html=True)
 
 # =============================================
-# ✅ EXPANDED COLOR MAP LIBRARY (50+ OPTIONS)
+# ✅ SAFE COLOR MAP LIBRARY (50+ OPTIONS WITH ERROR HANDLING)
 # =============================================
-COLORMAP_LIBRARY = {
-    # Plotly Sequential
-    "Viridis": px.colors.sequential.Viridis,
-    "Plasma": px.colors.sequential.Plasma,
-    "Inferno": px.colors.sequential.Inferno,
-    "Magma": px.colors.sequential.Magma,
-    "Cividis": px.colors.sequential.Cividis,
-    "Turbo": px.colors.sequential.Turbo,
-    "Rainbow": px.colors.sequential.Rainbow,
-    "Jet": px.colors.sequential.Jet,
-    "Blues": px.colors.sequential.Blues,
-    "Greens": px.colors.sequential.Greens,
-    "Greys": px.colors.sequential.Greys,
-    "Oranges": px.colors.sequential.Oranges,
-    "Reds": px.colors.sequential.Reds,
-    "Peach": px.colors.sequential.Peach,
-    "Pinkyl": px.colors.sequential.Pinkyl,
-    "Sunset": px.colors.sequential.Sunset,
-    "Teal": px.colors.sequential.Teal,
-    "Aggrnyl": px.colors.sequential.Aggrnyl,
-    "Agsunset": px.colors.sequential.Agsunset,
-    "Deep": px.colors.sequential.Deep,
-    "Dense": px.colors.sequential.Dense,
-    "Electric": px.colors.sequential.Electric,
-    "Emrld": px.colors.sequential.Emrld,
-    "Haline": px.colors.sequential.Haline,
-    "Ice": px.colors.sequential.Ice,
-    "Matter": px.colors.sequential.Matter,
-    "Oryel": px.colors.sequential.Oryel,
-    "Portland": px.colors.sequential.Portland,
-    "Solar": px.colors.sequential.Solar,
-    "Speed": px.colors.sequential.Speed,
-    "Temps": px.colors.sequential.Temps,
-    "Topo": px.colors.sequential.Topo,
-    "Turbid": px.colors.sequential.Turbid,
+def build_safe_colormap_library() -> Dict[str, list]:
+    """Build colormap library with safe attribute access and fallbacks."""
+    colormap_lib = {}
+    
+    # Plotly Sequential - Core (always available)
+    core_sequential = [
+        "Viridis", "Plasma", "Inferno", "Magma", "Cividis",
+        "Turbo", "Rainbow", "Jet",
+        "Blues", "Greens", "Greys", "Oranges", "Reds",
+        "Peach", "Pinkyl", "Sunset", "Teal"
+    ]
+    
+    # Plotly Sequential - Extended (may not exist in older versions)
+    extended_sequential = [
+        "Aggrnyl", "Agsunset", "Deep", "Dense", "Electric",
+        "Emrld", "Haline", "Ice", "Matter", "Oryel",
+        "Portland", "Solar", "Speed", "Temps", "Topo", "Turbid"
+    ]
     
     # Plotly Diverging
-    "RdBu": px.colors.diverging.RdBu,
-    "PiYG": px.colors.diverging.PiYG,
-    "PRGn": px.colors.diverging.PRGn,
-    "BrBG": px.colors.diverging.BrBG,
-    "PuOr": px.colors.diverging.PuOr,
-    "Balance": px.colors.diverging.Balance,
-    "Earth": px.colors.diverging.Earth,
-    "Geyser": px.colors.diverging.Geyser,
-    "Tarn": px.colors.diverging.Tarn,
-    "Delta": px.colors.diverging.Delta,
-    "Curl": px.colors.diverging.Curl,
+    diverging = [
+        "RdBu", "PiYG", "PRGn", "BrBG", "PuOr",
+        "Balance", "Earth", "Geyser", "Tarn", "Delta", "Curl"
+    ]
     
     # Plotly Qualitative
-    "Set1": px.colors.qualitative.Set1,
-    "Set2": px.colors.qualitative.Set2,
-    "Set3": px.colors.qualitative.Set3,
-    "Pastel1": px.colors.qualitative.Pastel1,
-    "Pastel2": px.colors.qualitative.Pastel2,
-    "Dark24": px.colors.qualitative.Dark24,
-    "Bold": px.colors.qualitative.Bold,
-    "Prism": px.colors.qualitative.Prism,
-    "Safe": px.colors.qualitative.Safe,
-    "Vivid": px.colors.qualitative.Vivid,
-    "Alphabet": px.colors.qualitative.Alphabet,
+    qualitative = [
+        "Set1", "Set2", "Set3", "Pastel1", "Pastel2",
+        "Dark24", "Bold", "Prism", "Safe", "Vivid", "Alphabet"
+    ]
     
-    # Custom curated
-    "Ocean": ["#003f5c", "#2f4b7c", "#665191", "#a05195", "#d45087", "#f95d6a", "#ff7c43", "#ffa600"],
-    "Forest": ["#2d5016", "#4a7c2e", "#6ba847", "#8fd464", "#b8f086", "#e0ffad"],
-    "Sunset Glow": ["#ff6b6b", "#ffa500", "#ffd93d", "#6bcb77", "#4d96ff"],
-    "Arctic": ["#e6f7ff", "#b3e0ff", "#80c9ff", "#4db3ff", "#1a9dff", "#007acc", "#0059b3"],
-    "Volcano": ["#264653", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"],
-    "Nebula": ["#1a1a2e", "#16213e", "#0f3460", "#533483", "#e94560"],
-}
+    # Custom curated colormaps (always available)
+    custom_colormaps = {
+        "Ocean": ["#003f5c", "#2f4b7c", "#665191", "#a05195", "#d45087", "#f95d6a", "#ff7c43", "#ffa600"],
+        "Forest": ["#2d5016", "#4a7c2e", "#6ba847", "#8fd464", "#b8f086", "#e0ffad"],
+        "Sunset Glow": ["#ff6b6b", "#ffa500", "#ffd93d", "#6bcb77", "#4d96ff"],
+        "Arctic": ["#e6f7ff", "#b3e0ff", "#80c9ff", "#4db3ff", "#1a9dff", "#007acc", "#0059b3"],
+        "Volcano": ["#264653", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"],
+        "Nebula": ["#1a1a2e", "#16213e", "#0f3460", "#533483", "#e94560"],
+        "Cyberpunk": ["#00f5ff", "#ff00ff", "#ffff00", "#00ff00", "#ff0000"],
+        "Pastel Dream": ["#ffd6e0", "#c7f0d8", "#fde4cf", "#c7ceea", "#f8e9a1"],
+        "Monochrome": ["#000000", "#333333", "#666666", "#999999", "#cccccc", "#ffffff"],
+        "Heat": ["#000080", "#0000ff", "#00ffff", "#00ff00", "#ffff00", "#ff0000", "#800000"],
+    }
+    
+    # Safely load Plotly sequential colormaps
+    for name in core_sequential:
+        try:
+            attr_name = name.capitalize() if name not in ["RdBu", "PiYG", "PRGn", "BrBG", "PuOr"] else name
+            if hasattr(px.colors.sequential, attr_name):
+                colormap_lib[name] = getattr(px.colors.sequential, attr_name)
+            elif name.lower() in dir(px.colors.sequential):
+                colormap_lib[name] = getattr(px.colors.sequential, name.lower())
+        except Exception:
+            pass
+    
+    # Safely load extended sequential (may not exist in all versions)
+    for name in extended_sequential:
+        try:
+            if hasattr(px.colors.sequential, name):
+                colormap_lib[name] = getattr(px.colors.sequential, name)
+        except Exception:
+            pass
+    
+    # Safely load diverging colormaps
+    for name in diverging:
+        try:
+            if hasattr(px.colors.diverging, name):
+                colormap_lib[name] = getattr(px.colors.diverging, name)
+        except Exception:
+            pass
+    
+    # Safely load qualitative colormaps
+    for name in qualitative:
+        try:
+            if hasattr(px.colors.qualitative, name):
+                colormap_lib[name] = getattr(px.colors.qualitative, name)
+        except Exception:
+            pass
+    
+    # Add custom colormaps (always available)
+    colormap_lib.update(custom_colormaps)
+    
+    # Ensure we have at least one fallback
+    if not colormap_lib:
+        colormap_lib["Viridis"] = px.colors.sequential.Viridis
+    
+    return colormap_lib
+
+# Build the safe colormap library
+COLORMAP_LIBRARY = build_safe_colormap_library()
 
 # Font families for typography controls
 FONT_FAMILIES = [
@@ -287,7 +309,6 @@ def get_colormap(name: str, n_colors: int = None) -> list:
         return px.colors.sequential.Viridis
     cmap = COLORMAP_LIBRARY[name]
     if n_colors and len(cmap) != n_colors:
-        # Resample colormap
         from plotly.colors import sample_colorscale
         return sample_colorscale(cmap, np.linspace(0, 1, n_colors))
     return cmap
@@ -464,32 +485,23 @@ class EnhancedPKLLoader:
 class DesignConfig:
     """Centralized design configuration for all visualizations."""
     def __init__(self):
-        # Typography
         self.title_font_family = "Inter, sans-serif"
         self.title_font_size = 20
         self.title_font_weight = "bold"
         self.label_font_family = "Inter, sans-serif"
         self.label_font_size = 12
         self.tick_font_size = 10
-        
-        # Colors
         self.colormap_name = "Viridis"
         self.colormap_reversed = False
         self.bg_color = "rgba(248, 250, 252, 0.9)"
-        
-        # Lines & Markers
         self.line_width = 2.5
         self.marker_size = 8
         self.marker_symbol = "circle"
         self.marker_line_width = 1
-        
-        # Layout
         self.show_grid = True
         self.grid_color = "rgba(203, 213, 225, 0.4)"
         self.legend_position = "bottom right"
         self.hover_mode = "closest"
-        
-        # Advanced
         self.annotation_enabled = False
         self.annotation_text = ""
         self.annotation_pos = (0.5, 0.95)
@@ -582,10 +594,10 @@ class RadarChartBuilder:
         colors = design.get_colormap(len(radar_data))
         
         for i, entry in enumerate(radar_data):
-            # Use rgba for fill, solid for line
             fill_color = colors[i % len(colors)]
             if not fill_color.startswith('rgba'):
-                fill_color = f"rgba{tuple(list(px.colors.hex_to_rgb(fill_color)) + [0.7])}"
+                rgb = px.colors.hex_to_rgb(fill_color)
+                fill_color = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, 0.7)"
             line_color = fill_color.replace('0.7', '1.0').replace('0.75', '1.0')
             
             fig.add_trace(go.Scatterpolar(
@@ -640,12 +652,11 @@ class SunburstBuilder:
     
     @staticmethod
     def create_nd_hierarchy(df: pd.DataFrame,
-                           dimensions: List[str],  # Can be 2, 3, 4, or more levels
+                           dimensions: List[str],
                            value_col: str,
                            design: DesignConfig,
                            aggregation: str = 'mean') -> go.Figure:
         """Create sunburst chart supporting N hierarchical dimensions."""
-        # Validate dimensions exist
         valid_dims = [d for d in dimensions if d in df.columns]
         if len(valid_dims) < 2:
             fig = go.Figure()
@@ -653,13 +664,11 @@ class SunburstBuilder:
                              font=design.get_font_config("label"))
             return fig
         
-        # Prepare data with binning for continuous variables
         df_plot = df.copy()
         processed_dims = []
         
         for dim in valid_dims:
             if df_plot[dim].dtype in ['float64', 'float32'] and df_plot[dim].nunique() > 8:
-                # Bin continuous variables
                 try:
                     bins = min(5, df_plot[dim].nunique())
                     df_plot[f"{dim}_bin"] = pd.qcut(df_plot[dim], q=bins, labels=False, duplicates='drop')
@@ -673,20 +682,17 @@ class SunburstBuilder:
                 df_plot[f"{dim}_label"] = df_plot[dim].astype(str)
                 processed_dims.append(f"{dim}_label")
         
-        # Determine value column
         value_col_actual = f"metric_{value_col}" if f"metric_{value_col}" in df_plot.columns else value_col
         if value_col_actual not in df_plot.columns:
             value_col_actual = df_plot.select_dtypes(include=[np.number]).columns[0]
         
-        # Aggregate data
         agg_func = getattr(pd.Series, aggregation, 'mean')
         agg_data = df_plot.groupby(processed_dims)[value_col_actual].agg([aggregation, 'count']).reset_index()
         agg_data = agg_data[agg_data['count'] >= 1]
         
-        # Build sunburst with N levels
         fig = px.sunburst(
             agg_data,
-            path=processed_dims,  # Supports arbitrary depth!
+            path=processed_dims,
             values=aggregation,
             hover_data={'count': True, aggregation: ':.3f'},
             color=aggregation,
@@ -695,7 +701,6 @@ class SunburstBuilder:
             height=650
         )
         
-        # Apply design customizations
         fig.update_traces(
             hovertemplate='<br>'.join([
                 '<b>%{label}</b>',
@@ -727,7 +732,7 @@ class SunburstBuilder:
         candidates = []
         for c in safe_cols:
             if pd.api.types.is_numeric_dtype(df[c]):
-                if df[c].nunique() <= 50:  # Reasonable for hierarchy
+                if df[c].nunique() <= 50:
                     candidates.append(c)
             elif safe_nunique(df[c], max_unique=20):
                 candidates.append(c)
@@ -764,7 +769,6 @@ class SummaryTableBuilder:
         if target_var in table_df.columns and table_df[target_var].notna().any():
             table_df['rank'] = table_df[target_var].rank(pct=True)
         
-        # Format numeric columns
         for col in table_df.select_dtypes(include=[np.number]).columns:
             if table_df[col].notna().any():
                 if table_df[col].abs().max() > 1000 or table_df[col].abs().min() < 0.001:
@@ -1057,7 +1061,6 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
 # MAIN STREAMLIT APPLICATION
 # =============================================
 def main():
-    # Initialize session state
     if 'loader' not in st.session_state:
         st.session_state.loader = EnhancedPKLLoader(SOLUTIONS_DIR)
     if 'metadata_df' not in st.session_state:
@@ -1067,7 +1070,6 @@ def main():
     if 'design_config' not in st.session_state:
         st.session_state.design_config = DesignConfig()
     
-    # ================= SIDEBAR CONFIGURATION =================
     with st.sidebar:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 📁 Data Management")
@@ -1089,7 +1091,6 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
-        # Target Variable Selection
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🎯 Target Variable")
         available_targets = []
@@ -1106,11 +1107,9 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
-        # ✅ RENDER DESIGN CONTROL PANEL
         st.session_state.design_config = render_design_panel(st.session_state.design_config)
         st.divider()
         
-        # Analysis Controls
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### ⚙️ Analysis Settings")
         normalize_radar = st.checkbox("Normalize radar chart values", value=True)
@@ -1146,7 +1145,6 @@ def main():
             )
         st.markdown('</div>', unsafe_allow_html=True)
     
-    # ================= MAIN CONTENT AREA =================
     if st.session_state.metadata_df.empty:
         st.info("👈 Load PKL files from the sidebar to begin analysis")
         with st.expander("📋 Expected PKL File Structure"):
@@ -1170,7 +1168,6 @@ def main():
     target = st.session_state.selected_target
     design = st.session_state.design_config
     
-    # ================= HEADER METRICS =================
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -1197,7 +1194,6 @@ def main():
             st.metric("EDL Usage", "N/A")
     st.markdown('</div>', unsafe_allow_html=True)
     
-    # ================= TABS FOR DIFFERENT VISUALIZATIONS =================
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Summary Table",
         "🕸️ Radar Comparison", 
@@ -1206,7 +1202,6 @@ def main():
         "💡 Dataset Improvements"
     ])
     
-    # ===== TAB 1: SUMMARY TABLE =====
     with tab1:
         st.markdown("### 📋 Simulation Summary Table")
         with st.expander("🔍 Filter & Sort Options", expanded=False):
@@ -1260,7 +1255,6 @@ def main():
         else:
             st.warning("No data matches current filters")
     
-    # ===== TAB 2: RADAR CHART =====
     with tab2:
         st.markdown("### 🕸️ Multi-Parameter Radar Comparison")
         col_r1, col_r2 = st.columns([2, 1])
@@ -1309,15 +1303,12 @@ def main():
             elif not available_params:
                 st.info("👈 Select at least one parameter from the sidebar")
     
-    # ===== TAB 3: ✅ N-DIMENSIONAL SUNBURST =====
     with tab3:
         st.markdown("### 🌟 N-Dimensional Hierarchical Parameter Exploration")
         st.info("💡 Select 2-5 dimensions to build hierarchical sunburst charts (inner → outer rings)")
         
-        # Get available dimensions
         available_dims = SunburstBuilder.get_dimension_selector_options(df)
         
-        # Dimension selectors (support up to 5 levels)
         dim_selectors = []
         cols = st.columns(min(5, len(available_dims) + 1))
         for i in range(5):
@@ -1333,11 +1324,9 @@ def main():
                 )
                 dim_selectors.append(selected)
         
-        # Filter out empty/invalid selections and remove duplicates
         selected_dimensions = [d for d in dim_selectors if d and d != "No dimensions available"]
-        selected_dimensions = list(dict.fromkeys(selected_dimensions))  # Remove duplicates, preserve order
+        selected_dimensions = list(dict.fromkeys(selected_dimensions))
         
-        # Aggregation and value column
         col_agg, col_val = st.columns(2)
         with col_agg:
             agg_method = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "std"], index=0)
@@ -1357,7 +1346,6 @@ def main():
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Insights panel
                 with st.expander("📊 Key Insights from Hierarchy"):
                     if all(d in df.columns for d in selected_dimensions[:2]):
                         target_col = f'metric_{value_col}' if value_col in DERIVED_METRICS else value_col
@@ -1384,7 +1372,6 @@ def main():
         elif len(selected_dimensions) < 2:
             st.info("👈 Select at least 2 dimensions to build the hierarchy")
     
-    # ===== TAB 4: CORRELATIONS =====
     with tab4:
         st.markdown("### 🔗 Parameter Correlation Analysis")
         valid_corr_params = [p for p in correlation_params if p in available_corr_params] if 'available_corr_params' in locals() else []
@@ -1421,7 +1408,6 @@ def main():
         else:
             st.info("👈 Select valid numeric parameters in the sidebar for correlation analysis")
     
-    # ===== TAB 5: DATASET IMPROVEMENTS =====
     with tab5:
         st.markdown("### 💡 Dataset Improvement Recommendations")
         with st.spinner("Analyzing parameter coverage..."):
@@ -1445,7 +1431,6 @@ def main():
             else:
                 st.info("✅ Dataset appears well-covered! Consider exploring new parameter combinations or higher resolution.")
             
-            # Parameter coverage visualization with design controls
             st.markdown("#### 📊 Current Parameter Coverage")
             coverage_cols = [c for c in ['c_bulk', 'core_radius_frac', 'shell_thickness_frac', 'L0_nm', 'k0_nd'] if c in df.columns]
             if coverage_cols:
@@ -1474,7 +1459,6 @@ def main():
                 fig_cov.update_yaxes(title_text="Count", tickfont=design.get_font_config("tick"))
                 st.plotly_chart(fig_cov, use_container_width=True)
             
-            # Export experimental design
             st.markdown("#### 🎯 Export Next Experimental Design")
             with st.expander("Generate parameter suggestions for new simulations"):
                 if gaps:
@@ -1509,9 +1493,6 @@ def main():
 - Increasing spatial resolution for validation cases (Nx=512)
                     """)
     
-    # =============================================
-    # FOOTER & HELP
-    # =============================================
     st.divider()
     with st.expander("❓ Help & Documentation"):
         st.markdown(f"""
