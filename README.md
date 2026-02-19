@@ -77,4 +77,4 @@ Dataset generation codes:
 
 Transformer Inspired Attention Codes:
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi1-streamlit-red)](https://electroless-deposition-fields-interpolation1.streamlit.app/) (interpolation functions with only spatial information but no temporal knowledge)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi1-streamlit-red)](https://electroless-deposition-fields-interpolation1.streamlit.app/) (interpolation functions with only spatial information but no temporal knowledge, the interpolation result provided the information of tha last timestep of the interpolated datasets)
