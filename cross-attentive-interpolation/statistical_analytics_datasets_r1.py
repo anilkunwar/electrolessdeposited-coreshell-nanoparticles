@@ -993,7 +993,7 @@ def main():
                                 available_params.append(p)
             
             st.markdown("**Select Simulations**")
-            n_to_show = st.slider("Number of simulations to compare", 2, min(10, len(df)), 4, 1)
+            n_to_show = st.slider("Number of simulations to compare", 2, min(100, len(df)), 4, 1)
             
             # Smart selection: pick diverse examples
             if len(df) >= n_to_show:
