@@ -375,16 +375,28 @@ class RadarChartBuilder:
                 # Try derived metrics first, then direct columns
                 col_name = f"metric_{param}" if param in DERIVED_METRICS else param
                 val = row.get(col_name) or row.get(param) or 0
-                values.append(val)
+                values.append(float(val) if pd.notna(val) else 0.0)
             
             # Normalize to [0, 1] if requested
             if normalize:
-                param_vals = [df.get(f"metric_{p}") or df.get(p) for p in selected_params]
-                param_vals = [v for v in param_vals if v is not None and pd.notna(v)]
-                if param_vals:
-                    min_v, max_v = min(param_vals), max(param_vals)
-                    if max_v > min_v:
-                        values = [(v - min_v) / (max_v - min_v) for v in values]
+                normalized_values = []
+                for j, param in enumerate(selected_params):
+                    col_name = f"metric_{param}" if param in DERIVED_METRICS else param
+                    if col_name in df.columns:
+                        param_series = df[col_name].dropna()
+                        if len(param_series) > 0:
+                            min_v = param_series.min()
+                            max_v = param_series.max()
+                            if max_v > min_v:
+                                norm_val = (values[j] - min_v) / (max_v - min_v)
+                                normalized_values.append(max(0.0, min(1.0, norm_val)))
+                            else:
+                                normalized_values.append(0.5)  # Constant value
+                        else:
+                            normalized_values.append(0.0)
+                    else:
+                        normalized_values.append(0.0)
+                values = normalized_values
             
             radar_data.append({
                 'name': f"#{idx}: {row.get('filename', 'Unknown')[:30]}",
@@ -448,7 +460,10 @@ class SunburstBuilder:
         # Create binned categories for continuous variables
         def bin_continuous(series: pd.Series, n_bins: int = 4) -> pd.Series:
             if series.dtype in ['float64', 'float32'] and series.nunique() > n_bins:
-                return pd.qcut(series, q=n_bins, labels=False, duplicates='drop').astype(str)
+                try:
+                    return pd.qcut(series, q=n_bins, labels=False, duplicates='drop').astype(str)
+                except:
+                    return series.astype(str)
             return series.astype(str)
         
         df_plot = df.copy()
@@ -469,27 +484,30 @@ class SunburstBuilder:
         if value_col_actual not in df_plot.columns:
             value_col_actual = df_plot.columns[0]  # Fallback
         
-        agg_data = df_plot.groupby([primary_col, secondary_col])[value_col_actual].agg(['mean', 'count']).reset_index()
-        agg_data = agg_data[agg_data['count'] >= 1]  # Filter empty groups
-        
-        # Build sunburst data structure
-        fig = px.sunburst(
-            agg_data,
-            path=[primary_col, secondary_col],
-            values='mean',
-            hover_data={'count': True, 'mean': ':.3f'},
-            color='mean',
-            color_continuous_scale=COLOR_SCHEMES['continuous'],
-            title=f"🌟 {value_col} by {primary_dim} → {secondary_dim}",
-            height=600
-        )
-        
-        fig.update_traces(
-            hovertemplate='<b>%{label}</b><br>' +
-                         f'{value_col}: %{{value:.3f}}<br>' +
-                         'Simulations: %{customdata[0]}<extra></extra>',
-            textinfo='label+percent parent'
-        )
+        try:
+            agg_data = df_plot.groupby([primary_col, secondary_col])[value_col_actual].agg(['mean', 'count']).reset_index()
+            agg_data = agg_data[agg_data['count'] >= 1]  # Filter empty groups
+            
+            # Build sunburst data structure
+            fig = px.sunburst(
+                agg_data,
+                path=[primary_col, secondary_col],
+                values='mean',
+                hover_data={'count': True, 'mean': ':.3f'},
+                color='mean',
+                color_continuous_scale=COLOR_SCHEMES['continuous'],
+                title=f"🌟 {value_col} by {primary_dim} → {secondary_dim}",
+                height=600
+            )
+            
+            fig.update_traces(
+                hovertemplate='<b>%{label}</b><br>' +
+                             f'{value_col}: %{{value:.3f}}<br>' +
+                             'Simulations: %{customdata[0]}<extra></extra>',
+                textinfo='label+percent parent'
+            )
+        except Exception as e:
+            fig = go.Figure().add_annotation(text=f"Error creating sunburst: {str(e)}")
         
         return fig
 
@@ -530,10 +548,15 @@ class SummaryTableBuilder:
         # Format numeric columns
         for col in table_df.select_dtypes(include=[np.number]).columns:
             if table_df[col].notna().any():
-                if table_df[col].max() > 1000 or table_df[col].min() < 0.001:
-                    table_df[col] = table_df[col].apply(lambda x: f'{x:.2e}' if pd.notna(x) else 'N/A')
-                else:
-                    table_df[col] = table_df[col].apply(lambda x: f'{x:.3f}' if pd.notna(x) else 'N/A')
+                try:
+                    col_max = table_df[col].max()
+                    col_min = table_df[col].min()
+                    if pd.notna(col_max) and (col_max > 1000 or col_min < 0.001):
+                        table_df[col] = table_df[col].apply(lambda x: f'{x:.2e}' if pd.notna(x) else 'N/A')
+                    else:
+                        table_df[col] = table_df[col].apply(lambda x: f'{x:.3f}' if pd.notna(x) else 'N/A')
+                except:
+                    pass
         
         return table_df.head(top_n)
     
@@ -550,24 +573,27 @@ class SummaryTableBuilder:
         if len(numeric_cols) < 2:
             return go.Figure().add_annotation(text="Need ≥2 numeric parameters for correlation")
         
-        # Compute correlation
-        corr_matrix = df[numeric_cols].corr()
-        
-        # Create heatmap
-        fig = px.imshow(
-            corr_matrix,
-            text_auto='.2f',
-            aspect='auto',
-            color_continuous_scale=COLOR_SCHEMES['diverging'],
-            title='📊 Parameter Correlation Matrix',
-            height=500
-        )
-        
-        fig.update_layout(
-            xaxis_title='Parameters',
-            yaxis_title='Parameters',
-            coloraxis_colorbar=dict(title='Correlation')
-        )
+        try:
+            # Compute correlation
+            corr_matrix = df[numeric_cols].corr()
+            
+            # Create heatmap
+            fig = px.imshow(
+                corr_matrix,
+                text_auto='.2f',
+                aspect='auto',
+                color_continuous_scale=COLOR_SCHEMES['diverging'],
+                title='📊 Parameter Correlation Matrix',
+                height=500
+            )
+            
+            fig.update_layout(
+                xaxis_title='Parameters',
+                yaxis_title='Parameters',
+                coloraxis_colorbar=dict(title='Correlation')
+            )
+        except Exception as e:
+            fig = go.Figure().add_annotation(text=f"Error computing correlations: {str(e)}")
         
         return fig
 
@@ -638,45 +664,54 @@ class DatasetImprovementAnalyzer:
         if target_col in df.columns and df[target_col].notna().any():
             
             # Find parameters most correlated with target
-            numeric_df = df.select_dtypes(include=[np.number]).dropna()
-            if target_col in numeric_df.columns and len(numeric_df) > 10:
-                correlations = numeric_df.corr()[target_col].drop(target_col, errors='ignore')
-                top_corr = correlations.dropna().abs().sort_values(ascending=False).head(3)
-                
-                for param, corr_val in top_corr.items():
-                    if abs(corr_val) > 0.3:
-                        direction = "positive" if corr_val > 0 else "negative"
-                        recommendations.append({
-                            'type': '📈 Optimize for Target',
-                            'priority': 'Medium',
-                            'description': f"{param} has {direction} correlation with {target_var} (r={corr_val:.2f})",
-                            'action': f"Explore {param} range to maximize {target_var}"
-                        })
+            try:
+                numeric_df = df.select_dtypes(include=[np.number]).dropna()
+                if target_col in numeric_df.columns and len(numeric_df) > 10:
+                    correlations = numeric_df.corr()[target_col].drop(target_col, errors='ignore')
+                    top_corr = correlations.dropna().abs().sort_values(ascending=False).head(3)
+                    
+                    for param, corr_val in top_corr.items():
+                        if abs(corr_val) > 0.3:
+                            direction = "positive" if corr_val > 0 else "negative"
+                            recommendations.append({
+                                'type': '📈 Optimize for Target',
+                                'priority': 'Medium',
+                                'description': f"{param} has {direction} correlation with {target_var} (r={corr_val:.2f})",
+                                'action': f"Explore {param} range to maximize {target_var}"
+                            })
+            except Exception as e:
+                pass
         
         # 3. Diversity recommendations
         categorical_cols = [c for c in ['mode', 'bc_type', 'use_edl', 'growth_model'] if c in df.columns]
         for col in categorical_cols:
             if col in df.columns:
-                value_counts = df[col].value_counts()
-                if len(value_counts) > 1 and value_counts.min() < value_counts.max() * 0.3:
-                    rare_values = value_counts[value_counts < value_counts.max() * 0.5].index.tolist()
-                    if rare_values:
-                        recommendations.append({
-                            'type': '🔄 Increase Diversity',
-                            'priority': 'Low',
-                            'description': f"{col}: Under-represented values: {rare_values}",
-                            'action': f"Add simulations with {col} = {rare_values[0]}"
-                        })
+                try:
+                    value_counts = df[col].value_counts()
+                    if len(value_counts) > 1 and value_counts.min() < value_counts.max() * 0.3:
+                        rare_values = value_counts[value_counts < value_counts.max() * 0.5].index.tolist()
+                        if rare_values:
+                            recommendations.append({
+                                'type': '🔄 Increase Diversity',
+                                'priority': 'Low',
+                                'description': f"{col}: Under-represented values: {rare_values}",
+                                'action': f"Add simulations with {col} = {rare_values[0]}"
+                            })
+                except:
+                    pass
         
         # 4. Resolution recommendations
         if 'Nx' in df.columns:
-            if df['Nx'].max() < 256:
-                recommendations.append({
-                    'type': '🔍 Increase Resolution',
-                    'priority': 'Medium',
-                    'description': f"Max grid resolution is {df['Nx'].max()}×{df['Nx'].max()}",
-                    'action': "Run select simulations at Nx=512 for validation"
-                })
+            try:
+                if df['Nx'].max() < 256:
+                    recommendations.append({
+                        'type': '🔍 Increase Resolution',
+                        'priority': 'Medium',
+                        'description': f"Max grid resolution is {df['Nx'].max()}×{df['Nx'].max()}",
+                        'action': "Run select simulations at Nx=512 for validation"
+                    })
+            except:
+                pass
         
         return recommendations
 
@@ -827,27 +862,41 @@ def main():
     with col1:
         target_col = f'metric_{target}' if target in DERIVED_METRICS else target
         if target_col in df.columns and df[target_col].notna().any():
-            st.metric(f"Avg {target}", f"{df[target_col].mean():.3f}", 
-                     delta=f"{df[target_col].std():.3f} σ")
+            try:
+                mean_val = df[target_col].mean()
+                std_val = df[target_col].std()
+                st.metric(f"Avg {target}", f"{mean_val:.3f}", 
+                         delta=f"{std_val:.3f} σ")
+            except:
+                st.metric(f"Avg {target}", "N/A")
         else:
             st.metric(f"Avg {target}", "N/A")
     
     with col2:
         if 'c_bulk' in df.columns:
-            st.metric("c_bulk Range", f"{df['c_bulk'].min():.2f}–{df['c_bulk'].max():.2f}")
+            try:
+                st.metric("c_bulk Range", f"{df['c_bulk'].min():.2f}–{df['c_bulk'].max():.2f}")
+            except:
+                st.metric("c_bulk Range", "N/A")
         else:
             st.metric("c_bulk Range", "N/A")
     
     with col3:
         if 'L0_nm' in df.columns:
-            st.metric("Domain Size", f"{df['L0_nm'].mean():.1f} nm")
+            try:
+                st.metric("Domain Size", f"{df['L0_nm'].mean():.1f} nm")
+            except:
+                st.metric("Domain Size", "N/A")
         else:
             st.metric("Domain Size", "N/A")
     
     with col4:
         if 'use_edl' in df.columns:
-            edl_pct = df['use_edl'].mean() * 100
-            st.metric("EDL Usage", f"{edl_pct:.1f}%")
+            try:
+                edl_pct = df['use_edl'].mean() * 100
+                st.metric("EDL Usage", f"{edl_pct:.1f}%")
+            except:
+                st.metric("EDL Usage", "N/A")
         else:
             st.metric("EDL Usage", "N/A")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -871,13 +920,18 @@ def main():
             
             filter_c_bulk = False
             filter_edl = False
+            c_range = (0.0, 1.0)
+            edl_filter = [True, False]
             
             with col_f1:
                 if 'c_bulk' in df.columns:
                     filter_c_bulk = st.checkbox("Filter by c_bulk")
                     if filter_c_bulk:
-                        c_min, c_max = float(df['c_bulk'].min()), float(df['c_bulk'].max())
-                        c_range = st.slider("c_bulk range", c_min, c_max, (c_min, c_max))
+                        try:
+                            c_min, c_max = float(df['c_bulk'].min()), float(df['c_bulk'].max())
+                            c_range = st.slider("c_bulk range", c_min, c_max, (c_min, c_max))
+                        except:
+                            pass
             
             with col_f2:
                 if 'use_edl' in df.columns:
@@ -910,14 +964,14 @@ def main():
         
         if not summary_table.empty:
             # Display with styling
-            st.dataframe(
-                summary_table.style
-                .format(precision=3)
-                .highlight_max(subset=[target] if target in summary_table.columns else None, color='#d1fae5')
-                .highlight_min(subset=[target] if target in summary_table.columns else None, color='#fee2e2'),
-                use_container_width=True,
-                height=400
-            )
+            try:
+                styled_df = summary_table.style.format(precision=3)
+                if target in summary_table.columns:
+                    styled_df = styled_df.highlight_max(subset=[target], color='#d1fae5')
+                    styled_df = styled_df.highlight_min(subset=[target], color='#fee2e2')
+                st.dataframe(styled_df, use_container_width=True, height=400)
+            except:
+                st.dataframe(summary_table, use_container_width=True, height=400)
             
             # Export options
             col_exp1, col_exp2 = st.columns(2)
@@ -968,9 +1022,12 @@ def main():
                 # Sample to maximize diversity in key params
                 sample_cols = [c for c in ['c_bulk', 'core_radius_frac', 'use_edl'] if c in df.columns]
                 if sample_cols:
-                    sample_df = df[sample_cols].copy()
-                    sample_df['idx'] = range(len(df))
-                    selected_indices = sample_df.drop_duplicates().head(n_to_show)['idx'].tolist()
+                    try:
+                        sample_df = df[sample_cols].copy()
+                        sample_df['idx'] = range(len(df))
+                        selected_indices = sample_df.drop_duplicates().head(n_to_show)['idx'].tolist()
+                    except:
+                        selected_indices = list(range(min(n_to_show, len(df))))
                 else:
                     selected_indices = list(range(min(n_to_show, len(df))))
             else:
@@ -1071,21 +1128,24 @@ def main():
             with st.expander("🎯 Strong Correlations with Target"):
                 target_col = f'metric_{target}' if target in DERIVED_METRICS else target
                 if target_col in df.columns:
-                    numeric_df = df.select_dtypes(include=[np.number]).dropna()
-                    if target_col in numeric_df.columns and len(numeric_df) > 5:
-                        corrs = numeric_df.corr()[target_col].drop(target_col, errors='ignore')
-                        strong = corrs.dropna().abs().sort_values(ascending=False)
-                        
-                        if len(strong) > 0:
-                            st.markdown("**Top correlated parameters:**")
-                            for param, val in strong.head(5).items():
-                                direction = "📈 positive" if corrs[param] > 0 else "📉 negative"
-                                strength = "strong" if abs(val) > 0.7 else "moderate" if abs(val) > 0.4 else "weak"
-                                st.markdown(f"- `{param}`: {direction} correlation ({strength}, r={corrs[param]:.2f})")
+                    try:
+                        numeric_df = df.select_dtypes(include=[np.number]).dropna()
+                        if target_col in numeric_df.columns and len(numeric_df) > 5:
+                            corrs = numeric_df.corr()[target_col].drop(target_col, errors='ignore')
+                            strong = corrs.dropna().abs().sort_values(ascending=False)
+                            
+                            if len(strong) > 0:
+                                st.markdown("**Top correlated parameters:**")
+                                for param, val in strong.head(5).items():
+                                    direction = "📈 positive" if corrs[param] > 0 else "📉 negative"
+                                    strength = "strong" if abs(val) > 0.7 else "moderate" if abs(val) > 0.4 else "weak"
+                                    st.markdown(f"- `{param}`: {direction} correlation ({strength}, r={corrs[param]:.2f})")
+                            else:
+                                st.info("No significant correlations found")
                         else:
-                            st.info("No significant correlations found")
-                    else:
-                        st.info("Insufficient numeric data for correlation analysis")
+                            st.info("Insufficient numeric data for correlation analysis")
+                    except Exception as e:
+                        st.info(f"Could not compute correlations: {e}")
         else:
             st.warning("Please select parameters for correlation analysis in the sidebar")
     
@@ -1138,24 +1198,27 @@ def main():
         
         coverage_cols = [c for c in ['c_bulk', 'core_radius_frac', 'shell_thickness_frac', 'L0_nm', 'k0_nd'] if c in df.columns]
         if coverage_cols:
-            fig_cov = make_subplots(rows=1, cols=len(coverage_cols), subplot_titles=coverage_cols)
-            
-            for i, col in enumerate(coverage_cols, 1):
-                fig_cov.add_trace(
-                    go.Histogram(x=df[col], nbinsx=10, name=col, marker_color=COLOR_SCHEMES['continuous'][i % len(COLOR_SCHEMES['continuous'])]),
-                    row=1, col=i
+            try:
+                fig_cov = make_subplots(rows=1, cols=len(coverage_cols), subplot_titles=coverage_cols)
+                
+                for i, col in enumerate(coverage_cols, 1):
+                    fig_cov.add_trace(
+                        go.Histogram(x=df[col], nbinsx=10, name=col, marker_color=COLOR_SCHEMES['continuous'][i % len(COLOR_SCHEMES['continuous'])]),
+                        row=1, col=i
+                    )
+                
+                fig_cov.update_layout(
+                    height=300, 
+                    showlegend=False, 
+                    title_text="Parameter Distribution (more uniform = better coverage)",
+                    bargap=0.1
                 )
-            
-            fig_cov.update_layout(
-                height=300, 
-                showlegend=False, 
-                title_text="Parameter Distribution (more uniform = better coverage)",
-                bargap=0.1
-            )
-            fig_cov.update_xaxes(title_text="Value")
-            fig_cov.update_yaxes(title_text="Count")
-            
-            st.plotly_chart(fig_cov, use_container_width=True)
+                fig_cov.update_xaxes(title_text="Value")
+                fig_cov.update_yaxes(title_text="Count")
+                
+                st.plotly_chart(fig_cov, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not create coverage plot: {e}")
         
         # Export experimental design
         st.markdown("#### 🎯 Export Next Experimental Design")
