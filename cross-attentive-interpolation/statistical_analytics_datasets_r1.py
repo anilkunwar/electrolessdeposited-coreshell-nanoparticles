@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (TEMPORAL EDITION)
-✓ Loads PKL files from "numerical_solutions" directory
-✓ Temporal field interpolation with time slider
+Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (FIXED VERSION)
+✓ Safe column handling for unhashable objects
+✓ Robust PKL loading from "numerical_solutions" directory
 ✓ Radar charts, sunburst hierarchies, summary tables
 ✓ Dataset gap detection & experimental design recommendations
-✓ Export functionality for next-generation simulations
 """
 import streamlit as st
 import numpy as np
@@ -19,8 +18,6 @@ import os
 import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
-from scipy.interpolate import interp1d
-from scipy.ndimage import zoom
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -28,13 +25,12 @@ warnings.filterwarnings('ignore')
 # PAGE CONFIGURATION & STYLING
 # =============================================
 st.set_page_config(
-    page_title="🧪 Deposition Dataset Designer (Temporal)",
+    page_title="🧪 Deposition Dataset Designer",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
 st.markdown("""
 <style>
     .main-header { 
@@ -56,39 +52,30 @@ st.markdown("""
         border-left: 4px solid #3B82F6;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
-    .metric-card {
-        background: white;
-        border-radius: 8px;
-        padding: 0.8rem;
-        text-align: center;
-        border: 1px solid #e2e8f0;
-    }
     .stDataFrame { font-size: 0.9rem !important; }
     div[data-testid="stMetricValue"] { font-size: 1.4rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designer (Temporal)</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designer</h1>', unsafe_allow_html=True)
 
 # =============================================
 # GLOBAL CONSTANTS & CONFIGURATION
 # =============================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# ✅ Simple, working directory pattern like your example
+# ✅ Simple directory pattern that works easily
 SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "numerical_solutions")
 os.makedirs(SOLUTIONS_DIR, exist_ok=True)
 
-# Parameter categories for organized analysis
 PARAM_CATEGORIES = {
     "🎯 Target Variables": ["thickness_nm", "ag_area_nm2", "growth_rate", "final_concentration"],
     "⚙️ Physics Parameters": ["gamma_nd", "beta_nd", "k0_nd", "M_nd", "D_nd", "alpha_nd"],
     "🔬 Geometry Parameters": ["core_radius_frac", "shell_thickness_frac", "L0_nm", "Nx"],
     "🧪 Process Parameters": ["c_bulk", "dt_nd", "n_steps", "tau0_s"],
     "⚡ EDL Catalyst": ["use_edl", "lambda0_edl", "tau_edl_nd", "alpha_edl"],
-    "📊 Simulation Metadata": ["mode", "bc_type", "growth_model", "runtime_seconds"]
+    "📊 Simulation Metadata": ["mode", "bc_type", "growth_model"]
 }
 
-# Derived metrics that can be computed from snapshots
 DERIVED_METRICS = {
     "thickness_nm": "Final Ag shell thickness in nanometers",
     "ag_area_nm2": "Ag phase area/volume in nm²/nm³",
@@ -100,7 +87,6 @@ DERIVED_METRICS = {
     "convergence_metric": "L2 norm of field changes at final steps"
 }
 
-# Color schemes
 COLOR_SCHEMES = {
     "continuous": px.colors.sequential.Viridis,
     "categorical": px.colors.qualitative.Set2,
@@ -109,10 +95,64 @@ COLOR_SCHEMES = {
 }
 
 # =============================================
-# ENHANCED PKL LOADER WITH TEMPORAL SUPPORT
+# HELPER FUNCTIONS FOR SAFE COLUMN HANDLING
 # =============================================
-class TemporalPKLLoader:
-    """Loads PKL files with full temporal snapshot support."""
+
+def is_hashable_column(series: pd.Series) -> bool:
+    """Check if a column contains only hashable values."""
+    try:
+        series.dropna().head(100).apply(hash)
+        return True
+    except TypeError:
+        return False
+
+def get_safe_columns_for_nunique(df: pd.DataFrame, max_unique: int = 10) -> List[str]:
+    """
+    Get columns safe for nunique() operations.
+    - All numeric columns
+    - Object/category columns with <= max_unique values AND hashable content
+    """
+    safe_cols = []
+    
+    # Always include numeric columns
+    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    safe_cols.extend(numeric_cols)
+    
+    # Check object/category columns carefully
+    for c in df.select_dtypes(include=['object', 'category']).columns:
+        try:
+            # First check if hashable
+            if not is_hashable_column(df[c]):
+                continue
+            # Then check unique count
+            if df[c].nunique(dropna=True) <= max_unique:
+                safe_cols.append(c)
+        except Exception:
+            continue
+    
+    return safe_cols
+
+def get_display_columns(df: pd.DataFrame) -> List[str]:
+    """Get columns safe for display in tables and charts."""
+    display_cols = []
+    for c in df.columns:
+        try:
+            # Skip columns with unhashable objects
+            if not is_hashable_column(df[c]):
+                continue
+            # Skip columns with too many unique values (not useful for display)
+            if df[c].dtype == 'object' and df[c].nunique(dropna=True) > 100:
+                continue
+            display_cols.append(c)
+        except Exception:
+            continue
+    return display_cols
+
+# =============================================
+# PKL FILE LOADER WITH ENHANCED METADATA
+# =============================================
+class EnhancedPKLLoader:
+    """Advanced loader for electroless deposition PKL files with metadata extraction."""
     
     REQUIRED_KEYS = ['parameters', 'snapshots', 'thickness_history_nm']
     
@@ -122,14 +162,14 @@ class TemporalPKLLoader:
         self.metadata_df = None
         
     def scan_directory(self) -> List[str]:
-        """Find all PKL files."""
+        """Find all PKL files in directory."""
         if not os.path.exists(self.pkl_dir):
             os.makedirs(self.pkl_dir, exist_ok=True)
             return []
         return [f for f in os.listdir(self.pkl_dir) if f.endswith('.pkl')]
     
     def extract_filename_metadata(self, filename: str) -> Dict[str, Any]:
-        """Parse parameters from filename."""
+        """Parse parameters from standardized filename format."""
         metadata = {'filename': filename}
         patterns = {
             'c_bulk': r'_c([0-9.]+)_',
@@ -162,10 +202,9 @@ class TemporalPKLLoader:
         return metadata
     
     def compute_derived_metrics(self, data: Dict) -> Dict[str, float]:
-        """Compute derived metrics from snapshots."""
+        """Compute derived metrics from simulation snapshots."""
         metrics = {}
         try:
-            # Thickness metrics
             thick_hist = data.get('thickness_history_nm', [])
             if thick_hist and len(thick_hist) >= 2:
                 final_th = thick_hist[-1][2] * 1e9
@@ -174,7 +213,6 @@ class TemporalPKLLoader:
                 metrics['thickness_nm'] = final_th
                 metrics['growth_rate'] = (final_th - initial_th) / max(time_span, 1e-12)
             
-            # Phase statistics from final snapshot
             if data.get('snapshots'):
                 final_snap = data['snapshots'][-1]
                 t_final, phi, c, psi = final_snap
@@ -186,20 +224,17 @@ class TemporalPKLLoader:
                 metrics['cu_area_nm2'] = np.sum(cu_mask) * dx**2
                 metrics['final_concentration'] = np.mean(c[~ag_mask & ~cu_mask]) if np.any(~ag_mask & ~cu_mask) else 0
                 
-                # Interface sharpness
                 if phi.ndim == 2:
                     grad_phi = np.gradient(phi, dx)
                     interface_mask = (phi > 0.3) & (phi < 0.7)
                     if np.any(interface_mask):
                         metrics['interface_sharpness'] = np.mean(np.sqrt(grad_phi[0]**2 + grad_phi[1]**2)[interface_mask])
             
-            # EDL efficiency
             if data['parameters'].get('use_edl', False):
                 lambda0 = data['parameters'].get('lambda0_edl', 0)
                 tau_edl = data['parameters'].get('tau_edl_nd', 0.05)
                 metrics['edl_efficiency'] = lambda0 * tau_edl
             
-            # Convergence metric
             if len(data.get('snapshots', [])) >= 2:
                 last_phi = data['snapshots'][-1][1]
                 prev_phi = data['snapshots'][-2][1]
@@ -212,7 +247,7 @@ class TemporalPKLLoader:
         return metrics
     
     def load_file(self, filepath: str) -> Optional[Dict]:
-        """Load a single PKL file with temporal data."""
+        """Load and validate a single PKL file."""
         try:
             with open(filepath, 'rb') as f:
                 data = pickle.load(f)
@@ -237,24 +272,14 @@ class TemporalPKLLoader:
             derived = self.compute_derived_metrics(data)
             record.update({f"metric_{k}": v for k, v in derived.items()})
             
-            # Store temporal metadata
+            # ✅ STORE ONLY SCALAR VALUES - avoid lists/arrays in metadata
             if data.get('snapshots'):
                 record['n_snapshots'] = len(data['snapshots'])
-                record['final_time_nd'] = data['snapshots'][-1][0]
-                record['grid_shape'] = data['snapshots'][0][1].shape
-                # Store time values for interpolation
-                record['snapshot_times'] = [s[0] if isinstance(s, tuple) else s.get('t_nd', 0) for s in data['snapshots']]
+                record['final_time_nd'] = float(data['snapshots'][-1][0])
+                record['grid_shape'] = str(data['snapshots'][0][1].shape)  # Store as string
             
             if data.get('diagnostics'):
                 record['n_diagnostics'] = len(data['diagnostics'])
-            
-            # Store thickness history for temporal analysis
-            if 'thickness_history_nm' in data:
-                record['has_thickness_history'] = True
-                thick_entries = data['thickness_history_nm']
-                if thick_entries and len(thick_entries[0]) >= 3:
-                    record['thickness_times'] = [e[0] for e in thick_entries]
-                    record['thickness_values_nm'] = [e[2] for e in thick_entries]
             
             return {
                 'metadata': record,
@@ -266,7 +291,7 @@ class TemporalPKLLoader:
             return None
     
     def load_all(self, max_files: int = None) -> pd.DataFrame:
-        """Load all PKL files."""
+        """Load all PKL files and return consolidated metadata DataFrame."""
         files = self.scan_directory()
         if max_files:
             files = files[:max_files]
@@ -294,87 +319,6 @@ class TemporalPKLLoader:
         return self.metadata_df
 
 # =============================================
-# TEMPORAL INTERPOLATOR FOR FIELDS
-# =============================================
-class TemporalFieldInterpolator:
-    """Interpolates spatial fields at arbitrary normalized time points."""
-    
-    @staticmethod
-    def get_field_at_time(sources: List[Dict], field_name: str, 
-                         target_time_norm: float, target_shape: Tuple[int, int]) -> np.ndarray:
-        """
-        Interpolate a specific field (phi, c, or psi) at a normalized time point.
-        target_time_norm: 0.0 = start, 1.0 = final state
-        """
-        if not sources:
-            return np.zeros(target_shape)
-        
-        weighted_field = np.zeros(target_shape)
-        total_weight = 0
-        
-        for src in sources:
-            if 'data' not in src or 'snapshots' not in src['data']:
-                continue
-            
-            snapshots = src['data']['snapshots']
-            if not snapshots:
-                continue
-            
-            # Get time values from snapshots
-            times = []
-            fields = []
-            for snap in snapshots:
-                if isinstance(snap, tuple) and len(snap) >= 2:
-                    t_val = snap[0]
-                    field_val = snap[1] if field_name == 'phi' else (snap[2] if field_name == 'c' else snap[3])
-                elif isinstance(snap, dict):
-                    t_val = snap.get('t_nd', 0)
-                    field_val = snap.get(field_name, np.zeros((1,1)))
-                else:
-                    continue
-                times.append(t_val)
-                fields.append(field_val)
-            
-            if len(times) < 2:
-                # Only one snapshot - use final state
-                final_field = fields[-1]
-                if hasattr(final_field, 'shape') and final_field.shape != target_shape:
-                    factors = (target_shape[0]/final_field.shape[0], target_shape[1]/final_field.shape[1])
-                    final_field = zoom(final_field, factors, order=1)
-                weighted_field += final_field
-                total_weight += 1
-                continue
-            
-            # Normalize times to [0, 1]
-            t_max = max(times)
-            t_norm = np.array(times) / t_max if t_max > 0 else np.array(times)
-            
-            # Find bracketing snapshots
-            if target_time_norm <= t_norm[0]:
-                selected_field = fields[0]
-            elif target_time_norm >= t_norm[-1]:
-                selected_field = fields[-1]
-            else:
-                # Linear interpolation between two snapshots
-                idx = np.searchsorted(t_norm, target_time_norm) - 1
-                idx = max(0, min(idx, len(times) - 2))
-                t0, t1 = t_norm[idx], t_norm[idx + 1]
-                f0, f1 = fields[idx], fields[idx + 1]
-                alpha = (target_time_norm - t0) / (t1 - t0) if t1 > t0 else 0
-                selected_field = f0 * (1 - alpha) + f1 * alpha
-            
-            # Resize to target shape
-            if hasattr(selected_field, 'shape') and selected_field.shape != target_shape:
-                factors = (target_shape[0]/selected_field.shape[0], target_shape[1]/selected_field.shape[1])
-                selected_field = zoom(selected_field, factors, order=1)
-            
-            # Simple equal weighting (could be enhanced with parameter-based weights)
-            weighted_field += selected_field
-            total_weight += 1
-        
-        return weighted_field / max(total_weight, 1)
-
-# =============================================
 # VISUALIZATION COMPONENTS
 # =============================================
 
@@ -396,7 +340,7 @@ class RadarChartBuilder:
             for param in selected_params:
                 col_name = f"metric_{param}" if param in DERIVED_METRICS else param
                 val = row.get(col_name) or row.get(param) or 0
-                values.append(val if val is not None else 0)
+                values.append(val if val is not None and pd.notna(val) else 0)
             
             if normalize:
                 param_vals = [v for v in values if v is not None and pd.notna(v)]
@@ -468,7 +412,7 @@ class SunburstBuilder:
         
         value_col_actual = f"metric_{value_col}" if f"metric_{value_col}" in df_plot.columns else value_col
         if value_col_actual not in df_plot.columns:
-            value_col_actual = df_plot.columns[0]
+            value_col_actual = df_plot.select_dtypes(include=['number']).columns[0] if len(df_plot.select_dtypes(include=['number']).columns) > 0 else df_plot.columns[0]
         
         agg_data = df_plot.groupby([primary_col, secondary_col])[value_col_actual].agg(['mean', 'count']).reset_index()
         agg_data = agg_data[agg_data['count'] >= 1]
@@ -524,7 +468,7 @@ class SummaryTableBuilder:
     def create_correlation_matrix(df: pd.DataFrame, params: List[str]) -> go.Figure:
         numeric_cols = [f'metric_{p}' if p in DERIVED_METRICS else p 
                        for p in params if p in df.columns or f'metric_{p}' in df.columns]
-        numeric_cols = [c for c in numeric_cols if c in df.columns and df[c].notna().any()]
+        numeric_cols = [c for c in numeric_cols if c in df.columns and df[c].notna().any() and pd.api.types.is_numeric_dtype(df[c])]
         
         if len(numeric_cols) < 2:
             return go.Figure().add_annotation(text="Need ≥2 numeric parameters for correlation")
@@ -546,6 +490,8 @@ class DatasetImprovementAnalyzer:
         for param in params:
             col = f'metric_{param}' if param in DERIVED_METRICS else param
             if col not in df.columns or df[col].isna().all():
+                continue
+            if not pd.api.types.is_numeric_dtype(df[col]):
                 continue
             values = df[col].dropna()
             if len(values) < 10:
@@ -605,13 +551,14 @@ class DatasetImprovementAnalyzer:
                             'action': f"Add simulations with {col} = {rare_values[0]}"
                         })
         
-        if 'Nx' in df.columns and df['Nx'].max() < 256:
-            recommendations.append({
-                'type': '🔍 Increase Resolution',
-                'priority': 'Medium',
-                'description': f"Max grid resolution is {df['Nx'].max()}×{df['Nx'].max()}",
-                'action': "Run select simulations at Nx=512 for validation"
-            })
+        if 'Nx' in df.columns:
+            if df['Nx'].max() < 256:
+                recommendations.append({
+                    'type': '🔍 Increase Resolution',
+                    'priority': 'Medium',
+                    'description': f"Max grid resolution is {df['Nx'].max()}×{df['Nx'].max()}",
+                    'action': "Run select simulations at Nx=512 for validation"
+                })
         return recommendations
 
 # =============================================
@@ -620,22 +567,17 @@ class DatasetImprovementAnalyzer:
 def main():
     # Initialize session state
     if 'loader' not in st.session_state:
-        st.session_state.loader = TemporalPKLLoader(SOLUTIONS_DIR)
+        st.session_state.loader = EnhancedPKLLoader(SOLUTIONS_DIR)
     if 'metadata_df' not in st.session_state:
         st.session_state.metadata_df = pd.DataFrame()
     if 'selected_target' not in st.session_state:
         st.session_state.selected_target = 'thickness_nm'
-    if 'temporal_interpolator' not in st.session_state:
-        st.session_state.temporal_interpolator = TemporalFieldInterpolator()
-    if 'current_time_norm' not in st.session_state:
-        st.session_state.current_time_norm = 1.0  # Default to final state
     
     # ================= SIDEBAR CONFIGURATION =================
     with st.sidebar:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 📁 Data Management")
         
-        # ✅ Simple directory input like your working example
         pkl_dir = st.text_input("PKL Directory", value=SOLUTIONS_DIR, 
                                help="Directory containing .pkl simulation files")
         
@@ -660,7 +602,6 @@ def main():
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🎯 Target Variable")
         
-        # ✅ Only show targets that exist in loaded data
         available_targets = []
         if not st.session_state.metadata_df.empty:
             available_targets = [k for k in DERIVED_METRICS.keys() 
@@ -683,19 +624,23 @@ def main():
         normalize_radar = st.checkbox("Normalize radar chart values", value=True)
         top_n_table = st.slider("Top N simulations in table", 5, 50, 20, 5)
         
-        # ✅ FIX: Only use parameters that exist in the dataframe for correlation
+        # ✅ FIX: Use safe column selection for correlation parameters
         available_corr_params = []
         if not st.session_state.metadata_df.empty:
             for cat_params in PARAM_CATEGORIES.values():
                 for p in cat_params:
                     if p in st.session_state.metadata_df.columns or f'metric_{p}' in st.session_state.metadata_df.columns:
-                        available_corr_params.append(p)
+                        # Check if column is numeric and safe
+                        col_name = f'metric_{p}' if f'metric_{p}' in st.session_state.metadata_df.columns else p
+                        if col_name in st.session_state.metadata_df.columns:
+                            if pd.api.types.is_numeric_dtype(st.session_state.metadata_df[col_name]):
+                                available_corr_params.append(p)
         
         default_corr = [p for p in ['c_bulk', 'core_radius_frac', 'k0_nd'] if p in available_corr_params]
         
         correlation_params = st.multiselect(
             "Parameters for correlation analysis",
-            available_corr_params if available_corr_params else ["No parameters available"],
+            available_corr_params if available_corr_params else ["No numeric parameters available"],
             default=default_corr if default_corr else [],
             help="Select numeric parameters to compute correlations"
         )
@@ -716,7 +661,7 @@ def main():
         "k0_nd": 0.4,
         ...
     },
-    "snapshots": [(t_nd, phi, c, psi), ...],  # List of (time, fields) tuples
+    "snapshots": [(t_nd, phi, c, psi), ...],
     "thickness_history_nm": [(t_nd, th_nd, th_nm, ...), ...],
     "diagnostics": [...]
 }
@@ -766,13 +711,12 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
     
     # ================= TABS FOR DIFFERENT VISUALIZATIONS =================
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Summary Table", 
         "🕸️ Radar Comparison", 
         "🌟 Sunburst Hierarchy",
         "🔗 Correlations", 
-        "💡 Dataset Improvements",
-        "⏱️ Temporal Fields"  # NEW: Temporal field visualization tab
+        "💡 Dataset Improvements"
     ])
     
     # ===== TAB 1: SUMMARY TABLE =====
@@ -798,7 +742,6 @@ def main():
                     sort_col = st.selectbox("Sort by", sort_options, index=0)
                     sort_asc = st.checkbox("Ascending", value=False)
         
-        # Apply filters
         filtered_df = df.copy()
         if 'c_bulk' in df.columns and 'filter_c_bulk' in locals() and filter_c_bulk:
             filtered_df = filtered_df[(filtered_df['c_bulk'] >= c_range[0]) & 
@@ -857,9 +800,13 @@ def main():
             n_to_show = st.slider("Number of simulations to compare", 2, min(10, len(df)), 4, 1)
             
             if len(df) >= n_to_show:
-                sample_df = df[['c_bulk', 'core_radius_frac', 'use_edl']].copy() if all(c in df.columns for c in ['c_bulk', 'core_radius_frac', 'use_edl']) else df.copy()
-                sample_df['idx'] = range(len(df))
-                selected_indices = sample_df.drop_duplicates().head(n_to_show)['idx'].tolist()
+                sample_cols = [c for c in ['c_bulk', 'core_radius_frac', 'use_edl'] if c in df.columns]
+                if sample_cols:
+                    sample_df = df[sample_cols].copy()
+                    sample_df['idx'] = range(len(df))
+                    selected_indices = sample_df.drop_duplicates().head(n_to_show)['idx'].tolist()
+                else:
+                    selected_indices = list(range(n_to_show))
             else:
                 selected_indices = list(range(len(df)))
             
@@ -894,16 +841,30 @@ def main():
         col_s1, col_s2 = st.columns(2)
         
         with col_s1:
-            numeric_or_cat_cols = [c for c in df.columns if df[c].nunique() <= 10 or df[c].dtype in ['float64', 'float32']]
-            primary_dim = st.selectbox("Primary Dimension (Inner Ring)", numeric_or_cat_cols, index=0 if 'c_bulk' in numeric_or_cat_cols else None)
+            # ✅ FIX: Use safe column selection
+            safe_cols = get_safe_columns_for_nunique(df, max_unique=10)
+            primary_dim = st.selectbox(
+                "Primary Dimension (Inner Ring)",
+                safe_cols if safe_cols else df.select_dtypes(include=['number']).columns.tolist(),
+                index=0 if 'c_bulk' in safe_cols else 0
+            )
         
         with col_s2:
-            secondary_options = [c for c in df.columns if c != primary_dim and (df[c].nunique() <= 15 or df[c].dtype in ['float64', 'float32'])]
-            secondary_dim = st.selectbox("Secondary Dimension (Outer Ring)", secondary_options, index=1 if 'core_radius_frac' in secondary_options and len(secondary_options) > 1 else 0)
+            secondary_options = [c for c in safe_cols if c != primary_dim]
+            secondary_dim = st.selectbox(
+                "Secondary Dimension (Outer Ring)",
+                secondary_options if secondary_options else df.select_dtypes(include=['number']).columns.tolist(),
+                index=1 if 'core_radius_frac' in secondary_options and len(secondary_options) > 1 else 0
+            )
         
         if primary_dim and secondary_dim:
             sunburst_builder = SunburstBuilder()
-            fig = sunburst_builder.create_parameter_hierarchy(df, primary_dim=primary_dim, secondary_dim=secondary_dim, value_col=target)
+            fig = sunburst_builder.create_parameter_hierarchy(
+                df, 
+                primary_dim=primary_dim, 
+                secondary_dim=secondary_dim, 
+                value_col=target
+            )
             st.plotly_chart(fig, use_container_width=True)
             
             with st.expander("📊 Key Insights from Hierarchy"):
@@ -924,7 +885,6 @@ def main():
     with tab4:
         st.markdown("### 🔗 Parameter Correlation Analysis")
         
-        # ✅ Only proceed if we have valid correlation parameters
         valid_corr_params = [p for p in correlation_params if p in available_corr_params] if 'available_corr_params' in locals() else []
         
         if valid_corr_params:
@@ -975,9 +935,8 @@ def main():
         else:
             st.info("✅ Dataset appears well-covered! Consider exploring new parameter combinations or higher resolution.")
         
-        # Parameter coverage visualization
         st.markdown("#### 📊 Current Parameter Coverage")
-        coverage_cols = [c for c in ['c_bulk', 'core_radius_frac', 'shell_thickness_frac', 'L0_nm', 'k0_nd'] if c in df.columns]
+        coverage_cols = [c for c in ['c_bulk', 'core_radius_frac', 'shell_thickness_frac', 'L0_nm', 'k0_nd'] if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
         if coverage_cols:
             fig_cov = make_subplots(rows=1, cols=len(coverage_cols), subplot_titles=coverage_cols)
             for i, col in enumerate(coverage_cols, 1):
@@ -985,7 +944,6 @@ def main():
             fig_cov.update_layout(height=300, showlegend=False, title_text="Parameter Distribution", bargap=0.1)
             st.plotly_chart(fig_cov, use_container_width=True)
         
-        # Export experimental design
         st.markdown("#### 🎯 Export Next Experimental Design")
         with st.expander("Generate parameter suggestions for new simulations"):
             if gaps:
@@ -1013,189 +971,6 @@ def main():
                         f"suggested_params_{datetime.now():%Y%m%d}.csv", "text/csv")
             else:
                 st.info("No clear gaps detected. Consider testing extreme values or new parameter interactions.")
-    
-    # ===== TAB 6: TEMPORAL FIELD VISUALIZATION (NEW!) =====
-    with tab6:
-        st.markdown("### ⏱️ Temporal Field Evolution")
-        st.info("🔄 Interpolate spatial fields (φ, c, ψ) at any point during deposition")
-        
-        col_t1, col_t2 = st.columns([3, 1])
-        
-        with col_t2:
-            # Time slider - MAIN FEATURE REQUESTED BY USER
-            st.markdown("#### ⏱️ Select Time Point")
-            st.session_state.current_time_norm = st.slider(
-                "Normalized Time", 
-                0.0, 1.0, 
-                st.session_state.current_time_norm,  # Remember last selection
-                0.01,
-                help="0.0 = start of deposition, 1.0 = final state"
-            )
-            
-            field_choice = st.radio("Field to visualize", 
-                                   ['phi (Ag shell)', 'c (concentration)', 'psi (Cu core)'],
-                                   index=0)
-            field_map = {'phi (Ag shell)': 'phi', 'c (concentration)': 'c', 'psi (Cu core)': 'psi'}
-            selected_field = field_map[field_choice]
-            
-            # Resolution control
-            target_nx = st.slider("Output resolution", 64, 512, 256, 32)
-            target_shape = (target_nx, target_nx)
-            
-            # Refresh button
-            if st.button("🔄 Interpolate at Selected Time", use_container_width=True, type="primary"):
-                with st.spinner(f"Interpolating {selected_field} at t_norm={st.session_state.current_time_norm:.2f}..."):
-                    # Get sources with temporal data
-                    sources_with_data = []
-                    for _, row in df.iterrows():
-                        filepath = row.get('filepath')
-                        if filepath and os.path.exists(filepath):
-                            loader = TemporalPKLLoader()
-                            result = loader.load_file(filepath)
-                            if result and result.get('data', {}).get('snapshots'):
-                                sources_with_data.append(result)
-                    
-                    if sources_with_data:
-                        # Interpolate field at selected time
-                        interpolated_field = st.session_state.temporal_interpolator.get_field_at_time(
-                            sources_with_data, 
-                            selected_field, 
-                            st.session_state.current_time_norm,
-                            target_shape
-                        )
-                        
-                        # Store in session state for visualization
-                        st.session_state.current_interpolated_field = interpolated_field
-                        st.session_state.current_field_name = field_choice
-                        st.session_state.current_L0_nm = df['L0_nm'].mean() if 'L0_nm' in df.columns else 20.0
-                        st.success(f"✅ Interpolated {field_choice} at t_norm={st.session_state.current_time_norm:.2f}")
-                    else:
-                        st.error("❌ No sources with snapshot data found. Check your PKL files.")
-        
-        with col_t1:
-            # Display the interpolated field
-            if 'current_interpolated_field' in st.session_state:
-                field_data = st.session_state.current_interpolated_field
-                field_name = st.session_state.current_field_name
-                L0_nm = st.session_state.current_L0_nm
-                
-                # Create heatmap
-                fig, ax = plt.subplots(figsize=(8, 7), dpi=150)
-                extent = [0, L0_nm, 0, L0_nm]
-                
-                # Choose colormap based on field type
-                if field_name == 'phi (Ag shell)':
-                    cmap = 'viridis'
-                    vmin, vmax = 0, 1
-                    cbar_label = 'φ (Ag fraction)'
-                elif field_name == 'psi (Cu core)':
-                    cmap = 'plasma'
-                    vmin, vmax = 0, 1
-                    cbar_label = 'ψ (Cu fraction)'
-                else:  # concentration
-                    c_max = df['c_bulk'].max() if 'c_bulk' in df.columns else 1.0
-                    cmap = 'RdYlBu_r'
-                    vmin, vmax = 0, c_max
-                    cbar_label = 'c (concentration)'
-                
-                im = ax.imshow(field_data.T, cmap=cmap, vmin=vmin, vmax=vmax,
-                              extent=extent, aspect='equal', origin='lower')
-                
-                cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                cbar.set_label(cbar_label, fontsize=12)
-                
-                ax.set_xlabel('X (nm)', fontsize=12, fontweight='bold')
-                ax.set_ylabel('Y (nm)', fontsize=12, fontweight='bold')
-                ax.set_title(f"{field_name} @ t_norm = {st.session_state.current_time_norm:.2f}", 
-                           fontsize=14, fontweight='bold')
-                ax.grid(True, alpha=0.3, linestyle='--')
-                
-                plt.tight_layout()
-                st.pyplot(fig)
-                
-                # Interactive Plotly version
-                if st.checkbox("Show interactive Plotly version"):
-                    import plotly.graph_objects as go
-                    x = np.linspace(0, L0_nm, field_data.shape[1])
-                    y = np.linspace(0, L0_nm, field_data.shape[0])
-                    
-                    fig_inter = go.Figure(data=go.Heatmap(
-                        z=field_data.T, x=x, y=y, colorscale=cmap,
-                        zmin=vmin, zmax=vmax,
-                        colorbar=dict(title=cbar_label)
-                    ))
-                    fig_inter.update_layout(
-                        title=f"{field_name} @ t_norm = {st.session_state.current_time_norm:.2f}",
-                        xaxis_title="X (nm)",
-                        yaxis_title="Y (nm)",
-                        width=700,
-                        height=600
-                    )
-                    st.plotly_chart(fig_inter, use_container_width=True)
-                
-                # Export current field
-                st.markdown("#### 📥 Export Current Field")
-                col_exp1, col_exp2 = st.columns(2)
-                with col_exp1:
-                    # CSV export
-                    ny, nx = field_data.shape
-                    x_vals = np.linspace(0, L0_nm, nx)
-                    y_vals = np.linspace(0, L0_nm, ny)
-                    X, Y = np.meshgrid(x_vals, y_vals)
-                    export_df = pd.DataFrame({
-                        'x_nm': X.flatten(),
-                        'y_nm': Y.flatten(),
-                        selected_field: field_data.flatten()
-                    })
-                    csv_data = export_df.to_csv(index=False)
-                    fname = f"{selected_field}_t{st.session_state.current_time_norm:.2f}_{datetime.now():%Y%m%d}.csv"
-                    st.download_button("📥 Download CSV", csv_data, fname, "text/csv", use_container_width=True)
-                
-                with col_exp2:
-                    # Numpy export
-                    import io
-                    buf = io.BytesIO()
-                    np.savez_compressed(buf, 
-                                       field=field_data, 
-                                       x_nm=x_vals, 
-                                       y_nm=y_vals,
-                                       t_norm=st.session_state.current_time_norm,
-                                       field_name=selected_field)
-                    buf.seek(0)
-                    npz_fname = f"{selected_field}_t{st.session_state.current_time_norm:.2f}_{datetime.now():%Y%m%d}.npz"
-                    st.download_button("📥 Download NPZ", buf.read(), npz_fname, "application/octet-stream", use_container_width=True)
-                
-                # Field statistics
-                with st.expander("📊 Field Statistics"):
-                    col_s1, col_s2, col_s3 = st.columns(3)
-                    with col_s1:
-                        st.metric("Mean", f"{np.mean(field_data):.4f}")
-                    with col_s2:
-                        st.metric("Std Dev", f"{np.std(field_data):.4f}")
-                    with col_s3:
-                        st.metric("Range", f"{np.min(field_data):.4f} – {np.max(field_data):.4f}")
-                    
-                    if selected_field == 'phi':
-                        ag_fraction = np.mean(field_data > 0.5) * 100
-                        st.metric("Ag Coverage", f"{ag_fraction:.1f}%")
-                    elif selected_field == 'psi':
-                        cu_fraction = np.mean(field_data > 0.5) * 100
-                        st.metric("Cu Coverage", f"{cu_fraction:.1f}%")
-            
-            else:
-                st.info("👈 Select a time point and click 'Interpolate' to visualize temporal fields")
-                
-                # Show available temporal metadata
-                if 'snapshot_times' in df.columns or 'has_thickness_history' in df.columns:
-                    with st.expander("📋 Temporal Data Availability"):
-                        n_with_snapshots = df['n_snapshots'].sum() if 'n_snapshots' in df.columns else 0
-                        n_with_thickness = df['has_thickness_history'].sum() if 'has_thickness_history' in df.columns else 0
-                        st.markdown(f"""
-                        - **Simulations with snapshots**: {n_with_snapshots}
-                        - **Simulations with thickness history**: {n_with_thickness}
-                        - **Time slider**: Adjust to interpolate fields at any normalized time
-                        - **Fields available**: φ (Ag shell), c (concentration), ψ (Cu core)
-                        """)
 
 # =============================================
 # FOOTER & HELP
@@ -1203,10 +978,10 @@ def main():
 st.divider()
 with st.expander("❓ Help & Documentation"):
     st.markdown("""
-    ### 🧪 Dataset Designer Guide (Temporal Edition)
+    ### 🧪 Dataset Designer Guide
     
     **📁 Loading Data:**
-    - Place PKL files in `numerical_solutions` directory (or specify custom path)
+    - Place PKL files in `numerical_solutions` directory
     - Files should contain: `parameters`, `snapshots`, `thickness_history_nm`
     - Click "🔄 Scan Directory" to load
     
@@ -1216,13 +991,6 @@ with st.expander("❓ Help & Documentation"):
     - `ag_area_nm2`: Deposited silver area/volume
     - `interface_sharpness`: Morphology quality metric
     
-    **⏱️ Temporal Field Visualization (NEW!):**
-    - Go to "⏱️ Temporal Fields" tab
-    - Use slider to select normalized time (0=start, 1=final)
-    - Choose field: φ (Ag), c (concentration), or ψ (Cu)
-    - Click "Interpolate" to compute fields at that time
-    - Export as CSV or NPZ for further analysis
-    
     **📊 Visualizations:**
     - 🕸️ **Radar**: Compare simulations across multiple parameters
     - 🌟 **Sunburst**: Explore hierarchical parameter relationships
@@ -1231,20 +999,18 @@ with st.expander("❓ Help & Documentation"):
     
     **💾 Export Options:**
     - Download filtered tables as CSV/JSON
-    - Export interpolated fields at any time point
     - Export suggested parameter sets for new simulations
     
     **🔧 Troubleshooting:**
     - If multiselect shows "No parameters available", load data first
-    - If temporal interpolation fails, ensure PKL files have `snapshots` list
     - Check file naming convention matches expected pattern for auto-parsing
     """)
 
 st.markdown("""
 <div style="text-align: center; padding: 1rem; color: #64748b; font-size: 0.9rem;">
-🧪 Electroless Deposition Dataset Designer v2.0 (Temporal) • 
+🧪 Electroless Deposition Dataset Designer v2.0 (Fixed) • 
 Built with Streamlit + Plotly + NumPy • 
-<em>Design smarter simulations with temporal insight</em>
+<em>Design smarter simulations, faster</em>
 </div>
 """, unsafe_allow_html=True)
 
