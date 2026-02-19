@@ -84,7 +84,7 @@ st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designe
 # GLOBAL CONSTANTS & CONFIGURATION
 # =============================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PKL_DIR = os.path.join(SCRIPT_DIR, "electroless_pkl_solutions")
+DEFAULT_PKL_DIR = os.path.join(SCRIPT_DIR, "numerical_solutions")
 
 # Parameter categories for organized analysis
 PARAM_CATEGORIES = {
