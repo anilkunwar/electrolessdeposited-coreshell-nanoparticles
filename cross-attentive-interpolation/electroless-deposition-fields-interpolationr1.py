@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-ELECTROLESS Ag-Cu CORE-SHELL INTERPOLATOR
-* Interpolates fields: c (concentration), phi (shell), psi (core)
-* Postprocessed: shell thickness (nm), material proxy = max(phi, psi) + psi, potential = -alpha * c
-* Features: fc (core/L), rs (Δr/r_core), c_bulk, L0_nm
-* Transformer with gated attention + parameter Gaussian kernel
-* Spatially localized Gaussian: Post-interpolation filter on fields
-* Reads PKL from 'electroless_pkl_solutions'
+Transformer‑Inspired Interpolation for Electroless Ag Shell Deposition on Cu Core
+Reads PKL files from "electroless_pkl_solutions" and interpolates fields
+(c, φ, ψ) and derived properties (material proxy, potential proxy, shell thickness)
+for arbitrary target parameters (fc, rs, c_bulk, L0_nm).
+Implements physics‑learned fusion gating and spatial Gaussian regularization.
 """
 import streamlit as st
 import numpy as np
@@ -22,6 +20,7 @@ import os
 import pickle
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from datetime import datetime
 from io import BytesIO
 import warnings
@@ -32,8 +31,9 @@ from typing import List, Dict, Any, Optional, Tuple, Union
 import seaborn as sns
 from scipy.ndimage import zoom, gaussian_filter
 import re
-import warnings
+
 warnings.filterwarnings('ignore')
+
 # =============================================
 # GLOBAL STYLING CONFIGURATION
 # =============================================
@@ -51,12 +51,14 @@ plt.rcParams.update({
     'grid.linestyle': '--',
     'image.cmap': 'viridis'
 })
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "electroless_pkl_solutions")
+SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "electroless_pkl_solutions")   # <-- changed
 VISUALIZATION_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "visualization_outputs")
 os.makedirs(SOLUTIONS_DIR, exist_ok=True)
 os.makedirs(VISUALIZATION_OUTPUT_DIR, exist_ok=True)
-COLORMAP_OPTIONS = {  # Same as original
+
+COLORMAP_OPTIONS = {
     'Sequential': ['viridis', 'plasma', 'inferno', 'magma', 'cividis', 'turbo', 'hot', 'afmhot', 'gist_heat',
                   'copper', 'summer', 'Wistia', 'spring', 'autumn', 'winter', 'bone', 'gray', 'pink',
                   'gist_gray', 'gist_yarg', 'binary', 'gist_earth', 'terrain', 'ocean', 'gist_stern', 'gnuplot',
@@ -71,83 +73,124 @@ COLORMAP_OPTIONS = {  # Same as original
     'Publication Standard': ['viridis', 'plasma', 'inferno', 'magma', 'cividis', 'RdBu', 'RdBu_r', 'Spectral',
                             'coolwarm', 'bwr', 'seismic', 'BrBG']
 }
+
 # =============================================
-# DEPOSITION PARAMETERS ENHANCEMENT
+# DEPOSITION PARAMETERS (replaces PhysicsParameters)
 # =============================================
 class DepositionParameters:
-    """Parameters for core-shell deposition with normalization scales"""
-    PARAM_SCALES = {
-        'fc': 0.5,  # core/L max ~0.45
-        'rs': 1.0,  # Δr/r_core max ~0.6
-        'c_bulk': 1.0,  # max 1.0
-        'L0_nm': 100.0  # typical scale
+    """Normalises and stores core‑shell deposition parameters."""
+    # Typical ranges for normalisation
+    RANGES = {
+        'fc': (0.05, 0.45),       # core/L
+        'rs': (0.01, 0.6),         # Δr/r_core
+        'c_bulk': (0.1, 1.0),       # bulk concentration
+        'L0_nm': (10.0, 100.0)      # domain length in nm
     }
-    THEORETICAL_BASIS = {
-        'fc': {
-            'description': 'Core fraction relative to domain',
-            'reference': 'Phase-field models for core-shell growth'
-        },
-        'rs': {
-            'description': 'Shell thickness ratio',
-            'reference': 'Electroless deposition theory'
-        },
-        # Add for others
-    }
-   
+
     @staticmethod
-    def get_normalized_param(param_name: str, value: float) -> float:
-        scale = DepositionParameters.PARAM_SCALES.get(param_name, 1.0)
-        return value / scale
-       
+    def normalize(value: float, param_name: str) -> float:
+        low, high = DepositionParameters.RANGES[param_name]
+        return (value - low) / (high - low)
+
     @staticmethod
-    def get_theoretical_info(param_name: str) -> Dict:
-        return DepositionParameters.THEORETICAL_BASIS.get(param_name, {})
+    def denormalize(norm_value: float, param_name: str) -> float:
+        low, high = DepositionParameters.RANGES[param_name]
+        return norm_value * (high - low) + low
+
+    @staticmethod
+    def get_theoretical_info():
+        """Return theoretical basis for deposition models (optional)."""
+        return {
+            'growth_model_A': 'Irreversible growth: dφ/dt = M·i_loc + M·γ·∇²φ (only positive)',
+            'growth_model_B': 'Soft reversible: includes a small −β·M·f_bulk term',
+            'EDL_boost': 'i_loc *= (1 + λ₀ exp(-t/τ_edl) · α_edl · δ_int)'
+        }
+
 # =============================================
-# DEPOSITION PHYSICS PARAMETERS
+# DEPOSITION PHYSICS (replaces DiffusionPhysics)
 # =============================================
 class DepositionPhysics:
-    """Physics for deposition with proxies"""
-    MATERIAL_PROPERTIES = {
-        'AgCu': {
-            'alpha_nd': 2.0,  # default, override from pkl
-            # Add more as needed
-        },
-    }
-   
+    """Computes derived quantities for core‑shell deposition."""
+
     @staticmethod
-    def get_material_properties(material='AgCu'):
-        return DepositionPhysics.MATERIAL_PROPERTIES.get(material, DepositionPhysics.MATERIAL_PROPERTIES['AgCu'])
-       
+    def material_proxy(phi: np.ndarray, psi: np.ndarray, method: str = "max(phi, psi) + psi") -> np.ndarray:
+        """
+        Build a material indicator:
+        - 0: electrolyte
+        - 1: Ag shell
+        - 2: Cu core
+        """
+        if method == "max(phi, psi) + psi":
+            # When psi > 0.5 → core (value 2), else if phi > 0.5 → shell (1), else electrolyte (0)
+            return np.where(psi > 0.5, 2.0, np.where(phi > 0.5, 1.0, 0.0))
+        elif method == "phi + 2*psi":
+            return phi + 2.0 * psi
+        elif method == "phi*(1-psi) + 2*psi":
+            return phi * (1.0 - psi) + 2.0 * psi
+        else:
+            raise ValueError(f"Unknown material proxy method: {method}")
+
     @staticmethod
-    def compute_material_proxy(phi, psi):
-        return np.maximum(phi, psi) + psi
-   
-    @staticmethod
-    def compute_potential_proxy(c, alpha_nd=2.0):
+    def potential_proxy(c: np.ndarray, alpha_nd: float) -> np.ndarray:
+        """Potential proxy = -α·c"""
         return -alpha_nd * c
-   
+
     @staticmethod
-    def compute_shell_thickness(history):
-        if history and 'thickness_history_nm' in history:
-            return history['thickness_history_nm'][-1][-1]  # last thickness nm
-        return 0.0
-   
+    def shell_thickness(phi: np.ndarray, psi: np.ndarray, core_radius_frac: float,
+                        threshold: float = 0.5, dx: float = 1.0) -> float:
+        """
+        Compute shell thickness in normalized units.
+        Assumes spherical/cylindrical geometry and a centred core.
+        """
+        ny, nx = phi.shape
+        # Create coordinate grid (0..1)
+        x = np.linspace(0, 1, nx)
+        y = np.linspace(0, 1, ny)
+        X, Y = np.meshgrid(x, y, indexing='ij')
+        dist = np.sqrt((X - 0.5)**2 + (Y - 0.5)**2)
+
+        mask = (phi > threshold) & (psi <= 0.5)
+        if np.any(mask):
+            max_dist = np.max(dist[mask])
+            thickness = max_dist - core_radius_frac
+            return max(0.0, thickness)
+        else:
+            return 0.0
+
     @staticmethod
-    def apply_spatial_regularization(field, sigma=1.0):
-        return gaussian_filter(field, sigma=sigma)
+    def phase_statistics(phi, psi, dx, dy, L0, threshold=0.5):
+        """Compute area fractions (copied from Code 1)."""
+        ag_mask = (phi > threshold) & (psi <= 0.5)
+        cu_mask = psi > 0.5
+        electrolyte_mask = ~(ag_mask | cu_mask)
+
+        cell_area_nd = dx * dy
+        cell_area_real = cell_area_nd * (L0**2)
+
+        electrolyte_area_nd = np.sum(electrolyte_mask) * cell_area_nd
+        ag_area_nd = np.sum(ag_mask) * cell_area_nd
+        cu_area_nd = np.sum(cu_mask) * cell_area_nd
+
+        return {
+            "Electrolyte": (electrolyte_area_nd, electrolyte_area_nd * (L0**2)),
+            "Ag": (ag_area_nd, ag_area_nd * (L0**2)),
+            "Cu": (cu_area_nd, cu_area_nd * (L0**2))
+        }
+
 # =============================================
-# ENHANCED SOLUTION LOADER
+# ENHANCED SOLUTION LOADER (adapted for Code 1 PKL)
 # =============================================
 class EnhancedSolutionLoader:
-    """Enhanced loader for deposition PKLs"""
+    """Loads PKL files generated by the electroless deposition simulator (Code 1)."""
     def __init__(self, solutions_dir: str = SOLUTIONS_DIR):
         self.solutions_dir = solutions_dir
         self._ensure_directory()
         self.cache = {}
-       
+
     def _ensure_directory(self):
-        os.makedirs(self.solutions_dir, exist_ok=True)
-           
+        if not os.path.exists(self.solutions_dir):
+            os.makedirs(self.solutions_dir, exist_ok=True)
+
     def scan_solutions(self) -> List[Dict[str, Any]]:
         all_files = []
         for ext in ['*.pkl', '*.pickle']:
@@ -155,9 +198,9 @@ class EnhancedSolutionLoader:
             pattern = os.path.join(self.solutions_dir, ext)
             files = glob.glob(pattern)
             all_files.extend(files)
-       
+
         all_files.sort(key=os.path.getmtime, reverse=True)
-       
+
         file_info = []
         for file_path in all_files:
             try:
@@ -171,121 +214,107 @@ class EnhancedSolutionLoader:
                 file_info.append(info)
             except:
                 continue
-               
         return file_info
-   
-    def read_simulation_file(self, file_path, format_type='auto'):
+
+    def read_simulation_file(self, file_path):
         try:
             with open(file_path, 'rb') as f:
                 data = pickle.load(f)
-           
-            standardized = self._standardize_data(data, file_path)
+
+            # Standardise to the format expected by the rest of the code
+            standardized = {
+                'params': {},
+                'history': [],          # will contain snapshots as dicts
+                'metadata': {
+                    'filename': os.path.basename(file_path),
+                    'loaded_at': datetime.now().isoformat(),
+                }
+            }
+
+            # Code 1 PKL structure:
+            # - "meta": contains c_bulk, bc_type, mode, use_edl, timestamp
+            # - "parameters": all numeric parameters (gamma_nd, beta_nd, ... core_radius_frac, shell_thickness_frac, L0_nm, ...)
+            # - "coords_nd": coordinate arrays
+            # - "snapshots": list of (t_nd, phi_cpu, c_cpu, psi_cpu)
+            # - "diagnostics": list of (t, c_mean, c_max, total_Ag, bulk_norm, grad_norm, edl_flux)
+            # - "thickness_history_nm": list of (t, th_nd, th_nm, c_mean, c_max, total_Ag)
+
+            if isinstance(data, dict):
+                # Extract parameters
+                if 'parameters' in data:
+                    standardized['params'] = data['parameters'].copy()
+                if 'meta' in data:
+                    standardized['params'].update(data['meta'])
+                if 'L0_nm' not in standardized['params'] and 'L0_nm' in data.get('parameters', {}):
+                    standardized['params']['L0_nm'] = data['parameters']['L0_nm']
+
+                # Convert snapshots to a list of dicts for easy access
+                if 'snapshots' in data:
+                    snap_list = []
+                    for t, phi, c, psi in data['snapshots']:
+                        snap_list.append({
+                            't_nd': t,
+                            'phi': phi,
+                            'c': c,
+                            'psi': psi
+                        })
+                    standardized['history'] = snap_list
+
+                # Store additional data
+                standardized['diagnostics'] = data.get('diagnostics', [])
+                standardized['thickness_history_nm'] = data.get('thickness_history_nm', [])
+                standardized['coords_nd'] = data.get('coords_nd', None)
+
+            # Convert any torch tensors to numpy (though Code 1 uses numpy directly)
+            self._convert_tensors(standardized)
             return standardized
+
         except Exception as e:
             st.error(f"Error loading {file_path}: {e}")
             return None
-   
-    def _standardize_data(self, data, file_path):
-        standardized = {
-            'params': {},
-            'history': {},
-            'metadata': {
-                'filename': os.path.basename(file_path),
-                'loaded_at': datetime.now().isoformat(),
-                'physics_processed': False
-            }
-        }
-       
-        try:
-            # Extract from pkl structure
-            if 'meta' in data and 'parameters' in data:
-                standardized['params'] = {
-                    'c_bulk': data['meta']['c_bulk'],
-                    'L0_nm': data['parameters']['L0_nm'],
-                    'fc': data['parameters']['core_radius_frac'],
-                    'rs': data['parameters']['shell_thickness_frac'],
-                    'alpha_nd': data['parameters']['alpha_nd'],
-                    'use_edl': data['meta']['use_edl'],
-                    'mode': data['meta']['mode'],
-                    'bc_type': data['meta']['bc_type']
-                }
-               
-            # Fallback: Parse filename if missing
-            filename = os.path.basename(file_path)
-            match = re.match(r".*_c(\d+\.\d+)_L0(\d+\.\d+)nm_fc(\d+\.\d+)_rs(\d+\.\d+)_.*", filename)
-            if match:
-                standardized['params'].update({
-                    'c_bulk': float(match.group(1)),
-                    'L0_nm': float(match.group(2)),
-                    'fc': float(match.group(3)),
-                    'rs': float(match.group(4))
-                })
-               
-            # History: Use last snapshot for fields
-            if 'snapshots' in data and data['snapshots']:
-                last_snap = data['snapshots'][-1]
-                standardized['history'] = {
-                    'c': last_snap[2],  # c
-                    'phi': last_snap[1],  # phi
-                    'psi': last_snap[3]   # psi
-                }
-                standardized['shell_thickness_nm'] = DepositionPhysics.compute_shell_thickness(data)
-               
-            if 'metadata' in data:
-                standardized['metadata'].update(data['metadata'])
-                   
-            self._convert_tensors(standardized)
-        except Exception as e:
-            st.error(f"Standardization error: {e}")
-            standardized['metadata']['error'] = str(e)
-           
-        return standardized
-   
+
     def _convert_tensors(self, data):
         if isinstance(data, dict):
             for key, value in data.items():
-                if isinstance(value, torch.Tensor):
+                if torch.is_tensor(value):
                     data[key] = value.cpu().numpy()
                 elif isinstance(value, (dict, list)):
                     self._convert_tensors(value)
         elif isinstance(data, list):
             for i, item in enumerate(data):
-                if isinstance(item, torch.Tensor):
+                if torch.is_tensor(item):
                     data[i] = item.cpu().numpy()
                 elif isinstance(item, (dict, list)):
                     self._convert_tensors(item)
-   
+
     def load_all_solutions(self, use_cache=True, max_files=None):
         solutions = []
         file_info = self.scan_solutions()
-       
         if max_files:
             file_info = file_info[:max_files]
-           
         if not file_info:
             return solutions
-           
+
         for file_info_item in file_info:
             cache_key = file_info_item['filename']
             if use_cache and cache_key in self.cache:
                 solutions.append(self.cache[cache_key])
                 continue
-               
             solution = self.read_simulation_file(file_info_item['path'])
             if solution:
                 self.cache[cache_key] = solution
                 solutions.append(solution)
-               
         return solutions
+
 # =============================================
-# POSITIONAL ENCODING FOR TRANSFORMER
+# POSITIONAL ENCODING (unchanged)
 # =============================================
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super().__init__()
         self.d_model = d_model
         self.max_len = max_len
-       
+
     def forward(self, x):
         batch_size, seq_len, d_model = x.shape
         position = torch.arange(seq_len, dtype=torch.float).unsqueeze(1)
@@ -295,19 +324,21 @@ class PositionalEncoding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         return x + pe.unsqueeze(0)
+
 # =============================================
-# TRANSFORMER PARAMETER INTERPOLATOR WITH GATED ATTENTION
+# CORE‑SHELL INTERPOLATOR (adapted from TransformerSpatialInterpolator)
 # =============================================
-class TransformerParameterInterpolator:
+class CoreShellInterpolator:
     def __init__(self, d_model=64, nhead=8, num_layers=3,
-                param_sigma=0.1, temperature=1.0, locality_weight_factor=0.5):
+                 param_sigma=[0.15, 0.15, 0.15, 0.15],  # normalised std for fc, rs, c_bulk, L0_nm
+                 temperature=1.0, locality_weight_factor=0.5):
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
-        self.param_sigma = param_sigma
+        self.param_sigma = param_sigma          # Gaussian kernel widths in normalised space
         self.temperature = temperature
         self.locality_weight_factor = locality_weight_factor
-       
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -316,372 +347,611 @@ class TransformerParameterInterpolator:
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.input_proj = nn.Linear(15, d_model)
+        # Input features: 4 continuous params + up to 4 categorical (bc_type, use_edl, mode, growth_model)
+        self.input_proj = nn.Linear(12, d_model)   # 4 cont + up to 8 one‑hot (we'll pad)
         self.pos_encoder = PositionalEncoding(d_model)
-        self.gate_linear = nn.Linear(d_model, 1)  # For gated fusion
-       
-    def set_param_parameters(self, param_sigma=None, locality_weight_factor=None):
-        if param_sigma is not None:
-            self.param_sigma = param_sigma
-        if locality_weight_factor is not None:
-            self.locality_weight_factor = locality_weight_factor
-           
-    def compute_parameter_bracketing_kernel(self, source_params, target_params):
-        param_weights = []
-        param_mask = []
-        param_distances = []
-       
-        target_fc = target_params.get('fc', 0.18)
-        target_rs = target_params.get('rs', 0.2)
-        target_c_bulk = target_params.get('c_bulk', 1.0)
-        target_L0_nm = target_params.get('L0_nm', 20.0)
-        target_use_edl = target_params.get('use_edl', False)
-       
+
+        # Gating MLP: takes concatenated target and source reps -> gate scalar per source
+        self.gate_net = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, 1),
+            nn.Sigmoid()
+        )
+
+    def set_parameter_sigma(self, param_sigma):
+        self.param_sigma = param_sigma
+
+    def compute_parameter_kernel(self, source_params: List[Dict], target_params: Dict):
+        """
+        Compute Gaussian kernel weights based on normalised parameters:
+        fc, rs, c_bulk, L0_nm. Additional categoricals can be included as
+        multiplicative factors (1 if match, small epsilon otherwise).
+        """
+        # Normalise continuous parameters
+        def norm_val(params, name):
+            val = params.get(name, 0.5)
+            return DepositionParameters.normalize(val, name)
+
+        target_norm = np.array([
+            norm_val(target_params, 'fc'),
+            norm_val(target_params, 'rs'),
+            norm_val(target_params, 'c_bulk'),
+            norm_val(target_params, 'L0_nm')
+        ])
+
+        weights = []
         for src in source_params:
-            src_fc = src.get('fc', 0.18)
-            src_rs = src.get('rs', 0.2)
-            src_c_bulk = src.get('c_bulk', 1.0)
-            src_L0_nm = src.get('L0_nm', 20.0)
-           
-            # Normalized differences
-            diff_fc = (src_fc - target_fc) / DepositionParameters.PARAM_SCALES['fc']
-            diff_rs = (src_rs - target_rs) / DepositionParameters.PARAM_SCALES['rs']
-            diff_c = (src_c_bulk - target_c_bulk) / DepositionParameters.PARAM_SCALES['c_bulk']
-            diff_L0 = (src_L0_nm - target_L0_nm) / DepositionParameters.PARAM_SCALES['L0_nm']
-           
-            param_dist = diff_fc**2 + diff_rs**2 + diff_c**2 + diff_L0**2
-            param_distances.append(param_dist)
-           
-            if src.get('use_edl') == target_use_edl:
-                param_mask.append(1.0)
-            else:
-                param_mask.append(1e-6)
-               
-            weight = np.exp(-0.5 * param_dist / self.param_sigma ** 2)
-            param_weights.append(weight)
-           
-        return np.array(param_weights), np.array(param_mask), np.array(param_distances)
-   
-    def encode_parameters(self, params_list, target_params):
-        encoded = []
-        target_c_bulk = target_params.get('c_bulk', 1.0)
-        for params in params_list:
-            features = []
-           
-            # Normalized parameters
-            features.append(DepositionParameters.get_normalized_param('fc', params.get('fc', 0.18)))
-            features.append(DepositionParameters.get_normalized_param('rs', params.get('rs', 0.2)))
-            features.append(DepositionParameters.get_normalized_param('c_bulk', params.get('c_bulk', 1.0)))
-            features.append(DepositionParameters.get_normalized_param('L0_nm', params.get('L0_nm', 20.0)))
-            features.append(params.get('alpha_nd', 2.0) / 10.0)  # normalize
-           
-            # One-hot for use_edl
-            features.append(1.0 if params.get('use_edl', False) else 0.0)
-            features.append(0.0 if params.get('use_edl', False) else 1.0)
-           
-            # One-hot for mode
-            modes = ['2D', '3D']
-            mode = params.get('mode', '2D')
-            for m in modes:
-                features.append(1.0 if m in mode else 0.0)
-               
-            # Proximity to target c_bulk
-            diff_c = abs(params.get('c_bulk', 1.0) - target_c_bulk)
-            features.append(np.exp(-diff_c / 0.5))
-           
-            # Pad to 15
-            while len(features) < 15:
-                features.append(0.0)
-            encoded.append(features[:15])
-           
-        return torch.FloatTensor(encoded)
-       
-    def interpolate_spatial_fields(self, sources, target_params):
+            src_norm = np.array([
+                norm_val(src, 'fc'),
+                norm_val(src, 'rs'),
+                norm_val(src, 'c_bulk'),
+                norm_val(src, 'L0_nm')
+            ])
+            # Gaussian product (independent dimensions)
+            diff = src_norm - target_norm
+            w = np.exp(-0.5 * np.sum((diff / self.param_sigma)**2))
+            weights.append(w)
+
+        # Categorical factors: bc_type (Neu/Dir), use_edl (True/False), mode (2D/3D)
+        cat_factor = []
+        for src in source_params:
+            factor = 1.0
+            if src.get('bc_type') != target_params.get('bc_type'):
+                factor *= 0.1
+            if src.get('use_edl') != target_params.get('use_edl'):
+                factor *= 0.1
+            if src.get('mode') != target_params.get('mode'):
+                factor *= 0.1
+            cat_factor.append(factor)
+
+        return np.array(weights) * np.array(cat_factor)
+
+    def encode_parameters(self, params_list: List[Dict]) -> torch.Tensor:
+        """
+        Encode parameters into feature vectors.
+        Continuous: fc, rs, c_bulk, L0_nm (normalised)
+        Categorical: bc_type (Neu=0, Dir=1), use_edl (0/1), mode (2D=0, 3D=1), growth_model (A=0, B=1)
+        """
+        features = []
+        for p in params_list:
+            feat = []
+            # continuous (normalised)
+            for name in ['fc', 'rs', 'c_bulk', 'L0_nm']:
+                val = p.get(name, 0.5)
+                norm_val = DepositionParameters.normalize(val, name)
+                feat.append(norm_val)
+            # categorical one‑hot: bc_type
+            bc = 1.0 if p.get('bc_type', 'Neu') == 'Dir' else 0.0
+            feat.append(bc)
+            # use_edl
+            edl = 1.0 if p.get('use_edl', False) else 0.0
+            feat.append(edl)
+            # mode (2D/3D) - from p maybe, but we can assume 2D for now
+            mode_3d = 1.0 if p.get('mode', '2D (planar)') != '2D (planar)' else 0.0
+            feat.append(mode_3d)
+            # growth_model (A=0, B=1)
+            growth = 1.0 if 'B' in p.get('growth_model', 'Model A') else 0.0
+            feat.append(growth)
+            # Pad to 12 if necessary (keep consistent)
+            while len(feat) < 12:
+                feat.append(0.0)
+            features.append(feat[:12])
+        return torch.FloatTensor(features)
+
+    def interpolate_fields(self, sources: List[Dict], target_params: Dict,
+                           target_shape: Tuple[int, int] = (256, 256)):
+        """
+        Interpolate fields (c, phi, psi) for target_params using transformer and gating.
+        sources: list of solutions (each with 'params', 'history' containing last snapshot)
+        """
         if not sources:
             return None
-           
-        try:
-            source_params = []
-            source_fields = []
-            source_indices = []
-           
-            for i, src in enumerate(sources):
-                if 'params' not in src or 'history' not in src:
-                    continue
-               
-                source_params.append(src['params'])
-                source_indices.append(i)
-               
-                history = src['history']
-                if history:
-                    fields = {
-                        'c': history['c'],
-                        'phi': history['phi'],
-                        'psi': history['psi'],
-                        'source_index': i,
-                        'source_params': src['params']
-                    }
-                    source_fields.append(fields)
-               
-            if not source_params or not source_fields:
-                st.error("No valid sources found.")
-                return None
-               
-            # Resize to common shape
-            common_shape = (256, 256)  # Assume 2D, Nx=256
-            resized_fields = []
-            for fields in source_fields:
-                resized = {}
-                for key, field in fields.items():
-                    if key in ['c', 'phi', 'psi'] and field.shape != common_shape:
-                        factors = [t/s for t, s in zip(common_shape, field.shape)]
-                        resized[key] = zoom(field, factors, order=1)
-                    else:
-                        resized[key] = field
-                resized_fields.append(resized)
-            source_fields = resized_fields
-               
-            # Encode
-            source_features = self.encode_parameters(source_params, target_params)
-            target_features = self.encode_parameters([target_params], target_params)
-           
-            # Pad features if needed
-            if source_features.shape[1] < 15:
-                padding = torch.zeros(source_features.shape[0], 15 - source_features.shape[1])
-                source_features = torch.cat([source_features, padding], dim=1)
-            if target_features.shape[1] < 15:
-                padding = torch.zeros(target_features.shape[0], 15 - target_features.shape[1])
-                target_features = torch.cat([target_features, padding], dim=1)
-           
-            # Parameter kernel
-            param_kernel, param_mask, param_distances = self.compute_parameter_bracketing_kernel(
-                source_params, target_params
-            )
-           
-            # Transformer
-            all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)
-            proj_features = self.input_proj(all_features)
-            proj_features = self.pos_encoder(proj_features)
-            transformer_output = self.transformer(proj_features)
-           
-            target_rep = transformer_output[:, 0, :]
-            source_reps = transformer_output[:, 1:, :]
-           
-            attn_scores = torch.matmul(target_rep.unsqueeze(1), source_reps.transpose(1, 2)).squeeze(1)
-            attn_scores = attn_scores / np.sqrt(self.d_model)
-            attn_scores = attn_scores / self.temperature
-           
-            param_kernel_tensor = torch.FloatTensor(param_kernel).unsqueeze(0)
-            param_mask_tensor = torch.FloatTensor(param_mask).unsqueeze(0)
-           
-            # Gated fusion
-            gate = torch.sigmoid(self.gate_linear(target_rep))  # [1, 1]
-            biased_scores = gate * attn_scores + (1 - gate) * param_kernel_tensor * param_mask_tensor
-           
-            final_attention_weights = torch.softmax(biased_scores, dim=-1).squeeze().detach().cpu().numpy()
-           
-            # Interpolate fields
-            interpolated_fields = {}
-            shape = source_fields[0]['c'].shape
-           
-            for component in ['c', 'phi', 'psi']:
-                interpolated = np.zeros(shape)
-                for i, fields in enumerate(source_fields):
-                    interpolated += final_attention_weights[i] * fields[component]
-                # Apply spatial Gaussian regularization
-                interpolated = DepositionPhysics.apply_spatial_regularization(interpolated, sigma=1.0)
-                interpolated_fields[component] = interpolated
-               
-            # Derived fields
-            alpha_nd = target_params.get('alpha_nd', 2.0)
-            interpolated_fields['material_proxy'] = DepositionPhysics.compute_material_proxy(
-                interpolated_fields['phi'], interpolated_fields['psi']
-            )
-            interpolated_fields['potential_proxy'] = DepositionPhysics.compute_potential_proxy(
-                interpolated_fields['c'], alpha_nd
-            )
-            interpolated_fields['shell_thickness_nm'] = np.average([src['shell_thickness_nm'] * final_attention_weights[i] for i, src in enumerate(sources)])
-               
-            # Statistics (example)
-            statistics = {
-                'c': {'mean': float(np.mean(interpolated_fields['c']))},
-                # Add more
-            }
-           
-            return {
-                'fields': interpolated_fields,
-                'weights': {
-                    'combined': final_attention_weights.tolist(),
-                    'param_kernel': param_kernel.tolist(),
-                    'param_mask': param_mask.tolist()
-                },
-                'statistics': statistics,
-                'target_params': target_params,
-                'shape': shape,
-                'num_sources': len(source_fields),
-                'source_distances': param_distances,
-                'source_indices': source_indices
-            }
-           
-        except Exception as e:
-            st.error(f"Error during interpolation: {str(e)}")
+
+        # Extract last snapshot and parameters from each source
+        source_params = []
+        source_fields = []   # each will be dict with 'c','phi','psi' (2D arrays)
+
+        for src in sources:
+            if 'params' not in src or 'history' not in src or len(src['history']) == 0:
+                continue
+            params = src['params'].copy()
+            # Ensure we have all needed keys with defaults
+            params.setdefault('fc', params.get('core_radius_frac', 0.18))
+            params.setdefault('rs', params.get('shell_thickness_frac', 0.2))
+            params.setdefault('c_bulk', params.get('c_bulk', 1.0))
+            params.setdefault('L0_nm', params.get('L0_nm', 20.0))
+            params.setdefault('bc_type', params.get('bc_type', 'Neu'))
+            params.setdefault('use_edl', params.get('use_edl', False))
+            params.setdefault('mode', params.get('mode', '2D (planar)'))
+            params.setdefault('growth_model', params.get('growth_model', 'Model A'))
+
+            last_snap = src['history'][-1]   # dict with 'phi','c','psi'
+            # Ensure arrays are 2D
+            phi = last_snap['phi']
+            c = last_snap['c']
+            psi = last_snap['psi']
+            if phi.ndim == 3:   # 3D slice? take middle xy slice
+                mid = phi.shape[0] // 2
+                phi = phi[mid, :, :]
+                c = c[mid, :, :]
+                psi = psi[mid, :, :]
+
+            # Resize to target shape if needed
+            if phi.shape != target_shape:
+                factors = (target_shape[0]/phi.shape[0], target_shape[1]/phi.shape[1])
+                phi = zoom(phi, factors, order=1)
+                c = zoom(c, factors, order=1)
+                psi = zoom(psi, factors, order=1)
+
+            source_params.append(params)
+            source_fields.append({'phi': phi, 'c': c, 'psi': psi})
+
+        if not source_params:
+            st.error("No valid source fields.")
             return None
+
+        # Encode parameters
+        source_features = self.encode_parameters(source_params)                # (N, 12)
+        target_features = self.encode_parameters([target_params])             # (1, 12)
+
+        # Combine target and sources
+        all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)  # (1, 1+N, 12)
+
+        # Project to d_model
+        proj_features = self.input_proj(all_features)                         # (1, 1+N, d_model)
+        proj_features = self.pos_encoder(proj_features)
+
+        # Transformer
+        transformer_out = self.transformer(proj_features)                     # (1, 1+N, d_model)
+
+        target_rep = transformer_out[:, 0, :]                                 # (1, d_model)
+        source_reps = transformer_out[:, 1:, :]                               # (1, N, d_model)
+
+        # Compute attention scores (target attends to sources)
+        attn_scores = torch.matmul(target_rep.unsqueeze(1), source_reps.transpose(1,2)).squeeze(1)  # (1, N)
+        attn_scores = attn_scores / np.sqrt(self.d_model) / self.temperature
+
+        # Physics kernel
+        kernel_weights = self.compute_parameter_kernel(source_params, target_params)
+        kernel_tensor = torch.FloatTensor(kernel_weights).unsqueeze(0)        # (1, N)
+
+        # Compute gate for each source
+        # Gate = sigmoid( MLP( concat(target_rep, source_rep) ) )
+        target_expanded = target_rep.expand(source_reps.shape[1], -1).unsqueeze(0)   # (1, N, d_model)
+        gate_input = torch.cat([target_expanded, source_reps], dim=-1)               # (1, N, 2*d_model)
+        gate = self.gate_net(gate_input).squeeze(-1)                                 # (1, N)
+
+        # Blend attention and kernel using gate
+        final_scores = gate * attn_scores + (1 - gate) * kernel_tensor
+        final_weights = torch.softmax(final_scores, dim=-1).squeeze().detach().cpu().numpy()
+
+        # Interpolate each field
+        interpolated = {'phi': np.zeros(target_shape),
+                        'c': np.zeros(target_shape),
+                        'psi': np.zeros(target_shape)}
+
+        for i, fields in enumerate(source_fields):
+            interpolated['phi'] += final_weights[i] * fields['phi']
+            interpolated['c']   += final_weights[i] * fields['c']
+            interpolated['psi'] += final_weights[i] * fields['psi']
+
+        # Spatial Gaussian regularization (optional)
+        apply_smoothing = True
+        if apply_smoothing:
+            sigma = 1.0  # in grid points
+            interpolated['phi'] = gaussian_filter(interpolated['phi'], sigma=sigma)
+            interpolated['c']   = gaussian_filter(interpolated['c'], sigma=sigma)
+            interpolated['psi'] = gaussian_filter(interpolated['psi'], sigma=sigma)
+
+        # Compute derived quantities
+        material = DepositionPhysics.material_proxy(interpolated['phi'], interpolated['psi'])
+        alpha = target_params.get('alpha_nd', 2.0)   # from target_params
+        potential = DepositionPhysics.potential_proxy(interpolated['c'], alpha)
+
+        # Shell thickness (needs core_radius_frac)
+        fc = target_params.get('fc', target_params.get('core_radius_frac', 0.18))
+        dx = 1.0 / (target_shape[0] - 1)   # normalised grid spacing
+        thickness = DepositionPhysics.shell_thickness(interpolated['phi'], interpolated['psi'],
+                                                       fc, threshold=0.5, dx=dx)
+
+        # Phase statistics (area fractions)
+        dx = dy = 1.0 / (target_shape[0] - 1)
+        L0 = target_params.get('L0_nm', 20.0) * 1e-9   # convert nm to m
+        stats = DepositionPhysics.phase_statistics(interpolated['phi'], interpolated['psi'],
+                                                    dx, dy, L0, threshold=0.5)
+
+        result = {
+            'fields': interpolated,
+            'derived': {
+                'material': material,
+                'potential': potential,
+                'thickness_nm': thickness * L0 * 1e9,   # convert to nm
+                'phase_stats': stats
+            },
+            'weights': {
+                'combined': final_weights.tolist(),
+                'kernel': kernel_weights.tolist(),
+                'gate': gate.squeeze().detach().cpu().numpy().tolist(),
+                'attention': attn_scores.squeeze().detach().cpu().numpy().tolist()
+            },
+            'target_params': target_params,
+            'shape': target_shape,
+            'num_sources': len(source_fields),
+            'source_params': source_params
+        }
+        return result
+
 # =============================================
-# ENHANCED HEAT MAP VISUALIZER WITH VARIABLE DOMAIN
+# HEAT MAP VISUALIZER (adapted for variable domain size)
 # =============================================
 class HeatMapVisualizer:
-    """Visualizer for deposition fields with variable L0_nm"""
+    """Visualizer for core‑shell fields with variable domain size."""
     def __init__(self):
-        self.colormaps = COLORMAP_OPTIONS  # From global
-       
-    def create_stress_heatmap(self, field, title="Field Heat Map",
-                            cmap_name='viridis', figsize=(12, 10),
-                            colorbar_label="Value", vmin=None, vmax=None,
-                            L0_nm=20.0, show_stats=True, target_params=None):
-        fig, ax = plt.subplots(figsize=figsize)
-       
-        cmap = plt.get_cmap(cmap_name)
-           
-        if vmin is None:
-            vmin = np.nanmin(field)
-        if vmax is None:
-            vmax = np.nanmax(field)
-           
-        extent = [0, L0_nm, 0, L0_nm]
-        im = ax.imshow(field, cmap=cmap, vmin=vmin, vmax=vmax,
-                      extent=extent, aspect='equal', interpolation='bilinear', origin='lower')
-       
+        self.colormaps = COLORMAP_OPTIONS   # reuse global
+
+    def _get_extent(self, L0_nm: float):
+        """Return extent [0, L0_nm, 0, L0_nm] for imshow."""
+        return [0, L0_nm, 0, L0_nm]
+
+    def create_field_heatmap(self, field_data, title, cmap_name='viridis',
+                              L0_nm=20.0, figsize=(10,8), colorbar_label="",
+                              vmin=None, vmax=None, target_params=None):
+        fig, ax = plt.subplots(figsize=figsize, dpi=300)
+        extent = self._get_extent(L0_nm)
+        im = ax.imshow(field_data, cmap=cmap_name, vmin=vmin, vmax=vmax,
+                       extent=extent, aspect='equal', origin='lower')
         cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label(colorbar_label, fontsize=16)
-       
-        title_str = f"{title}\nDomain: {L0_nm} nm × {L0_nm} nm"
+        if colorbar_label:
+            cbar.set_label(colorbar_label, fontsize=14, fontweight='bold')
+        ax.set_xlabel('X (nm)', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Y (nm)', fontsize=14, fontweight='bold')
+        title_str = title
         if target_params:
-            title_str += f"\nfc={target_params['fc']:.3f}, rs={target_params['rs']:.3f}, c_bulk={target_params['c_bulk']:.3f}"
-        ax.set_title(title_str, fontsize=20)
-        ax.set_xlabel("X Position (nm)", fontsize=16)
-        ax.set_ylabel("Y Position (nm)", fontsize=16)
-        ax.grid(True, alpha=0.2)
-       
-        if show_stats:
-            stats_text = f"Max: {vmax:.3f}\nMin: {vmin:.3f}\nMean: {np.nanmean(field):.3f}"
-            ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=12, verticalalignment='top',
-                   bbox=dict(facecolor='white', alpha=0.9))
-       
+            fc = target_params.get('fc', target_params.get('core_radius_frac', 0))
+            rs = target_params.get('rs', target_params.get('shell_thickness_frac', 0))
+            cb = target_params.get('c_bulk', 0)
+            title_str += f"\nfc={fc:.3f}, rs={rs:.3f}, c_bulk={cb:.2f}, L0={L0_nm} nm"
+        ax.set_title(title_str, fontsize=16, fontweight='bold')
+        ax.grid(True, alpha=0.3)
         plt.tight_layout()
         return fig
-       
-    # Add other methods similarly, passing L0_nm
-    # e.g., create_interactive_heatmap, etc., update extent
+
+    def create_interactive_heatmap(self, field_data, title, cmap_name='viridis',
+                                    L0_nm=20.0, width=800, height=700,
+                                    target_params=None):
+        ny, nx = field_data.shape
+        x = np.linspace(0, L0_nm, nx)
+        y = np.linspace(0, L0_nm, ny)
+        hover_text = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Value={field_data[i,j]:.4f}"
+                       for j in range(nx)] for i in range(ny)]
+
+        fig = go.Figure(data=go.Heatmap(
+            z=field_data, x=x, y=y, colorscale=cmap_name,
+            hoverinfo='text', text=hover_text,
+            colorbar=dict(title=dict(text="Value", font=dict(size=14)))
+        ))
+        title_str = title
+        if target_params:
+            fc = target_params.get('fc', target_params.get('core_radius_frac', 0))
+            rs = target_params.get('rs', target_params.get('shell_thickness_frac', 0))
+            cb = target_params.get('c_bulk', 0)
+            title_str += f"<br>fc={fc:.3f}, rs={rs:.3f}, c_bulk={cb:.2f}, L0={L0_nm} nm"
+        fig.update_layout(
+            title=dict(text=title_str, font=dict(size=20), x=0.5),
+            xaxis=dict(title="X (nm)", scaleanchor="y", scaleratio=1),
+            yaxis=dict(title="Y (nm)"),
+            width=width, height=height
+        )
+        return fig
+
+    def create_angular_orientation_plot(self, target_angle=None, defect_type=None,
+                                       figsize=(8,8)):
+        # Not used for core‑shell, but keep as placeholder
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.text(0.5, 0.5, "Angular orientation plot not applicable\nfor core‑shell deposition",
+                ha='center', va='center', transform=ax.transAxes)
+        return fig
+
 # =============================================
-# RESULTS MANAGER FOR EXPORT
+# RESULTS MANAGER (adapted)
 # =============================================
 class ResultsManager:
+    def __init__(self):
+        pass
+
     def prepare_export_data(self, interpolation_result, visualization_params):
-        # Similar, update for new fields
+        result = interpolation_result.copy()
         export_data = {
             'metadata': {
                 'generated_at': datetime.now().isoformat(),
-                'interpolation_method': 'transformer_gated_parameter',
+                'interpolation_method': 'core_shell_transformer_gated',
                 'visualization_params': visualization_params
             },
             'result': {
-                'target_params': interpolation_result['target_params'],
-                'shape': interpolation_result['shape'],
-                'statistics': interpolation_result['statistics'],
-                'weights': interpolation_result['weights'],
-                'num_sources': interpolation_result.get('num_sources', 0)
+                'target_params': result['target_params'],
+                'shape': result['shape'],
+                'num_sources': result['num_sources'],
+                'weights': result['weights']
             }
         }
-       
-        for field_name, field_data in interpolation_result['fields'].items():
-            export_data['result'][f'{field_name}_data'] = field_data.tolist()
-           
+        # Include fields as lists for JSON
+        for fname, arr in result['fields'].items():
+            export_data['result'][f'{fname}_data'] = arr.tolist()
+        for dname, val in result['derived'].items():
+            if isinstance(val, np.ndarray):
+                export_data['result'][f'{dname}_data'] = val.tolist()
+            else:
+                export_data['result'][dname] = val
         return export_data
-   
+
     def export_to_json(self, export_data, filename=None):
-        # Same as original
         if filename is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             params = export_data['result']['target_params']
-            filename = f"deposition_interpolation_fc{params['fc']}_rs{params['rs']}_{timestamp}.json"
-           
+            fc = params.get('fc', 0)
+            rs = params.get('rs', 0)
+            cb = params.get('c_bulk', 0)
+            filename = f"interp_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_{timestamp}.json"
         json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
         return json_str, filename
-   
+
+    def export_to_csv(self, interpolation_result, filename=None):
+        if filename is None:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            params = interpolation_result['target_params']
+            fc = params.get('fc', 0)
+            rs = params.get('rs', 0)
+            cb = params.get('c_bulk', 0)
+            filename = f"fields_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_{timestamp}.csv"
+
+        # Flatten fields and coordinates
+        shape = interpolation_result['shape']
+        L0 = interpolation_result['target_params'].get('L0_nm', 20.0)
+        x = np.linspace(0, L0, shape[1])
+        y = np.linspace(0, L0, shape[0])
+        X, Y = np.meshgrid(x, y)
+        data_dict = {
+            'x_nm': X.flatten(),
+            'y_nm': Y.flatten()
+        }
+        for fname, arr in interpolation_result['fields'].items():
+            data_dict[fname] = arr.flatten()
+        for dname, val in interpolation_result['derived'].items():
+            if isinstance(val, np.ndarray):
+                data_dict[dname] = val.flatten()
+        df = pd.DataFrame(data_dict)
+        csv_str = df.to_csv(index=False)
+        return csv_str, filename
+
     def _json_serializer(self, obj):
-        # Same
-        if isinstance(obj, np.ndarray): return obj.tolist()
-        return str(obj)
+        if isinstance(obj, np.integer): return int(obj)
+        elif isinstance(obj, np.floating): return float(obj)
+        elif isinstance(obj, np.ndarray): return obj.tolist()
+        elif isinstance(obj, datetime): return obj.isoformat()
+        elif isinstance(obj, torch.Tensor): return obj.cpu().numpy().tolist()
+        else: return str(obj)
+
 # =============================================
 # MAIN APPLICATION
 # =============================================
 def main():
-    st.set_page_config(page_title="Electroless Ag-Cu Interpolator", layout="wide")
-   
-    # Initialize
-    if 'solutions' not in st.session_state: st.session_state.solutions = []
-    if 'loader' not in st.session_state: st.session_state.loader = EnhancedSolutionLoader(SOLUTIONS_DIR)
-    if 'transformer_interpolator' not in st.session_state:
-        st.session_state.transformer_interpolator = TransformerParameterInterpolator(param_sigma=0.1)
-    if 'heatmap_visualizer' not in st.session_state: st.session_state.heatmap_visualizer = HeatMapVisualizer()
-    if 'results_manager' not in st.session_state: st.session_state.results_manager = ResultsManager()
-    if 'interpolation_result' not in st.session_state: st.session_state.interpolation_result = None
-   
+    st.set_page_config(page_title="Core‑Shell Deposition Interpolator",
+                       layout="wide", page_icon="🧪", initial_sidebar_state="expanded")
+
+    st.markdown("""
+    <style>
+    .main-header { font-size: 3.2rem !important; color: #1E3A8A !important; text-align: center; padding: 1rem;
+    background: linear-gradient(90deg, #1E3A8A, #3B82F6, #10B981); -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent; font-weight: 900 !important; margin-bottom: 1rem; }
+    .section-header { font-size: 2.0rem !important; color: #374151 !important; font-weight: 800 !important;
+    border-left: 6px solid #3B82F6; padding-left: 1.2rem; margin-top: 1.8rem; margin-bottom: 1.2rem; }
+    .info-box { background-color: #F0F9FF; border-left: 5px solid #3B82F6; padding: 1.2rem;
+    border-radius: 0.6rem; margin: 1.2rem 0; font-size: 1.1rem; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition Interpolator</h1>', unsafe_allow_html=True)
+
+    # Initialize session state
+    if 'solutions' not in st.session_state:
+        st.session_state.solutions = []
+    if 'loader' not in st.session_state:
+        st.session_state.loader = EnhancedSolutionLoader(SOLUTIONS_DIR)
+    if 'interpolator' not in st.session_state:
+        st.session_state.interpolator = CoreShellInterpolator()
+    if 'visualizer' not in st.session_state:
+        st.session_state.visualizer = HeatMapVisualizer()
+    if 'results_manager' not in st.session_state:
+        st.session_state.results_manager = ResultsManager()
+    if 'interpolation_result' not in st.session_state:
+        st.session_state.interpolation_result = None
+
     # Sidebar
     with st.sidebar:
+        st.markdown('<h2 class="section-header">⚙️ Configuration</h2>', unsafe_allow_html=True)
+
         st.markdown("#### 📁 Data Management")
-        if st.button("📥 Load Solutions"):
-            st.session_state.solutions = st.session_state.loader.load_all_solutions()
-            st.success(f"Loaded {len(st.session_state.solutions)} solutions")
-       
-        st.markdown("#### 🎯 Target Parameters")
-        target_fc = st.slider("core/L (fc)", 0.05, 0.45, 0.07, 0.01)
-        target_rs = st.slider("Δr/r_core (rs)", 0.01, 0.6, 0.1, 0.01)
-        target_c_bulk = st.slider("c_bulk (C_Ag/C_Cu)", 0.1, 1.0, 1.0, 0.05)
-        target_L0_nm = st.number_input("Domain L0 (nm)", 10.0, 100.0, 60.0)
-        target_use_edl = st.checkbox("Use EDL", False)
-        target_alpha_nd = st.slider("alpha_nd", 0.0, 10.0, 2.0, 0.1)
-       
-        st.markdown("#### ⚛️ Interpolation")
-        param_sigma = st.slider("Param Kernel Sigma", 0.01, 1.0, 0.1, 0.01)
-        locality_weight_factor = st.slider("Locality Factor", 0.0, 1.0, 0.5, 0.1)
-       
-        if st.button("🧠 Perform Interpolation", type="primary"):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📥 Load Solutions", use_container_width=True):
+                with st.spinner("Loading solutions..."):
+                    st.session_state.solutions = st.session_state.loader.load_all_solutions()
+                st.success(f"Loaded {len(st.session_state.solutions)} solutions" if st.session_state.solutions else "No solutions found")
+        with col2:
+            if st.button("🧹 Clear Cache", use_container_width=True):
+                st.session_state.solutions = []
+                st.session_state.interpolation_result = None
+                st.success("Cache cleared")
+
+        st.divider()
+
+        st.markdown('<h2 class="section-header">🎯 Target Parameters</h2>', unsafe_allow_html=True)
+        fc = st.slider("Core / L (fc)", 0.05, 0.45, 0.18, 0.01)
+        rs = st.slider("Δr / r_core (rs)", 0.01, 0.6, 0.2, 0.01)
+        c_bulk = st.slider("c_bulk (C_Ag / C_Cu)", 0.1, 1.0, 0.5, 0.05)
+        L0_nm = st.number_input("Domain length L0 (nm)", 10.0, 100.0, 60.0, 5.0)
+
+        bc_type = st.selectbox("BC type", ["Neu", "Dir"], index=0)
+        use_edl = st.checkbox("Use EDL catalyst", value=False)
+        mode = st.selectbox("Mode", ["2D (planar)", "3D (spherical)"], index=0)
+        growth_model = st.selectbox("Growth model", ["Model A", "Model B"], index=0)
+        alpha_nd = st.slider("α (coupling)", 0.0, 10.0, 2.0, 0.1)
+
+        st.divider()
+
+        st.markdown('<h2 class="section-header">⚛️ Interpolation Settings</h2>', unsafe_allow_html=True)
+        sigma_fc = st.slider("Kernel σ (fc)", 0.05, 0.3, 0.15, 0.01)
+        sigma_rs = st.slider("Kernel σ (rs)", 0.05, 0.3, 0.15, 0.01)
+        sigma_c = st.slider("Kernel σ (c_bulk)", 0.05, 0.3, 0.15, 0.01)
+        sigma_L = st.slider("Kernel σ (L0_nm)", 0.05, 0.3, 0.15, 0.01)
+        temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
+        locality_factor = st.slider("Locality weight factor", 0.0, 1.0, 0.5, 0.05)
+
+        if st.button("🧠 Perform Interpolation", type="primary", use_container_width=True):
             if not st.session_state.solutions:
-                st.error("Load solutions first!")
+                st.error("Please load solutions first!")
             else:
-                target_params = {
-                    'fc': target_fc, 'rs': target_rs, 'c_bulk': target_c_bulk,
-                    'L0_nm': target_L0_nm, 'use_edl': target_use_edl, 'alpha_nd': target_alpha_nd
-                }
-                result = st.session_state.transformer_interpolator.interpolate_spatial_fields(st.session_state.solutions, target_params)
-                if result:
-                    st.session_state.interpolation_result = result
-                    st.success("Interpolation successful.")
-   
-    # Tabs if result
+                with st.spinner("Interpolating..."):
+                    # Update interpolator parameters
+                    st.session_state.interpolator.param_sigma = [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                    st.session_state.interpolator.temperature = temperature
+                    st.session_state.interpolator.locality_weight_factor = locality_factor
+
+                    target = {
+                        'fc': fc, 'rs': rs, 'c_bulk': c_bulk, 'L0_nm': L0_nm,
+                        'bc_type': bc_type, 'use_edl': use_edl, 'mode': mode,
+                        'growth_model': growth_model, 'alpha_nd': alpha_nd
+                    }
+                    # Use a common target shape (e.g., 256x256)
+                    result = st.session_state.interpolator.interpolate_fields(
+                        st.session_state.solutions, target, target_shape=(256,256)
+                    )
+                    if result:
+                        st.session_state.interpolation_result = result
+                        st.success("Interpolation successful!")
+                    else:
+                        st.error("Interpolation failed.")
+
+    # Main area
     if st.session_state.interpolation_result:
-        result = st.session_state.interpolation_result
-        viz_tab, export_tab = st.tabs(["🎨 Visualization", "💾 Export"])
-       
-        with viz_tab:
-            component = st.selectbox("Component", ['c', 'phi', 'psi', 'material_proxy', 'potential_proxy'])
-            cmap_name = st.selectbox("Colormap", COLORMAP_OPTIONS['Sequential'])
-           
-            if component in result['fields']:
-                field = result['fields'][component]
-                L0_nm = result['target_params']['L0_nm']
-                fig = st.session_state.heatmap_visualizer.create_stress_heatmap(
-                    field, title=component, cmap_name=cmap_name,
-                    L0_nm=L0_nm, target_params=result['target_params']
+        res = st.session_state.interpolation_result
+        target = res['target_params']
+        L0_nm = target.get('L0_nm', 60.0)
+
+        tabs = st.tabs(["📊 Fields", "🧪 Derived Quantities", "⚖️ Weights", "💾 Export"])
+
+        with tabs[0]:
+            st.markdown('<h2 class="section-header">📊 Interpolated Fields</h2>', unsafe_allow_html=True)
+            field_choice = st.selectbox("Select field", ['c (concentration)', 'phi (shell)', 'psi (core)'])
+            field_map = {'c (concentration)': 'c', 'phi (shell)': 'phi', 'psi (core)': 'psi'}
+            field_key = field_map[field_choice]
+            field_data = res['fields'][field_key]
+
+            cmap_cat = st.selectbox("Colormap category", list(COLORMAP_OPTIONS.keys()), index=0)
+            cmap = st.selectbox("Colormap", COLORMAP_OPTIONS[cmap_cat], index=0)
+
+            fig = st.session_state.visualizer.create_field_heatmap(
+                field_data, title=f"Interpolated {field_choice}",
+                cmap_name=cmap, L0_nm=L0_nm, target_params=target,
+                colorbar_label=field_choice.split()[0]
+            )
+            st.pyplot(fig)
+
+            # Interactive version
+            if st.checkbox("Show interactive heatmap"):
+                fig_inter = st.session_state.visualizer.create_interactive_heatmap(
+                    field_data, title=f"Interpolated {field_choice}",
+                    cmap_name=cmap, L0_nm=L0_nm, target_params=target
                 )
-                st.pyplot(fig)
-           
-        with export_tab:
-            if st.button("📊 Export to JSON"):
-                export_data = st.session_state.results_manager.prepare_export_data(result, {})
-                json_str, filename = st.session_state.results_manager.export_to_json(export_data)
-                st.download_button("⬇️ Download JSON", json_str, filename, "application/json")
+                st.plotly_chart(fig_inter, use_container_width=True)
+
+        with tabs[1]:
+            st.markdown('<h2 class="section-header">🧪 Derived Quantities</h2>', unsafe_allow_html=True)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Shell thickness (nm)", f"{res['derived']['thickness_nm']:.3f}")
+
+            with col2:
+                st.metric("Number of sources", res['num_sources'])
+
+            st.subheader("Phase statistics")
+            stats = res['derived']['phase_stats']
+            cols = st.columns(3)
+            with cols[0]:
+                st.metric("Electrolyte", f"{stats['Electrolyte'][0]:.4f} (nd²)",
+                          help=f"Real area: {stats['Electrolyte'][1]*1e18:.2f} nm²")
+            with cols[1]:
+                st.metric("Ag shell", f"{stats['Ag'][0]:.4f} (nd²)",
+                          help=f"Real area: {stats['Ag'][1]*1e18:.2f} nm²")
+            with cols[2]:
+                st.metric("Cu core", f"{stats['Cu'][0]:.4f} (nd²)",
+                          help=f"Real area: {stats['Cu'][1]*1e18:.2f} nm²")
+
+            st.subheader("Material proxy (max(φ,ψ)+ψ)")
+            fig_mat = st.session_state.visualizer.create_field_heatmap(
+                res['derived']['material'], title="Material proxy",
+                cmap_name='Set1', L0_nm=L0_nm, target_params=target,
+                colorbar_label="Material", vmin=0, vmax=2
+            )
+            st.pyplot(fig_mat)
+
+            st.subheader("Potential proxy (-α·c)")
+            fig_pot = st.session_state.visualizer.create_field_heatmap(
+                res['derived']['potential'], title="Potential proxy",
+                cmap_name='RdBu_r', L0_nm=L0_nm, target_params=target,
+                colorbar_label="-α·c"
+            )
+            st.pyplot(fig_pot)
+
+        with tabs[2]:
+            st.markdown('<h2 class="section-header">⚖️ Attention Weights & Gate</h2>', unsafe_allow_html=True)
+            df_weights = pd.DataFrame({
+                'Source index': range(len(res['weights']['combined'])),
+                'Combined weight': res['weights']['combined'],
+                'Kernel weight': res['weights']['kernel'],
+                'Attention score': res['weights']['attention'],
+                'Gate': res['weights']['gate']
+            })
+            st.dataframe(df_weights.style.format("{:.4f}"))
+
+            fig_w, ax = plt.subplots(figsize=(10,5))
+            x = np.arange(len(res['weights']['combined']))
+            width = 0.2
+            ax.bar(x - 1.5*width, res['weights']['kernel'], width, label='Kernel', alpha=0.7)
+            ax.bar(x - 0.5*width, res['weights']['attention'], width, label='Attention', alpha=0.7)
+            ax.bar(x + 0.5*width, res['weights']['combined'], width, label='Combined', alpha=0.7)
+            ax.bar(x + 1.5*width, res['weights']['gate'], width, label='Gate', alpha=0.7)
+            ax.set_xlabel('Source index')
+            ax.set_ylabel('Weight')
+            ax.set_title('Comparison of weights')
+            ax.legend()
+            st.pyplot(fig_w)
+
+        with tabs[3]:
+            st.markdown('<h2 class="section-header">💾 Export Data</h2>', unsafe_allow_html=True)
+            col_exp1, col_exp2 = st.columns(2)
+            with col_exp1:
+                if st.button("📊 Export to JSON", use_container_width=True):
+                    export_data = st.session_state.results_manager.prepare_export_data(res, {})
+                    json_str, fname = st.session_state.results_manager.export_to_json(export_data)
+                    st.download_button("Download JSON", json_str, fname, "application/json")
+            with col_exp2:
+                if st.button("📈 Export to CSV", use_container_width=True):
+                    csv_str, fname = st.session_state.results_manager.export_to_csv(res)
+                    st.download_button("Download CSV", csv_str, fname, "text/csv")
+
+            st.markdown("#### Export preview")
+            st.json({
+                "target_params": res['target_params'],
+                "shape": res['shape'],
+                "num_sources": res['num_sources'],
+                "thickness_nm": res['derived']['thickness_nm']
+            })
+
+    else:
+        st.info("Load solutions and set target parameters in the sidebar, then click 'Perform Interpolation'.")
 
 if __name__ == "__main__":
     main()
