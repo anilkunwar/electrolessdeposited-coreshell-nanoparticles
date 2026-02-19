@@ -47,9 +47,9 @@ plt.rcParams.update({
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "numerical_solutions")
-VISUALIZATION_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "visualization_outputs")
+#VISUALIZATION_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "visualization_outputs")
 os.makedirs(SOLUTIONS_DIR, exist_ok=True)
-os.makedirs(VISUALIZATION_OUTPUT_DIR, exist_ok=True)
+#os.makedirs(VISUALIZATION_OUTPUT_DIR, exist_ok=True)
 
 COLORMAP_OPTIONS = {
     'Sequential': ['viridis', 'plasma', 'inferno', 'magma', 'cividis', 'turbo', 'hot'],
