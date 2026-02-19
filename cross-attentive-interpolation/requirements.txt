@@ -1,4 +1,5 @@
 streamlit
+matplotlib
 scipy
 plotly
 pyvista
@@ -7,3 +8,14 @@ meshio
 cupy-cuda12x  # For CUDA 11.x pip install cupy-cuda11x
 imageio
 imageio-ffmpeg
+seaborn
+torch
+h5py
+msgpack
+dill
+joblib
+scikit-learn
+pandas
+xgboost
+s3fs
+cmasher
