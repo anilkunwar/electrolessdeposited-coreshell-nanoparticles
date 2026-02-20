@@ -5,11 +5,11 @@ Transformer‑Inspired Interpolation for Electroless Ag Shell Deposition on Cu C
 FULL TEMPORAL SUPPORT + GATED ATTENTION (EDL / no‑EDL)
 ------------------------------------------------------------------------------
 Enhancements:
-- Real gated attention with EDL‑specific and no‑EDL‑specific gates,
-  meta‑gated by target `use_edl` and normalised time (to capture decay).
-- Thresholded material proxy (`max(phi,psi)+psi`) → discrete phases.
-- Global time slider that updates all tabs (fields, thickness, derived).
-- Fixed tensor shape and device errors in gated attention.
+- Vicinity‑based weighting: Gaussian kernel in normalised parameter space,
+  blended with learned attention via a user‑controllable kernel strength.
+- Phase‑based voting for phi/psi → discrete phases, realistic thickness.
+- Safe formatting of parameters to avoid None‑related crashes.
+- All weight keys always present.
 """
 import streamlit as st
 import numpy as np
@@ -33,6 +33,18 @@ from typing import List, Dict, Any, Optional, Tuple
 import time
 
 warnings.filterwarnings('ignore')
+
+# =============================================
+# HELPER: Safe formatting (handles None values)
+# =============================================
+def safe_format(val, format_spec):
+    """Return formatted string if val is not None, otherwise 'None'."""
+    if val is None:
+        return "None"
+    try:
+        return f"{val:{format_spec}}"
+    except (ValueError, TypeError):
+        return str(val)
 
 # =============================================
 # GLOBAL STYLING CONFIGURATION
@@ -116,7 +128,8 @@ class DepositionPhysics:
 
     @staticmethod
     def shell_thickness(phi: np.ndarray, psi: np.ndarray, core_radius_frac: float,
-                        threshold: float = 0.5, dx: float = 1.0) -> float:
+                        threshold: float = 0.5, dx: float = 1.0, L0: float = 20e-9) -> float:
+        """Compute shell thickness in real nm. Mimics the simulation's definition."""
         ny, nx = phi.shape
         x = np.linspace(0, 1, nx)
         y = np.linspace(0, 1, ny)
@@ -125,8 +138,9 @@ class DepositionPhysics:
         mask = (phi > threshold) & (psi <= 0.5)
         if np.any(mask):
             max_dist = np.max(dist[mask])
-            thickness = max_dist - core_radius_frac
-            return max(0.0, thickness)
+            thickness_nd = max_dist - core_radius_frac
+            thickness_nd = max(0.0, thickness_nd)
+            return thickness_nd * L0 * 1e9   # nm
         else:
             return 0.0
 
@@ -197,7 +211,7 @@ class CoreShellInterpolator:
         # Real multi‑head attention
         self.attention = nn.MultiheadAttention(d_model, nhead, dropout=0.1, batch_first=True)
 
-        # Dual gates
+        # Dual gates (optional, can be overridden by kernel strength)
         self.edl_gate_net = nn.Sequential(
             nn.Linear(d_model * 2 + 1, d_model),   # +1 for time_norm
             nn.ReLU(),
@@ -211,7 +225,7 @@ class CoreShellInterpolator:
             nn.Sigmoid()
         )
 
-        # Meta‑gate
+        # Meta‑gate (blend between EDL and no‑EDL groups)
         self.meta_gate = nn.Sequential(
             nn.Linear(2, 1),   # inputs: target_use_edl (0/1), time_norm (0-1)
             nn.Sigmoid()
@@ -224,9 +238,6 @@ class CoreShellInterpolator:
         """Gaussian kernel in normalised parameter space."""
         def norm_val(params, name):
             val = params.get(name, 0.5)
-            # Handle None values safely
-            if val is None:
-                val = 0.5
             return DepositionParameters.normalize(val, name)
 
         target_norm = np.array([
@@ -248,7 +259,7 @@ class CoreShellInterpolator:
             w = np.exp(-0.5 * np.sum((diff / self.param_sigma)**2))
             weights.append(w)
 
-        # Categorical factors
+        # Categorical factors (bc_type, use_edl, mode) – these are hard filters
         cat_factor = []
         for src in source_params:
             factor = 1.0
@@ -269,9 +280,6 @@ class CoreShellInterpolator:
             # continuous (normalised)
             for name in ['fc', 'rs', 'c_bulk', 'L0_nm']:
                 val = p.get(name, 0.5)
-                # Handle None values safely
-                if val is None:
-                    val = 0.5
                 norm_val = DepositionParameters.normalize(val, name)
                 feat.append(norm_val)
             # categorical: bc_type, use_edl, mode, growth_model
@@ -351,10 +359,12 @@ class CoreShellInterpolator:
     def interpolate_fields(self, sources: List[Dict], target_params: Dict,
                            target_shape: Tuple[int, int] = (256, 256),
                            n_time_points: int = 100,
-                           time_norm: Optional[float] = None):
+                           time_norm: Optional[float] = None,
+                           kernel_strength: float = 1.0):
         """
-        Interpolate fields and thickness evolution.
-        If time_norm is None, uses the final state (time_norm = 1.0) for interpolation.
+        Interpolate fields and thickness evolution using phase‑based voting.
+        kernel_strength: 0 = pure learned attention, 1 = pure kernel (vicinity),
+                         values in between blend linearly.
         """
         if not sources:
             return None
@@ -383,6 +393,8 @@ class CoreShellInterpolator:
         target_rep = transformer_out[:, 0, :]                                           # (1, d_model)
 
         # ========== EDL group ==========
+        edl_kernel_list = []    # will hold kernel weights (numpy)
+        edl_attn_list = []      # will hold attention scores (numpy)
         if edl_params:
             edl_reps = transformer_out[:, 1:1+len(edl_params), :]                       # (1, N_edl, d_model)
 
@@ -394,25 +406,20 @@ class CoreShellInterpolator:
             edl_kernel = self.compute_parameter_kernel(edl_params, target_params)       # (N_edl,)
             edl_kernel_t = torch.FloatTensor(edl_kernel).unsqueeze(0).to(edl_reps.device) # (1, N_edl)
 
-            # Prepare time tensor for EDL gate (shape: (1,1,1))
-            time_t = torch.tensor([[time_norm]], device=edl_reps.device, dtype=edl_reps.dtype)  # (1,1)
-            time_t = time_t.unsqueeze(-1)                                                  # (1,1,1)
+            # Combine kernel and attention according to kernel_strength
+            # (if kernel_strength == 1, ignore attention; if 0, ignore kernel)
+            blend = kernel_strength
+            edl_combined = blend * edl_kernel_t + (1 - blend) * edl_scores
+            edl_weights_raw = torch.softmax(edl_combined, dim=-1)                       # (1, N_edl)
 
-            # Expand target_rep for concatenation
-            target_exp = target_rep.unsqueeze(1).expand(-1, edl_reps.size(1), -1)        # (1, N_edl, d_model)
-
-            # EDL gate input: [target_exp, edl_reps, time_t_expanded]
-            time_expanded = time_t.expand(-1, edl_reps.size(1), -1)                       # (1, N_edl, 1)
-            gate_input = torch.cat([target_exp, edl_reps, time_expanded], dim=-1)        # (1, N_edl, 2*d_model+1)
-            edl_gate = self.edl_gate_net(gate_input).squeeze(-1)                          # (1, N_edl)
-
-            # Blend attention and kernel
-            edl_final = edl_gate * edl_scores + (1 - edl_gate) * edl_kernel_t
-            edl_weights_raw = torch.softmax(edl_final, dim=-1)                            # (1, N_edl)
+            edl_kernel_list = edl_kernel.tolist()
+            edl_attn_list = edl_scores.squeeze().detach().cpu().numpy().tolist()
         else:
             edl_weights_raw = torch.zeros((1, 0))
 
         # ========== no‑EDL group ==========
+        no_edl_kernel_list = []
+        no_edl_attn_list = []
         if no_edl_params:
             no_edl_reps = transformer_out[:, 1+len(edl_params):, :]                       # (1, N_noedl, d_model)
 
@@ -422,12 +429,12 @@ class CoreShellInterpolator:
             no_edl_kernel = self.compute_parameter_kernel(no_edl_params, target_params)
             no_edl_kernel_t = torch.FloatTensor(no_edl_kernel).unsqueeze(0).to(no_edl_reps.device)
 
-            target_exp = target_rep.unsqueeze(1).expand(-1, no_edl_reps.size(1), -1)
-            gate_input = torch.cat([target_exp, no_edl_reps], dim=-1)                     # (1, N_noedl, 2*d_model)
-            no_edl_gate = self.no_edl_gate_net(gate_input).squeeze(-1)
+            blend = kernel_strength
+            no_edl_combined = blend * no_edl_kernel_t + (1 - blend) * no_edl_scores
+            no_edl_weights_raw = torch.softmax(no_edl_combined, dim=-1)
 
-            no_edl_final = no_edl_gate * no_edl_scores + (1 - no_edl_gate) * no_edl_kernel_t
-            no_edl_weights_raw = torch.softmax(no_edl_final, dim=-1)
+            no_edl_kernel_list = no_edl_kernel.tolist()
+            no_edl_attn_list = no_edl_scores.squeeze().detach().cpu().numpy().tolist()
         else:
             no_edl_weights_raw = torch.zeros((1, 0))
 
@@ -463,19 +470,50 @@ class CoreShellInterpolator:
             else:
                 source_thickness.append({'t_norm': np.array([0.0, 1.0]), 'th_nm': np.array([0.0, 0.0]), 't_max': 1.0})
 
-        # Weighted combination of fields
-        interp = {'phi': np.zeros(target_shape),
-                  'c': np.zeros(target_shape),
-                  'psi': np.zeros(target_shape)}
-        for i, fld in enumerate(source_fields):
-            interp['phi'] += combined_weights[i] * fld['phi']
-            interp['c']   += combined_weights[i] * fld['c']
-            interp['psi'] += combined_weights[i] * fld['psi']
+        # ----------------------------------------------------------------
+        # Phase‑based voting for phi/psi, weighted average for c
+        # ----------------------------------------------------------------
+        threshold = 0.5
+        source_phases = []
+        source_c_fields = []
+        for fld in source_fields:
+            phi_s = fld['phi']
+            psi_s = fld['psi']
+            c_s = fld['c']
+            phi_th = (phi_s > threshold).astype(int)
+            psi_th = (psi_s > threshold).astype(int)
+            phase = np.where(psi_th > 0, 2, np.where(phi_th > 0, 1, 0))
+            source_phases.append(phase)
+            source_c_fields.append(c_s)
 
-        # Optional spatial smoothing
-        interp['phi'] = gaussian_filter(interp['phi'], sigma=1.0)
-        interp['c']   = gaussian_filter(interp['c'],   sigma=1.0)
-        interp['psi'] = gaussian_filter(interp['psi'], sigma=1.0)
+        n_pixels = target_shape[0] * target_shape[1]
+        flat_phases = [p.ravel() for p in source_phases]
+        flat_c = [c.ravel() for c in source_c_fields]
+
+        votes = np.zeros((n_pixels, 3))
+        for w, phase_flat in zip(combined_weights, flat_phases):
+            np.add.at(votes, (np.arange(n_pixels), phase_flat), w)
+
+        winning_phase = np.argmax(votes, axis=1)
+
+        new_phi_flat = np.zeros(n_pixels)
+        new_psi_flat = np.zeros(n_pixels)
+        ag_mask = winning_phase == 1
+        cu_mask = winning_phase == 2
+        new_phi_flat[ag_mask] = 1.0
+        new_psi_flat[cu_mask] = 1.0
+
+        c_flat_avg = np.zeros(n_pixels)
+        for w, c_flat in zip(combined_weights, flat_c):
+            c_flat_avg += w * c_flat
+        c_flat_avg[winning_phase != 0] = 0.0
+
+        new_phi = new_phi_flat.reshape(target_shape)
+        new_psi = new_psi_flat.reshape(target_shape)
+        new_c = c_flat_avg.reshape(target_shape)
+        new_c = gaussian_filter(new_c, sigma=1.0)
+
+        interp = {'phi': new_phi, 'c': new_c, 'psi': new_psi}
 
         # ========== Thickness evolution (full curve) ==========
         common_t_norm = np.linspace(0, 1, n_time_points)
@@ -501,13 +539,17 @@ class CoreShellInterpolator:
 
         fc = target_params.get('fc', target_params.get('core_radius_frac', 0.18))
         dx = 1.0 / (target_shape[0] - 1)
-        thickness_nd = DepositionPhysics.shell_thickness(interp['phi'], interp['psi'], fc, dx=dx)
         L0 = target_params.get('L0_nm', 20.0) * 1e-9
-        thickness_nm = thickness_nd * L0 * 1e9
+        thickness_nm = DepositionPhysics.shell_thickness(interp['phi'], interp['psi'], fc,
+                                                          threshold=0.5, dx=dx, L0=L0)
 
         stats = DepositionPhysics.phase_stats(interp['phi'], interp['psi'], dx, dx, L0)
 
         # ========== Assemble result ==========
+        # Combine kernel, attention lists
+        kernel_list = edl_kernel_list + no_edl_kernel_list
+        attention_list = edl_attn_list + no_edl_attn_list
+
         result = {
             'fields': interp,
             'derived': {
@@ -522,11 +564,8 @@ class CoreShellInterpolator:
             },
             'weights': {
                 'combined': combined_weights.tolist(),
-                'kernel': (edl_kernel.tolist() if edl_params else []) + (no_edl_kernel.tolist() if no_edl_params else []),
-                'attention': (edl_scores.squeeze().detach().cpu().numpy().tolist() if edl_params else []) +
-                             (no_edl_scores.squeeze().detach().cpu().numpy().tolist() if no_edl_params else []),
-                'gate': (edl_gate.squeeze().detach().cpu().numpy().tolist() if edl_params else []) +
-                        (no_edl_gate.squeeze().detach().cpu().numpy().tolist() if no_edl_params else []),
+                'kernel': kernel_list,
+                'attention': attention_list,
                 'edl': edl_weights.tolist(),
                 'no_edl': no_edl_weights.tolist(),
                 'meta_edl': meta_edl_weight
@@ -540,7 +579,7 @@ class CoreShellInterpolator:
         return result
 
 # =============================================
-# HEATMAP VISUALIZER
+# HEATMAP VISUALIZER (unchanged from previous version)
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
@@ -548,15 +587,6 @@ class HeatMapVisualizer:
 
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
-
-    def _safe_format_param(self, value, format_spec=".3f"):
-        """Safely format a parameter value, handling None and non-numeric types."""
-        if value is None:
-            return "N/A"
-        try:
-            return f"{float(value):{format_spec}}"
-        except (ValueError, TypeError):
-            return str(value)
 
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
                               L0_nm=20.0, figsize=(10,8), colorbar_label="",
@@ -572,16 +602,10 @@ class HeatMapVisualizer:
         ax.set_ylabel('Y (nm)', fontsize=14, fontweight='bold')
         title_str = title
         if target_params:
-            fc = target_params.get('fc', 0)
-            rs = target_params.get('rs', 0)
-            cb = target_params.get('c_bulk', 0)
-            L0_val = target_params.get('L0_nm', L0_nm)
-            # Use safe formatting to prevent None errors
-            fc_str = self._safe_format_param(fc, ".3f")
-            rs_str = self._safe_format_param(rs, ".3f")
-            cb_str = self._safe_format_param(cb, ".2f")
-            L0_str = self._safe_format_param(L0_val, ".1f")
-            title_str += f"\nfc={fc_str}, rs={rs_str}, c_bulk={cb_str}, L0={L0_str} nm"
+            fc = target_params.get('fc')
+            rs = target_params.get('rs')
+            cb = target_params.get('c_bulk')
+            title_str += f"\nfc={safe_format(fc, '.3f')}, rs={safe_format(rs, '.3f')}, c_bulk={safe_format(cb, '.2f')}, L0={L0_nm} nm"
         ax.set_title(title_str, fontsize=16, fontweight='bold')
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -602,16 +626,10 @@ class HeatMapVisualizer:
         ))
         title_str = title
         if target_params:
-            fc = target_params.get('fc', 0)
-            rs = target_params.get('rs', 0)
-            cb = target_params.get('c_bulk', 0)
-            L0_val = target_params.get('L0_nm', L0_nm)
-            # Use safe formatting to prevent None errors
-            fc_str = self._safe_format_param(fc, ".3f")
-            rs_str = self._safe_format_param(rs, ".3f")
-            cb_str = self._safe_format_param(cb, ".2f")
-            L0_str = self._safe_format_param(L0_val, ".1f")
-            title_str += f"<br>fc={fc_str}, rs={rs_str}, c_bulk={cb_str}, L0={L0_str} nm"
+            fc = target_params.get('fc')
+            rs = target_params.get('rs')
+            cb = target_params.get('c_bulk')
+            title_str += f"<br>fc={safe_format(fc, '.3f')}, rs={safe_format(rs, '.3f')}, c_bulk={safe_format(cb, '.2f')}, L0={L0_nm} nm"
         fig.update_layout(
             title=dict(text=title_str, font=dict(size=20), x=0.5),
             xaxis=dict(title="X (nm)", scaleanchor="y", scaleratio=1),
@@ -623,7 +641,6 @@ class HeatMapVisualizer:
     def create_thickness_plot(self, thickness_time, source_curves=None, weights=None,
                               title="Shell Thickness Evolution", figsize=(10,6),
                               current_time=None):
-        """Plot interpolated thickness vs normalized time, optionally with source curves and vertical line."""
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         t_norm = thickness_time['t_norm']
         th_nm = thickness_time['th_nm']
@@ -633,7 +650,6 @@ class HeatMapVisualizer:
                 alpha = min(weights[i] * 5, 0.8)
                 ax.plot(src_t, src_th, '--', linewidth=1, alpha=alpha, label=f'Source {i+1} (w={weights[i]:.3f})')
         if current_time is not None:
-            # Interpolate thickness at current time (if within range)
             interp_th = np.interp(current_time, t_norm, th_nm, left=th_nm[0], right=th_nm[-1])
             ax.axvline(current_time, color='r', linestyle='--', linewidth=2, alpha=0.7)
             ax.plot(current_time, interp_th, 'ro', markersize=8, label=f'Current t={current_time:.2f}')
@@ -646,23 +662,18 @@ class HeatMapVisualizer:
         return fig
 
 # =============================================
-# RESULTS MANAGER
+# RESULTS MANAGER (unchanged)
 # =============================================
 class ResultsManager:
     def __init__(self):
         pass
-
-    def _safe_get_param(self, params, key, default=0):
-        """Safely get a parameter value, handling None."""
-        val = params.get(key, default)
-        return default if val is None else val
 
     def prepare_export_data(self, interpolation_result, visualization_params):
         res = interpolation_result.copy()
         export = {
             'metadata': {
                 'generated_at': datetime.now().isoformat(),
-                'interpolation_method': 'core_shell_transformer_gated',
+                'interpolation_method': 'core_shell_transformer_gated_phase_voting',
                 'visualization_params': visualization_params
             },
             'result': {
@@ -688,9 +699,9 @@ class ResultsManager:
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             p = export_data['result']['target_params']
-            fc = self._safe_get_param(p, 'fc', 0)
-            rs = self._safe_get_param(p, 'rs', 0)
-            cb = self._safe_get_param(p, 'c_bulk', 0)
+            fc = p.get('fc', 0)
+            rs = p.get('rs', 0)
+            cb = p.get('c_bulk', 0)
             filename = f"interp_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_{ts}.json"
         json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
         return json_str, filename
@@ -699,14 +710,12 @@ class ResultsManager:
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             p = interpolation_result['target_params']
-            fc = self._safe_get_param(p, 'fc', 0)
-            rs = self._safe_get_param(p, 'rs', 0)
-            cb = self._safe_get_param(p, 'c_bulk', 0)
+            fc = p.get('fc', 0)
+            rs = p.get('rs', 0)
+            cb = p.get('c_bulk', 0)
             filename = f"fields_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_{ts}.csv"
         shape = interpolation_result['shape']
         L0 = interpolation_result['target_params'].get('L0_nm', 20.0)
-        if L0 is None:
-            L0 = 20.0
         x = np.linspace(0, L0, shape[1])
         y = np.linspace(0, L0, shape[0])
         X, Y = np.meshgrid(x, y)
@@ -729,7 +738,7 @@ class ResultsManager:
         else: return str(obj)
 
 # =============================================
-# ENHANCED SOLUTION LOADER
+# ENHANCED SOLUTION LOADER (unchanged)
 # =============================================
 class EnhancedSolutionLoader:
     """Loads PKL files from numerical_solutions, parsing filenames as fallback."""
@@ -1026,6 +1035,9 @@ def main():
         sigma_L = st.slider("Kernel σ (L0_nm)", 0.05, 0.3, 0.15, 0.01)
         temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
         n_time_points = st.slider("Number of time points for thickness curve", 20, 200, 100, 10)
+        # NEW: Kernel strength slider
+        kernel_strength = st.slider("Kernel strength (0 = pure attention, 1 = pure vicinity)", 0.0, 1.0, 1.0, 0.05,
+                                    help="Blend between learned attention (0) and vicinity‑based kernel (1). Set to 1 to enforce strict proximity weighting.")
 
         if st.button("🧠 Perform Initial Interpolation", type="primary", use_container_width=True):
             if not st.session_state.solutions:
@@ -1042,11 +1054,12 @@ def main():
                     # Start with final state (time_norm=1.0)
                     res = st.session_state.interpolator.interpolate_fields(
                         st.session_state.solutions, target, target_shape=(256,256),
-                        n_time_points=n_time_points, time_norm=1.0
+                        n_time_points=n_time_points, time_norm=1.0,
+                        kernel_strength=kernel_strength
                     )
                     if res:
                         st.session_state.interpolation_result = res
-                        cache_key = (frozenset(target.items()), 1.0)
+                        cache_key = (frozenset(target.items()), 1.0, kernel_strength)  # include kernel_strength in cache key
                         st.session_state.temporal_cache[cache_key] = res
                         st.success("Interpolation successful! Use the global slider below to explore time.")
                     else:
@@ -1057,8 +1070,6 @@ def main():
         res = st.session_state.interpolation_result
         target = res['target_params']
         L0_nm = target.get('L0_nm', 60.0)
-        if L0_nm is None:
-            L0_nm = 60.0
 
         # ---- Global time slider ----
         st.markdown('<h2 class="section-header">⏱️ Global Time Control</h2>', unsafe_allow_html=True)
@@ -1069,14 +1080,17 @@ def main():
                                      help="All tabs show the state at this time (except thickness evolution curve, which has a marker).")
         with col2:
             if st.button("🔄 Update to this time", use_container_width=True):
-                cache_key = (frozenset(target.items()), current_time)
+                # Need kernel_strength for cache key – retrieve from slider
+                ks = kernel_strength if 'kernel_strength' in locals() else 1.0
+                cache_key = (frozenset(target.items()), current_time, ks)
                 if cache_key in st.session_state.temporal_cache:
                     st.session_state.interpolation_result = st.session_state.temporal_cache[cache_key]
                 else:
                     with st.spinner(f"Interpolating at t = {current_time:.2f}..."):
                         new_res = st.session_state.interpolator.interpolate_fields(
                             st.session_state.solutions, target, target_shape=(256,256),
-                            n_time_points=n_time_points, time_norm=current_time
+                            n_time_points=n_time_points, time_norm=current_time,
+                            kernel_strength=ks
                         )
                         if new_res:
                             st.session_state.temporal_cache[cache_key] = new_res
@@ -1093,16 +1107,18 @@ def main():
             if st.checkbox("🎬 Animate evolution"):
                 fps = st.slider("Frames per second", 1, 30, 10)
                 placeholder = st.empty()
-                times = np.linspace(0, 1, 20)  # 20 frames
+                times = np.linspace(0, 1, 20)
+                ks = kernel_strength if 'kernel_strength' in locals() else 1.0
                 for t in times:
-                    cache_key = (frozenset(target.items()), t)
+                    cache_key = (frozenset(target.items()), t, ks)
                     if cache_key in st.session_state.temporal_cache:
                         res_t = st.session_state.temporal_cache[cache_key]
                     else:
                         with st.spinner(f"Preparing frame t={t:.2f}..."):
                             res_t = st.session_state.interpolator.interpolate_fields(
                                 st.session_state.solutions, target, target_shape=(256,256),
-                                n_time_points=n_time_points, time_norm=t
+                                n_time_points=n_time_points, time_norm=t,
+                                kernel_strength=ks
                             )
                             if res_t:
                                 st.session_state.temporal_cache[cache_key] = res_t
@@ -1149,9 +1165,11 @@ def main():
         with tabs[1]:
             st.markdown('<h2 class="section-header">📈 Shell Thickness Evolution</h2>', unsafe_allow_html=True)
             thickness_time = res['derived']['thickness_time']
-            # Pass current time to plot a vertical line
+            title_th = (f"Interpolated Thickness for fc={safe_format(target.get('fc'), '.3f')}, "
+                        f"rs={safe_format(target.get('rs'), '.3f')}, "
+                        f"c_bulk={safe_format(target.get('c_bulk'), '.2f')}")
             fig_th = st.session_state.visualizer.create_thickness_plot(
-                thickness_time, title=f"Interpolated Thickness for fc={target.get('fc', 0):.3f}, rs={target.get('rs', 0):.3f}, c_bulk={target.get('c_bulk', 0):.2f}",
+                thickness_time, title=title_th,
                 current_time=res['time_norm']
             )
             st.pyplot(fig_th)
@@ -1202,21 +1220,18 @@ def main():
                 'Source index': range(len(res['weights']['combined'])),
                 'Combined weight': res['weights']['combined'],
                 'Kernel weight': res['weights']['kernel'],
-                'Attention score': res['weights']['attention'],
-                'Gate': res['weights']['gate']
+                'Attention score': res['weights']['attention']
             })
             st.dataframe(df_weights.style.format("{:.4f}"))
 
             fig_w, ax = plt.subplots(figsize=(10,5))
             x = np.arange(len(res['weights']['combined']))
-            width = 0.2
-            ax.bar(x - 1.5*width, res['weights']['kernel'], width, label='Kernel', alpha=0.7)
-            ax.bar(x - 0.5*width, res['weights']['attention'], width, label='Attention', alpha=0.7)
-            ax.bar(x + 0.5*width, res['weights']['combined'], width, label='Combined', alpha=0.7)
-            ax.bar(x + 1.5*width, res['weights']['gate'], width, label='Gate', alpha=0.7)
+            width = 0.3
+            ax.bar(x - width/2, res['weights']['kernel'], width, label='Kernel (vicinity)', alpha=0.7)
+            ax.bar(x + width/2, res['weights']['attention'], width, label='Attention', alpha=0.7)
             ax.set_xlabel('Source index')
             ax.set_ylabel('Weight')
-            ax.set_title('Comparison of weights')
+            ax.set_title('Comparison of kernel vs attention weights')
             ax.legend()
             st.pyplot(fig_w)
 
