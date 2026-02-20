@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDITION)
-✓ FIXED: All st.color_picker widgets now use valid hex format (#RRGGBB)
+✅ FIXED: All st.color_picker widgets now use valid hex format (#RRGGBB)
+✅ FIXED: st.slider type mismatch for marker_line_width (int bounds vs float step)
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -623,7 +624,7 @@ class DesignConfig:
         self.line_width = 2.5
         self.marker_size = 8
         self.marker_symbol = "circle"
-        self.marker_line_width = 1
+        self.marker_line_width = 1.0  # Initialize as float for consistency
         self.marker_line_color = "#FFFFFF"  # ✅ HEX
 
         # Layout
@@ -1196,8 +1197,9 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 index=["circle", "square", "diamond", "cross", "x", "triangle-up", "triangle-down", "pentagon"].index(design.marker_symbol),
                 key=f"{key_prefix}_marker_symbol"
             )
+            # ✅ FIX: Changed min/max to floats (0.0, 3.0) to match step (0.5) and value type
             design.marker_line_width = st.slider(
-                "Marker Border", 0, 3, float(design.marker_line_width), 0.5,
+                "Marker Border", 0.0, 3.0, float(design.marker_line_width), 0.5,
                 key=f"{key_prefix}_marker_border"
             )
             design.marker_line_color = st.color_picker(
