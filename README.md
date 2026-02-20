@@ -91,7 +91,7 @@ Statistical Analytics:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/datavisual2-streamlit-red)](https://statistical-analytics-phase-field-simulations-datasets2.streamlit.app/) (Phase field simulations datasets, hierarchical chart from 2 dimensional to multi-dimensional, some parts not improved)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/datavisual3-streamlit-red)](https://statistical-analytics-phase-field-simulations-datasets3.streamlit.app/) (Phase field simulations datasets)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/datavisual3-streamlit-red)](https://statistical-analytics-phase-field-simulations-datasets3.streamlit.app/) (Phase field simulations datasets, enhanced visuals with more information)
 
 
 
