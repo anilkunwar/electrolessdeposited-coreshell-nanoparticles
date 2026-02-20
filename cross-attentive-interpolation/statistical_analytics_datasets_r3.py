@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDITION)
-✓ FIXED: Streamlit color_picker hex format error (was rgba, now #RRGGBB)
+✓ FIXED: AttributeError on st.color_picker with defensive color validation
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -10,6 +10,7 @@ Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDI
 ✓ Advanced design panel: grid, legend, hover, annotations, backgrounds
 ✓ All previous robustness fixes maintained (hashable checks, safe nunique, etc.)
 ✓ Hex-to-RGBA conversion helper for Plotly compatibility
+✓ Defensive color validation for st.color_picker widgets
 """
 import streamlit as st
 import numpy as np
@@ -94,8 +95,46 @@ div[data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 60
 st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designer Pro</h1>', unsafe_allow_html=True)
 
 # =============================================
-# ✅ HELPER: HEX TO RGBA CONVERSION FOR PLOTLY
+# ✅ HELPER: COLOR VALIDATION & CONVERSION
 # =============================================
+def is_valid_hex_color(color: str) -> bool:
+    """
+    Validate if a string is a valid hex color for st.color_picker.
+    
+    Args:
+        color: Color string to validate
+    
+    Returns:
+        True if valid hex (#RRGGBB or #RGB), False otherwise
+    """
+    if not isinstance(color, str):
+        return False
+    color = color.strip()
+    # Match #RRGGBB or #RGB format
+    return bool(re.match(r'^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$', color))
+
+def ensure_valid_hex_color(color: Any, default: str = "#000000") -> str:
+    """
+    Ensure a color value is valid hex for st.color_picker, with fallback.
+    
+    Args:
+        color: Any color value (may be invalid)
+        default: Default hex color to use if invalid
+    
+    Returns:
+        Valid hex color string
+    """
+    if is_valid_hex_color(color):
+        return color.upper()
+    # Try to extract hex from rgba/rgb strings
+    if isinstance(color, str):
+        # Extract from rgba(r, g, b, a) or rgb(r, g, b)
+        match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', color)
+        if match:
+            r, g, b = [int(x) for x in match.groups()]
+            return f"#{r:02x}{g:02x}{b:02x}".upper()
+    return default.upper()
+
 def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
     """
     Convert hex color (#RRGGBB or #RGB) to rgba format for Plotly.
@@ -132,7 +171,6 @@ def rgba_to_hex(rgba_string: str) -> str:
     """
     try:
         # Extract rgb values from rgba(r, g, b, a)
-        import re
         match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', rgba_string)
         if match:
             r, g, b = [int(x) for x in match.groups()]
@@ -583,30 +621,30 @@ class EnhancedPKLLoader:
 class DesignConfig:
     """Centralized design configuration for all visualizations."""
     def __init__(self):
-        # Typography
+        # Typography - ✅ ALL HEX FORMAT for st.color_picker compatibility
         self.title_font_family = "Inter, sans-serif"
         self.title_font_size = 20
         self.title_font_weight = "bold"
-        self.title_font_color = "#1E3A8A"  # ✅ HEX FORMAT for color_picker
+        self.title_font_color = "#1E3A8A"  # ✅ Valid hex
         self.label_font_family = "Inter, sans-serif"
         self.label_font_size = 12
-        self.label_font_color = "#374151"  # ✅ HEX FORMAT
+        self.label_font_color = "#374151"  # ✅ Valid hex
         self.tick_font_size = 10
-        self.tick_font_color = "#6B7280"  # ✅ HEX FORMAT
+        self.tick_font_color = "#6B7280"  # ✅ Valid hex
         
         # Colors - ✅ ALL HEX FORMAT for st.color_picker compatibility
         self.colormap_name = "Viridis"
         self.colormap_reversed = False
-        self.bg_color = "#F8FAFC"  # ✅ HEX (was rgba - THIS WAS THE BUG!)
-        self.plot_bg_color = "#FFFFFF"  # ✅ HEX
-        self.grid_color = "#CBD5E1"  # ✅ HEX
+        self.bg_color = "#F8FAFC"  # ✅ Valid hex (was rgba - THIS WAS THE BUG!)
+        self.plot_bg_color = "#FFFFFF"  # ✅ Valid hex
+        self.grid_color = "#CBD5E1"  # ✅ Valid hex
         
         # Lines & Markers
         self.line_width = 2.5
         self.marker_size = 8
         self.marker_symbol = "circle"
         self.marker_line_width = 1
-        self.marker_line_color = "#FFFFFF"  # ✅ HEX
+        self.marker_line_color = "#FFFFFF"  # ✅ Valid hex
         
         # Layout
         self.show_grid = True
@@ -1092,10 +1130,10 @@ class DatasetImprovementAnalyzer:
 
 
 # =============================================
-# ✅ DESIGN CONTROL PANEL COMPONENT (FIXED)
+# ✅ DESIGN CONTROL PANEL COMPONENT (FIXED WITH DEFENSIVE COLOR HANDLING)
 # =============================================
 def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> DesignConfig:
-    """Render interactive design controls in sidebar."""
+    """Render interactive design controls in sidebar with defensive color validation."""
     with st.expander("🎨 Visualization Design Controls", expanded=False):
         st.markdown("### Typography")
         col_t1, col_t2 = st.columns(2)
@@ -1109,8 +1147,12 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             design.title_font_weight = st.selectbox("Title Weight", ["normal", "bold", "bolder"], 
                                                    index=["normal", "bold", "bolder"].index(design.title_font_weight),
                                                    key=f"{key_prefix}_title_weight")
-            # ✅ FIXED: Use hex format for color_picker
-            design.title_font_color = st.color_picker("Title Color", design.title_font_color, key=f"{key_prefix}_title_color")
+            # ✅ FIXED: Defensive color validation before st.color_picker
+            safe_title_color = ensure_valid_hex_color(design.title_font_color, "#1E3A8A")
+            try:
+                design.title_font_color = st.color_picker("Title Color", safe_title_color, key=f"{key_prefix}_title_color")
+            except Exception:
+                design.title_font_color = "#1E3A8A"  # Fallback
         with col_t2:
             design.label_font_family = st.selectbox(
                 "Label Font", FONT_FAMILIES,
@@ -1119,7 +1161,12 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             )
             design.label_font_size = st.slider("Label Size", 8, 18, design.label_font_size, 1, key=f"{key_prefix}_label_size")
             design.tick_font_size = st.slider("Tick Size", 7, 14, design.tick_font_size, 1, key=f"{key_prefix}_tick_size")
-            design.label_font_color = st.color_picker("Label Color", design.label_font_color, key=f"{key_prefix}_label_color")
+            # ✅ FIXED: Defensive color validation before st.color_picker
+            safe_label_color = ensure_valid_hex_color(design.label_font_color, "#374151")
+            try:
+                design.label_font_color = st.color_picker("Label Color", safe_label_color, key=f"{key_prefix}_label_color")
+            except Exception:
+                design.label_font_color = "#374151"  # Fallback
         
         st.markdown("### Color & Colormap")
         col_c1, col_c2 = st.columns(2)
@@ -1142,9 +1189,15 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 preview_html += f'<div style="flex:1;background:{c};border-right:1px solid white"></div>'
             preview_html += '</div>'
             st.markdown(preview_html, unsafe_allow_html=True)
-            # ✅ FIXED: Use hex format for color_picker (was rgba - THIS WAS THE BUG!)
-            design.bg_color = st.color_picker("Background", design.bg_color, key=f"{key_prefix}_bg")
-            design.plot_bg_color = st.color_picker("Plot Background", design.plot_bg_color, key=f"{key_prefix}_plot_bg")
+            # ✅ FIXED: Defensive color validation for all color_picker widgets
+            safe_bg = ensure_valid_hex_color(design.bg_color, "#F8FAFC")
+            safe_plot_bg = ensure_valid_hex_color(design.plot_bg_color, "#FFFFFF")
+            try:
+                design.bg_color = st.color_picker("Background", safe_bg, key=f"{key_prefix}_bg")
+                design.plot_bg_color = st.color_picker("Plot Background", safe_plot_bg, key=f"{key_prefix}_plot_bg")
+            except Exception:
+                design.bg_color = "#F8FAFC"
+                design.plot_bg_color = "#FFFFFF"
         
         st.markdown("### Lines & Markers")
         col_l1, col_l2 = st.columns(2)
@@ -1159,13 +1212,22 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 key=f"{key_prefix}_marker_symbol"
             )
             design.marker_line_width = st.slider("Marker Border", 0, 3, design.marker_line_width, 0.5, key=f"{key_prefix}_marker_border")
-            design.marker_line_color = st.color_picker("Marker Border Color", design.marker_line_color, key=f"{key_prefix}_marker_color")
+            # ✅ FIXED: Defensive color validation
+            safe_marker_color = ensure_valid_hex_color(design.marker_line_color, "#FFFFFF")
+            try:
+                design.marker_line_color = st.color_picker("Marker Border Color", safe_marker_color, key=f"{key_prefix}_marker_color")
+            except Exception:
+                design.marker_line_color = "#FFFFFF"
         
         st.markdown("### Layout")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             design.show_grid = st.checkbox("Show Grid", value=design.show_grid, key=f"{key_prefix}_grid")
-            design.grid_color = st.color_picker("Grid Color", design.grid_color, key=f"{key_prefix}_grid_color")
+            safe_grid_color = ensure_valid_hex_color(design.grid_color, "#CBD5E1")
+            try:
+                design.grid_color = st.color_picker("Grid Color", safe_grid_color, key=f"{key_prefix}_grid_color")
+            except Exception:
+                design.grid_color = "#CBD5E1"
             design.plot_height = st.slider("Plot Height", 300, 800, design.plot_height, 50, key=f"{key_prefix}_height")
         with col_g2:
             design.legend_position = st.selectbox(
@@ -1204,8 +1266,27 @@ def main():
         st.session_state.metadata_df = pd.DataFrame()
     if 'selected_target' not in st.session_state:
         st.session_state.selected_target = 'thickness_nm'
+    # ✅ FIXED: Ensure design_config is properly initialized with new attributes
     if 'design_config' not in st.session_state:
         st.session_state.design_config = DesignConfig()
+    else:
+        # ✅ Migration: Fix existing design_config with missing/invalid color attributes
+        dc = st.session_state.design_config
+        # Ensure all color attributes exist and are valid hex
+        for attr in ['title_font_color', 'label_font_color', 'tick_font_color', 
+                     'bg_color', 'plot_bg_color', 'grid_color', 'marker_line_color']:
+            if not hasattr(dc, attr) or not is_valid_hex_color(getattr(dc, attr)):
+                defaults = {
+                    'title_font_color': '#1E3A8A',
+                    'label_font_color': '#374151',
+                    'tick_font_color': '#6B7280',
+                    'bg_color': '#F8FAFC',
+                    'plot_bg_color': '#FFFFFF',
+                    'grid_color': '#CBD5E1',
+                    'marker_line_color': '#FFFFFF'
+                }
+                setattr(dc, attr, defaults.get(attr, '#000000'))
+        st.session_state.design_config = dc
     
     # ================= SIDEBAR CONFIGURATION =================
     with st.sidebar:
