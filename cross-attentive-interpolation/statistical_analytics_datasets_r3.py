@@ -571,7 +571,8 @@ class DesignConfig:
     
     def get_font_config(self, element: str = "title") -> dict:
         if element == "title":
-            return dict(family=self.title_font_family, size=self.title_font_size, weight=self.title_font_weight, color=self.title_font_color)
+            # Removed 'weight' key – Plotly does not accept it
+            return dict(family=self.title_font_family, size=self.title_font_size, color=self.title_font_color)
         elif element == "label":
             return dict(family=self.label_font_family, size=self.label_font_size, color=self.label_font_color)
         else:
@@ -1565,6 +1566,7 @@ def main():
                 except Exception:
                     pass
             layout_updates = design.get_layout_updates()
+            # Fixed: removed invalid title_text argument
             fig_cov.update_layout(
                 **layout_updates,
                 height=320,
