@@ -74,6 +74,8 @@ Dataset generation codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata7-streamlit-red)](https://computational-method-data-generation7.streamlit.app/)  # developed upon pfm23 , length  in nm dimensions, pkl filename also includes the variables core to L ratio, shell thickness to core r and the characteristics domain length L0, same as R6, the initial shell delta r is reduced to 0.01 to account for realistic initial condition for larger core radius
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfmdata8-streamlit-red)](https://computational-method-data-generation8.streamlit.app/)  # developed upon pfm23 , length  in nm dimensions, pkl filename also includes the variables core to L ratio, shell thickness to core r and the characteristics domain length L0, same as R6, the initial shell delta r is accomodated in the range 0.005 <= dr <= 0.4 to account for realistic initial condition for larger core radius
+
 
 Transformer Inspired Attention Codes:
 
