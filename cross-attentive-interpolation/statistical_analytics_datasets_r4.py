@@ -9,9 +9,8 @@ Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDI
 ✅ FIXED: Duplicate 'height' argument in update_layout (now removed from layout_updates)
 ✅ FIXED: Deprecated use_container_width replaced with width='stretch' in all widgets
 ✅ FIXED: Explicit unique keys for all interactive widgets to avoid StreamlitDuplicateElementId
-✅ ENHANCED: Radar charts now use vibrant colors (sequential colormap or qualitative palettes)
-✅ ENHANCED: Legend toggle (show/hide) and outside placement option
-✅ ENHANCED: Optimal legend positioning to avoid overlap
+✅ FIXED: Radar chart colors – now properly converts any color format to rgba
+✅ FIXED: Radar chart legend – added toggle and non‑overlapping position
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -129,6 +128,37 @@ def rgba_to_hex(rgba_string: str) -> str:
     except Exception:
         pass
     return "#f8fafc"
+
+# =============================================
+# ✅ NEW HELPER: CONVERT ANY COLOR TO RGBA
+# =============================================
+def any_color_to_rgba(color: str, alpha: float = 0.7) -> str:
+    """
+    Convert any common color string (hex, rgb, rgba) to rgba format.
+    If parsing fails, returns a fallback gray.
+    """
+    color = color.strip()
+    # If already rgba, we can adjust alpha if needed, but keep as is for simplicity
+    if color.startswith('rgba'):
+        # Could modify alpha, but we'll leave as original to preserve user settings
+        return color
+    # If rgb(...)
+    if color.startswith('rgb'):
+        match = re.match(r'rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', color)
+        if match:
+            r, g, b = map(int, match.groups())
+            return f"rgba({r}, {g}, {b}, {alpha})"
+    # If hex
+    if color.startswith('#'):
+        return hex_to_rgba(color, alpha)
+    # Fallback: try plotly's hex conversion if possible (but it expects hex)
+    try:
+        rgb = px.colors.hex_to_rgb(color)  # only works for hex strings
+        return f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {alpha})"
+    except:
+        pass
+    # Ultimate fallback
+    return f"rgba(100, 100, 100, {alpha})"
 
 # =============================================
 # ✅ EXPANDED COLOR MAP LIBRARY (50+ OPTIONS WITH SAFE LOADING)
@@ -574,11 +604,6 @@ class DesignConfig:
         self.annotation_pos = (0.5, 0.95)
         self.annotation_font_size = 11
         self.annotation_font_color = "#374151"
-        # New attributes for enhanced radar
-        self.show_legend = True
-        self.legend_outside = False
-        self.color_mode = "Sequential"  # "Sequential" or "Qualitative"
-        self.qualitative_palette = "Plotly"  # one of px.colors.qualitative attributes
     
     def get_font_config(self, element: str = "title") -> dict:
         if element == "title":
@@ -593,27 +618,22 @@ class DesignConfig:
         cmap = get_colormap(self.colormap_name, n_colors)
         return cmap[::-1] if self.colormap_reversed else cmap
     
-    def get_qualitative_palette(self, n_colors: int) -> list:
-        """Get a qualitative palette from Plotly, cycling if needed."""
-        try:
-            palette = getattr(px.colors.qualitative, self.qualitative_palette)
-        except AttributeError:
-            palette = px.colors.qualitative.Plotly
-        # If we need more colors than available, cycle the palette
-        if n_colors > len(palette):
-            # Repeat the palette
-            return (palette * (n_colors // len(palette) + 1))[:n_colors]
-        return palette[:n_colors]
-    
     def get_layout_updates(self) -> dict:
-        # Base layout updates
-        layout = {
+        return {
             "font": self.get_font_config("label"),
             "title_font": self.get_font_config("title"),
             "plot_bgcolor": hex_to_rgba(self.plot_bg_color, 0.95),
             "paper_bgcolor": hex_to_rgba(self.bg_color, 0.98),
             "hovermode": self.hover_mode,
             "height": self.plot_height,
+            "legend": dict(
+                orientation="h" if "bottom" in self.legend_position else "v",
+                xanchor="right" if "right" in self.legend_position else "left",
+                yanchor="bottom" if "bottom" in self.legend_position else "top",
+                x=0.98 if "right" in self.legend_position else 0.02,
+                y=0.02 if "bottom" in self.legend_position else 0.98,
+                font=self.get_font_config("label")
+            ),
             "xaxis": dict(
                 showgrid=self.show_grid,
                 gridcolor=self.grid_color,
@@ -625,62 +645,6 @@ class DesignConfig:
                 tickfont=self.get_font_config("tick")
             )
         }
-        
-        # Legend configuration
-        if self.show_legend:
-            # Determine orientation and anchors
-            if self.legend_outside:
-                # Place legend outside the plotting area
-                if "bottom" in self.legend_position:
-                    y = -0.2
-                    yanchor = "top"
-                elif "top" in self.legend_position:
-                    y = 1.2
-                    yanchor = "bottom"
-                else:
-                    y = 0.5
-                    yanchor = "middle"
-                
-                if "right" in self.legend_position:
-                    x = 1.2
-                    xanchor = "left"
-                elif "left" in self.legend_position:
-                    x = -0.2
-                    xanchor = "right"
-                else:
-                    x = 0.5
-                    xanchor = "center"
-                
-                # Increase margins to accommodate outside legend
-                layout["margin"] = dict(l=80, r=80, t=80, b=80)
-            else:
-                # Place legend inside at corners
-                if "right" in self.legend_position:
-                    x = 0.98
-                    xanchor = "right"
-                else:
-                    x = 0.02
-                    xanchor = "left"
-                
-                if "bottom" in self.legend_position:
-                    y = 0.02
-                    yanchor = "bottom"
-                else:
-                    y = 0.98
-                    yanchor = "top"
-            
-            layout["legend"] = dict(
-                orientation="h" if "bottom" in self.legend_position or "top" in self.legend_position else "v",
-                x=x,
-                y=y,
-                xanchor=xanchor,
-                yanchor=yanchor,
-                font=self.get_font_config("label")
-            )
-        else:
-            layout["showlegend"] = False  # this is a top-level property, will be set separately
-        
-        return layout
 
 class RadarChartBuilder:
     @staticmethod
@@ -688,7 +652,8 @@ class RadarChartBuilder:
                                 selected_params: List[str],
                                 selected_indices: List[int],
                                 design: DesignConfig,
-                                normalize: bool = True) -> go.Figure:
+                                normalize: bool = True,
+                                show_legend: bool = True) -> go.Figure:
         if len(selected_indices) == 0 or len(selected_params) == 0:
             fig = go.Figure()
             fig.add_annotation(text="Select parameters and simulations to compare",
@@ -717,25 +682,14 @@ class RadarChartBuilder:
                 'thickness': clean_value_for_plotly(row.get('metric_thickness_nm', 0))
             })
         fig = go.Figure()
-        
-        # Determine colors based on color mode
-        n_traces = len(radar_data)
-        if design.color_mode == "Qualitative":
-            colors = design.get_qualitative_palette(n_traces)
-        else:
-            colors = design.get_colormap(n_traces)
-        
+        colors = design.get_colormap(len(radar_data))
         for i, entry in enumerate(radar_data):
-            fill_color = colors[i % len(colors)]
-            if fill_color.startswith('#'):
-                fill_color = hex_to_rgba(fill_color, 0.7)
-            elif not fill_color.startswith('rgba'):
-                try:
-                    rgb = px.colors.hex_to_rgb(fill_color)
-                    fill_color = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, 0.7)"
-                except Exception:
-                    fill_color = f"rgba(100, 100, 100, 0.7)"
-            line_color = fill_color.replace('0.7', '1.0').replace('0.75', '1.0')
+            # Convert the color from the colormap to rgba with alpha=0.7 for fill
+            base_color = colors[i % len(colors)]
+            fill_color = any_color_to_rgba(base_color, 0.7)
+            # Line color: same but with alpha=1.0 (opaque)
+            line_color = any_color_to_rgba(base_color, 1.0)
+            
             fig.add_trace(go.Scatterpolar(
                 r=entry['values'],
                 theta=selected_params,
@@ -756,13 +710,11 @@ class RadarChartBuilder:
                 ]),
                 customdata=[[entry['c_bulk'], entry['thickness']]] * len(selected_params)
             ))
-        
         layout_updates = design.get_layout_updates()
-        # Remove showlegend from layout_updates if present (it's a top-level property)
-        layout_updates.pop('showlegend', None)
+        # Override showlegend based on toggle
+        layout_updates['showlegend'] = show_legend
         fig.update_layout(
             **layout_updates,
-            showlegend=design.show_legend,
             polar=dict(
                 radialaxis=dict(
                     visible=True,
@@ -837,11 +789,8 @@ class SunburstBuilder:
             marker=dict(line=dict(width=design.line_width * 0.5, color='white'))
         )
         layout_updates = design.get_layout_updates()
-        # Remove showlegend if present
-        layout_updates.pop('showlegend', None)
         fig.update_layout(
             **layout_updates,
-            showlegend=design.show_legend,
             title=dict(
                 text=f"🌟 {value_col} Hierarchy: {' → '.join(dimensions)}",
                 x=0.5,
@@ -947,10 +896,8 @@ class SummaryTableBuilder:
             colorbar=dict(title_font=design.get_font_config("label"), tickfont=design.get_font_config("tick"))
         )
         layout_updates = design.get_layout_updates()
-        layout_updates.pop('showlegend', None)
         fig.update_layout(
             **layout_updates,
-            showlegend=design.show_legend,
             title=dict(text='📊 Parameter Correlation Matrix', x=0.5, font=design.get_font_config("title")),
             xaxis_title='Parameters',
             yaxis_title='Parameters',
@@ -1115,7 +1062,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
         with col_c1:
             cmap_names = list(COLORMAP_LIBRARY.keys())
             selected_cmap = st.selectbox(
-                "Sequential Colormap", cmap_names,
+                "Colormap", cmap_names,
                 index=cmap_names.index(design.colormap_name) if design.colormap_name in cmap_names else 0,
                 key=f"{key_prefix}_colormap"
             )
@@ -1173,7 +1120,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 key=f"{key_prefix}_marker_color"
             )
         
-        st.markdown("### Layout & Legend")
+        st.markdown("### Layout")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             design.show_grid = st.checkbox("Show Grid", value=design.show_grid, key=f"{key_prefix}_grid")
@@ -1186,7 +1133,6 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 "Plot Height", 300, 800, int(design.plot_height), 50,
                 key=f"{key_prefix}_height"
             ))
-            design.show_legend = st.checkbox("Show Legend", value=design.show_legend, key=f"{key_prefix}_show_legend")
         with col_g2:
             design.legend_position = st.selectbox(
                 "Legend Position",
@@ -1194,33 +1140,12 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 index=["bottom right", "bottom left", "top right", "top left", "center"].index(design.legend_position),
                 key=f"{key_prefix}_legend_pos"
             )
-            design.legend_outside = st.checkbox("Place legend outside", value=design.legend_outside, key=f"{key_prefix}_legend_outside")
             design.hover_mode = st.selectbox(
                 "Hover Mode",
                 ["closest", "x", "y", "x unified", "y unified"],
                 index=["closest", "x", "y", "x unified", "y unified"].index(design.hover_mode),
                 key=f"{key_prefix}_hover"
             )
-        
-        st.markdown("### Radar Color Mode")
-        col_m1, col_m2 = st.columns(2)
-        with col_m1:
-            design.color_mode = st.radio(
-                "Color mode for radar traces",
-                ["Sequential", "Qualitative"],
-                index=0 if design.color_mode == "Sequential" else 1,
-                key=f"{key_prefix}_color_mode"
-            )
-        with col_m2:
-            if design.color_mode == "Qualitative":
-                # List of qualitative palettes from Plotly
-                qual_palettes = [name for name in dir(px.colors.qualitative) if not name.startswith('_')]
-                design.qualitative_palette = st.selectbox(
-                    "Qualitative Palette",
-                    qual_palettes,
-                    index=qual_palettes.index(design.qualitative_palette) if design.qualitative_palette in qual_palettes else 0,
-                    key=f"{key_prefix}_qual_palette"
-                )
         
         st.markdown("### Annotations (Advanced)")
         design.annotation_enabled = st.checkbox(
@@ -1530,6 +1455,8 @@ def main():
                 selected_indices = sample_df.drop_duplicates().head(n_to_show)['idx'].tolist()
             else:
                 selected_indices = list(range(len(df)))
+            # ✅ NEW: Legend toggle
+            show_legend_radar = st.checkbox("Show Legend", value=True, key="radar_show_legend")
             compare_btn = st.button("🔄 Generate Comparison", use_container_width=True, key="radar_compare_btn")
         with col_r1:
             if available_params and compare_btn:
@@ -1539,7 +1466,8 @@ def main():
                         df, selected_params=available_params[:8],
                         selected_indices=selected_indices,
                         design=design,
-                        normalize=normalize_radar
+                        normalize=normalize_radar,
+                        show_legend=show_legend_radar
                     )
                     st.plotly_chart(fig, use_container_width=True, key="radar_chart")
                 except Exception as e:
@@ -1549,8 +1477,7 @@ def main():
 - **Each polygon** represents one simulation with customized styling
 - **Vertices** show normalized values for each parameter
 - **Line thickness & marker style** controlled in Design Panel
-- **Colormap** (sequential) or **Qualitative palette** (distinct colors) can be chosen
-- **Legend** can be toggled on/off and placed inside/outside
+- **Colormap** applied to distinguish simulations
 - Hover for detailed values with custom template
 """)
             elif not available_params:
@@ -1760,7 +1687,6 @@ def main():
 - **Typography controls**: Font family, size, weight, **color (hex)** for titles, labels, and ticks
 - **Line/Marker styling**: Adjust width, size, symbol, and border for all plot elements
 - **Layout options**: Grid visibility, legend positioning, hover modes, backgrounds
-- **New Radar Enhancements**: Choose between sequential colormap or qualitative palettes; toggle legend on/off; place legend inside or outside.
 **🌟 N-Dimensional Sunburst:**
 - Select 2-5 hierarchical dimensions (inner → outer rings)
 - Supports both categorical and binned continuous parameters
