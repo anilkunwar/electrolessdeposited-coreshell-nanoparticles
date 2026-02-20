@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDITION)
-✓ 50+ colormap options with safe loading
-✓ Full font/typography controls (size, family, weight, color, angle)
-✓ Line/curve/marker thickness controls for all visualizations
-✓ N-dimensional hierarchical sunburst (tertiary, quaternary, + dimensions)
+✓ FIXED: Streamlit color_picker hex format error (was rgba, now #RRGGBB)
+✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
+✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
+✓ Line/curve/marker thickness sliders for all visualizations
+✓ N-dimensional hierarchical sunburst (tertiary, quaternary, + dimensions supported)
 ✓ Advanced design panel: grid, legend, hover, annotations, backgrounds
-✓ All previous robustness fixes maintained
-✓ Safe colormap library with fallback handling
+✓ All previous robustness fixes maintained (hashable checks, safe nunique, etc.)
+✓ Hex-to-RGBA conversion helper for Plotly compatibility
 """
 import streamlit as st
 import numpy as np
@@ -93,13 +94,61 @@ div[data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 60
 st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designer Pro</h1>', unsafe_allow_html=True)
 
 # =============================================
-# ✅ SAFE COLOR MAP LIBRARY (50+ OPTIONS WITH ERROR HANDLING)
+# ✅ HELPER: HEX TO RGBA CONVERSION FOR PLOTLY
+# =============================================
+def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
+    """
+    Convert hex color (#RRGGBB or #RGB) to rgba format for Plotly.
+    
+    Args:
+        hex_color: Hex color string (e.g., "#f8fafc" or "#fff")
+        alpha: Opacity value (0.0 to 1.0)
+    
+    Returns:
+        RGBA string for Plotly (e.g., "rgba(248, 250, 252, 0.9)")
+    """
+    hex_color = hex_color.lstrip('#')
+    # Handle short hex format (#RGB -> #RRGGBB)
+    if len(hex_color) == 3:
+        hex_color = ''.join([c*2 for c in hex_color])
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        return f"rgba({r}, {g}, {b}, {alpha})"
+    except (ValueError, IndexError):
+        # Fallback to gray if conversion fails
+        return f"rgba(100, 100, 100, {alpha})"
+
+def rgba_to_hex(rgba_string: str) -> str:
+    """
+    Convert rgba string to hex format for st.color_picker.
+    
+    Args:
+        rgba_string: RGBA string (e.g., "rgba(248, 250, 252, 0.9)")
+    
+    Returns:
+        Hex color string (e.g., "#f8fafc")
+    """
+    try:
+        # Extract rgb values from rgba(r, g, b, a)
+        import re
+        match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', rgba_string)
+        if match:
+            r, g, b = [int(x) for x in match.groups()]
+            return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        pass
+    return "#f8fafc"  # Default fallback
+
+# =============================================
+# ✅ EXPANDED COLOR MAP LIBRARY (50+ OPTIONS WITH SAFE LOADING)
 # =============================================
 def build_safe_colormap_library() -> Dict[str, list]:
     """Build colormap library with safe attribute access and fallbacks."""
     colormap_lib = {}
     
-    # Plotly Sequential - Core (always available)
+    # Plotly Sequential - Core (always available in Plotly >= 4.0)
     core_sequential = [
         "Viridis", "Plasma", "Inferno", "Magma", "Cividis",
         "Turbo", "Rainbow", "Jet",
@@ -107,7 +156,7 @@ def build_safe_colormap_library() -> Dict[str, list]:
         "Peach", "Pinkyl", "Sunset", "Teal"
     ]
     
-    # Plotly Sequential - Extended (may not exist in older versions)
+    # Plotly Sequential - Extended (may not exist in older Plotly versions)
     extended_sequential = [
         "Aggrnyl", "Agsunset", "Deep", "Dense", "Electric",
         "Emrld", "Haline", "Ice", "Matter", "Oryel",
@@ -126,7 +175,7 @@ def build_safe_colormap_library() -> Dict[str, list]:
         "Dark24", "Bold", "Prism", "Safe", "Vivid", "Alphabet"
     ]
     
-    # Custom curated colormaps (always available)
+    # Custom curated colormaps (always available - defined locally)
     custom_colormaps = {
         "Ocean": ["#003f5c", "#2f4b7c", "#665191", "#a05195", "#d45087", "#f95d6a", "#ff7c43", "#ffa600"],
         "Forest": ["#2d5016", "#4a7c2e", "#6ba847", "#8fd464", "#b8f086", "#e0ffad"],
@@ -138,6 +187,51 @@ def build_safe_colormap_library() -> Dict[str, list]:
         "Pastel Dream": ["#ffd6e0", "#c7f0d8", "#fde4cf", "#c7ceea", "#f8e9a1"],
         "Monochrome": ["#000000", "#333333", "#666666", "#999999", "#cccccc", "#ffffff"],
         "Heat": ["#000080", "#0000ff", "#00ffff", "#00ff00", "#ffff00", "#ff0000", "#800000"],
+        "Ice Fire": ["#0066cc", "#3399ff", "#66ccff", "#ffffff", "#ffcc66", "#ff9933", "#cc3300"],
+        "Purple Haze": ["#1a0033", "#330066", "#660099", "#9933cc", "#cc66ff", "#ff99ff"],
+        "Golden Hour": ["#1a1a2e", "#2d2d44", "#4a4a6a", "#8b7355", "#d4a574", "#f5deb3"],
+        "Deep Sea": ["#001219", "#005f73", "#0a9396", "#94d2bd", "#e9d8a6", "#ee9b00"],
+        "Autumn": ["#582f0e", "#7f4f24", "#936639", "#a68a64", "#b6ad90", "#c2c5aa"],
+        "Spring": ["#606c38", "#283618", "#fefae0", "#dda15e", "#bc6c25"],
+        "Midnight": ["#03045e", "#0077b6", "#00b4d8", "#90e0ef", "#caf0f8"],
+        "Candy": ["#ffadad", "#ffd6a5", "#fdffb6", "#caffbf", "#9bf6ff", "#a0c4ff", "#bdb2ff"],
+        "Retro": ["#ef476f", "#ffd166", "#06d6a0", "#118ab2", "#073b4c"],
+        "Neon": ["#ff00ff", "#00ffff", "#ffff00", "#ff0080", "#8000ff"],
+        "Earth": ["#3d2b1f", "#5c4033", "#7f5539", "#9c6644", "#b87333", "#d4a574"],
+        "Galaxy": ["#0f0c29", "#302b63", "#24243e", "#4a3f7f", "#7b68a8", "#a890d0"],
+        "Mint": ["#00b894", "#00cec9", "#81ecec", "#a29bfe", "#dfe6e9"],
+        "Coral": ["#ff7675", "#fd79a8", "#fdcb6e", "#e17055", "#d63031"],
+        "Lavender": ["#6c5ce7", "#a29bfe", "#dfe6e9", "#b2bec3", "#636e72"],
+        "Sunrise": ["#fab1a0", "#ff7675", "#e84393", "#6c5ce7", "#00cec9"],
+        "Twilight": ["#2d3436", "#636e72", "#b2bec3", "#dfe6e9", "#fff"],
+        "Berry": ["#8e44ad", "#9b59b6", "#bb8fce", "#d7bde2", "#ebdef0"],
+        "Tropical": ["#00b894", "#00cec9", "#0984e3", "#6c5ce7", "#a29bfe"],
+        "Desert": ["#e17055", "#d63031", "#fdcb6e", "#f39c12", "#e67e22"],
+        "Arctic Ice": ["#74b9ff", "#0984e3", "#00cec9", "#81ecec", "#dff9fb"],
+        "Forest Night": ["#00b894", "#00a085", "#008871", "#006f5c", "#005747"],
+        "Urban": ["#2d3436", "#636e72", "#b2bec3", "#dfe6e9", "#fff"],
+        "Pastel Sunset": ["#ff9ff3", "#feca57", "#ff6b6b", "#48dbfb", "#1dd1a1"],
+        "Midnight Blue": ["#0c2461", "#1e3799", "#3c6382", "#5352ed", "#778beb"],
+        "Cherry Blossom": ["#ff9ff3", "#ff6b6b", "#feca57", "#54a0ff", "#5f27cd"],
+        "Ocean Breeze": ["#00d2d3", "#01a3a4", "#027b7b", "#035354", "#042c2c"],
+        "Golden Sunset": ["#ff9f43", "#ee5a24", "#c23616", "#8c7ae6", "#5352ed"],
+        "Mystic": ["#5f27cd", "#341f97", "#1e3799", "#0c2461", "#000"],
+        "Spring Meadow": ["#00b894", "#00cec9", "#81ecec", "#74b9ff", "#a29bfe"],
+        "Autumn Leaves": ["#e67e22", "#d35400", "#c0392b", "#96281b", "#7b241c"],
+        "Winter Frost": ["#dff9fb", "#c7ecee", "#95afc0", "#535c68", "#2f3542"],
+        "Summer Vibes": ["#ff9ff3", "#feca57", "#ff6b6b", "#48dbfb", "#1dd1a1"],
+        "Cosmic": ["#2c2c54", "#40407a", "#706fd3", "#47478b", "#1e1e2e"],
+        "Jungle": ["#2ed573", "#7bed9f", "#a3cb38", "#6ab04c", "#3c6382"],
+        "Volcanic": ["#ff4757", "#ff6b81", "#ff793f", "#ffa502", "#ffda79"],
+        "Aurora": ["#00d2d3", "#01a3a4", "#54a0ff", "#5f27cd", "#8e44ad"],
+        "Savanna": ["#ff9f43", "#ee5a24", "#c23616", "#8c7ae6", "#5352ed"],
+        "Glacier": ["#dff9fb", "#c7ecee", "#95afc0", "#535c68", "#2f3542"],
+        "Crimson": ["#eb4d4b", "#e55039", "#c23616", "#8c7ae6", "#5352ed"],
+        "Emerald": ["#00b894", "#00a085", "#008871", "#006f5c", "#005747"],
+        "Sapphire": ["#0984e3", "#0062cc", "#0047ab", "#003399", "#001a66"],
+        "Ruby": ["#eb4d4b", "#e55039", "#c23616", "#8c7ae6", "#5352ed"],
+        "Amethyst": ["#8e44ad", "#9b59b6", "#bb8fce", "#d7bde2", "#ebdef0"],
+        "Topaz": ["#f39c12", "#e67e22", "#d35400", "#c0392b", "#96281b"],
     }
     
     # Safely load Plotly sequential colormaps
@@ -151,7 +245,7 @@ def build_safe_colormap_library() -> Dict[str, list]:
         except Exception:
             pass
     
-    # Safely load extended sequential (may not exist in all versions)
+    # Safely load extended sequential (may not exist in all Plotly versions)
     for name in extended_sequential:
         try:
             if hasattr(px.colors.sequential, name):
@@ -180,11 +274,15 @@ def build_safe_colormap_library() -> Dict[str, list]:
     
     # Ensure we have at least one fallback
     if not colormap_lib:
-        colormap_lib["Viridis"] = px.colors.sequential.Viridis
+        try:
+            colormap_lib["Viridis"] = px.colors.sequential.Viridis
+        except Exception:
+            # Ultimate fallback: manually defined Viridis
+            colormap_lib["Viridis"] = ["#440154", "#482777", "#3f4a8a", "#31678e", "#26838f", "#1f9e89", "#6cce5a", "#bade2e", "#fde725"]
     
     return colormap_lib
 
-# Build the safe colormap library
+# Build the safe colormap library at module load
 COLORMAP_LIBRARY = build_safe_colormap_library()
 
 # Font families for typography controls
@@ -235,7 +333,7 @@ DERIVED_METRICS = {
     "convergence_metric": "L2 norm of field changes at final steps"
 }
 
-# Default radar colors with transparency
+# Default radar colors with transparency (using rgba format for Plotly)
 DEFAULT_RADAR_COLORS = [
     'rgba(31, 119, 180, 0.75)',
     'rgba(255, 127, 14, 0.75)',
@@ -306,7 +404,7 @@ def clean_value_for_plotly(val) -> float:
 def get_colormap(name: str, n_colors: int = None) -> list:
     """Retrieve colormap by name, optionally resampled to n_colors."""
     if name not in COLORMAP_LIBRARY:
-        return px.colors.sequential.Viridis
+        return COLORMAP_LIBRARY.get("Viridis", ["#440154", "#482777", "#3f4a8a", "#31678e", "#26838f", "#1f9e89", "#6cce5a", "#bade2e", "#fde725"])
     cmap = COLORMAP_LIBRARY[name]
     if n_colors and len(cmap) != n_colors:
         from plotly.colors import sample_colorscale
@@ -370,7 +468,7 @@ class EnhancedPKLLoader:
         metadata['growth_model'] = 'Model B' if 'ModelB' in filename else 'Model A'
         return metadata
     
-    def compute_derived_metrics(self, data: Dict) -> Dict[str, float]:
+    def compute_derived_metrics(self,  Dict) -> Dict[str, float]:
         """Compute derived metrics from simulation snapshots."""
         metrics = {}
         try:
@@ -485,35 +583,51 @@ class EnhancedPKLLoader:
 class DesignConfig:
     """Centralized design configuration for all visualizations."""
     def __init__(self):
+        # Typography
         self.title_font_family = "Inter, sans-serif"
         self.title_font_size = 20
         self.title_font_weight = "bold"
+        self.title_font_color = "#1E3A8A"  # ✅ HEX FORMAT for color_picker
         self.label_font_family = "Inter, sans-serif"
         self.label_font_size = 12
+        self.label_font_color = "#374151"  # ✅ HEX FORMAT
         self.tick_font_size = 10
+        self.tick_font_color = "#6B7280"  # ✅ HEX FORMAT
+        
+        # Colors - ✅ ALL HEX FORMAT for st.color_picker compatibility
         self.colormap_name = "Viridis"
         self.colormap_reversed = False
-        self.bg_color = "rgba(248, 250, 252, 0.9)"
+        self.bg_color = "#F8FAFC"  # ✅ HEX (was rgba - THIS WAS THE BUG!)
+        self.plot_bg_color = "#FFFFFF"  # ✅ HEX
+        self.grid_color = "#CBD5E1"  # ✅ HEX
+        
+        # Lines & Markers
         self.line_width = 2.5
         self.marker_size = 8
         self.marker_symbol = "circle"
         self.marker_line_width = 1
+        self.marker_line_color = "#FFFFFF"  # ✅ HEX
+        
+        # Layout
         self.show_grid = True
-        self.grid_color = "rgba(203, 213, 225, 0.4)"
         self.legend_position = "bottom right"
         self.hover_mode = "closest"
+        self.plot_height = 550
+        
+        # Advanced
         self.annotation_enabled = False
         self.annotation_text = ""
         self.annotation_pos = (0.5, 0.95)
+        self.annotation_font_size = 11
     
     def get_font_config(self, element: str = "title") -> dict:
         """Return font configuration dictionary."""
         if element == "title":
-            return dict(family=self.title_font_family, size=self.title_font_size, weight=self.title_font_weight)
+            return dict(family=self.title_font_family, size=self.title_font_size, weight=self.title_font_weight, color=self.title_font_color)
         elif element == "label":
-            return dict(family=self.label_font_family, size=self.label_font_size)
+            return dict(family=self.label_font_family, size=self.label_font_size, color=self.label_font_color)
         else:
-            return dict(family=self.label_font_family, size=self.tick_font_size)
+            return dict(family=self.label_font_family, size=self.tick_font_size, color=self.tick_font_color)
     
     def get_colormap(self, n_colors: int = None) -> list:
         """Get current colormap, optionally resampled."""
@@ -525,9 +639,11 @@ class DesignConfig:
         return {
             "font": self.get_font_config("label"),
             "title_font": self.get_font_config("title"),
-            "plot_bgcolor": self.bg_color,
-            "paper_bgcolor": "rgba(0,0,0,0)",
+            # ✅ Convert hex to rgba for Plotly transparency support
+            "plot_bgcolor": hex_to_rgba(self.plot_bg_color, 0.95),
+            "paper_bgcolor": hex_to_rgba(self.bg_color, 0.98),
             "hovermode": self.hover_mode,
+            "height": self.plot_height,
             "legend": dict(
                 orientation="h" if "bottom" in self.legend_position else "v",
                 xanchor="right" if "right" in self.legend_position else "left",
@@ -538,7 +654,7 @@ class DesignConfig:
             ),
             "xaxis": dict(
                 showgrid=self.show_grid,
-                gridcolor=self.grid_color,
+                gridcolor=self.grid_color,  # Plotly accepts hex for grid
                 tickfont=self.get_font_config("tick")
             ),
             "yaxis": dict(
@@ -594,10 +710,18 @@ class RadarChartBuilder:
         colors = design.get_colormap(len(radar_data))
         
         for i, entry in enumerate(radar_data):
+            # Convert hex to rgba for fill
             fill_color = colors[i % len(colors)]
-            if not fill_color.startswith('rgba'):
-                rgb = px.colors.hex_to_rgb(fill_color)
-                fill_color = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, 0.7)"
+            if fill_color.startswith('#'):
+                fill_color = hex_to_rgba(fill_color, 0.7)
+            elif not fill_color.startswith('rgba'):
+                try:
+                    rgb = px.colors.hex_to_rgb(fill_color)
+                    fill_color = f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, 0.7)"
+                except Exception:
+                    fill_color = f"rgba(100, 100, 100, 0.7)"
+            
+            # Line color (full opacity)
             line_color = fill_color.replace('0.7', '1.0').replace('0.75', '1.0')
             
             fig.add_trace(go.Scatterpolar(
@@ -610,7 +734,7 @@ class RadarChartBuilder:
                 marker=dict(
                     size=design.marker_size,
                     symbol=design.marker_symbol,
-                    line=dict(width=design.marker_line_width, color='white')
+                    line=dict(width=design.marker_line_width, color=design.marker_line_color)
                 ),
                 hovertemplate='<br>'.join([
                     '<b>%{theta}</b>: %{r:.3f}',
@@ -630,13 +754,9 @@ class RadarChartBuilder:
                     range=[0, 1] if normalize else None,
                     tickfont=design.get_font_config("tick")
                 ),
-                bgcolor=design.bg_color,
-                angularaxis=dict(
-                    tickfont=dict(**design.get_font_config("label"), size=design.label_font_size + 2)
-                )
+                bgcolor=hex_to_rgba(design.bg_color, 0.95)
             ),
             showlegend=True,
-            height=550,
             margin=dict(l=50, r=50, t=60, b=50),
             title=dict(
                 text="🎯 Parameter Space Comparison", 
@@ -652,11 +772,12 @@ class SunburstBuilder:
     
     @staticmethod
     def create_nd_hierarchy(df: pd.DataFrame,
-                           dimensions: List[str],
+                           dimensions: List[str],  # Can be 2, 3, 4, or more levels
                            value_col: str,
                            design: DesignConfig,
                            aggregation: str = 'mean') -> go.Figure:
         """Create sunburst chart supporting N hierarchical dimensions."""
+        # Validate dimensions exist
         valid_dims = [d for d in dimensions if d in df.columns]
         if len(valid_dims) < 2:
             fig = go.Figure()
@@ -664,11 +785,13 @@ class SunburstBuilder:
                              font=design.get_font_config("label"))
             return fig
         
+        # Prepare data with binning for continuous variables
         df_plot = df.copy()
         processed_dims = []
         
         for dim in valid_dims:
             if df_plot[dim].dtype in ['float64', 'float32'] and df_plot[dim].nunique() > 8:
+                # Bin continuous variables
                 try:
                     bins = min(5, df_plot[dim].nunique())
                     df_plot[f"{dim}_bin"] = pd.qcut(df_plot[dim], q=bins, labels=False, duplicates='drop')
@@ -682,25 +805,29 @@ class SunburstBuilder:
                 df_plot[f"{dim}_label"] = df_plot[dim].astype(str)
                 processed_dims.append(f"{dim}_label")
         
+        # Determine value column
         value_col_actual = f"metric_{value_col}" if f"metric_{value_col}" in df_plot.columns else value_col
         if value_col_actual not in df_plot.columns:
             value_col_actual = df_plot.select_dtypes(include=[np.number]).columns[0]
         
+        # Aggregate data
         agg_func = getattr(pd.Series, aggregation, 'mean')
         agg_data = df_plot.groupby(processed_dims)[value_col_actual].agg([aggregation, 'count']).reset_index()
         agg_data = agg_data[agg_data['count'] >= 1]
         
+        # Build sunburst with N levels
         fig = px.sunburst(
             agg_data,
-            path=processed_dims,
+            path=processed_dims,  # Supports arbitrary depth!
             values=aggregation,
             hover_data={'count': True, aggregation: ':.3f'},
             color=aggregation,
             color_continuous_scale=design.get_colormap(),
             title=f"🌟 {value_col} Hierarchy: {' → '.join(dimensions)}",
-            height=650
+            height=design.plot_height + 100
         )
         
+        # Apply design customizations
         fig.update_traces(
             hovertemplate='<br>'.join([
                 '<b>%{label}</b>',
@@ -732,7 +859,7 @@ class SunburstBuilder:
         candidates = []
         for c in safe_cols:
             if pd.api.types.is_numeric_dtype(df[c]):
-                if df[c].nunique() <= 50:
+                if df[c].nunique() <= 50:  # Reasonable for hierarchy
                     candidates.append(c)
             elif safe_nunique(df[c], max_unique=20):
                 candidates.append(c)
@@ -769,6 +896,7 @@ class SummaryTableBuilder:
         if target_var in table_df.columns and table_df[target_var].notna().any():
             table_df['rank'] = table_df[target_var].rank(pct=True)
         
+        # Format numeric columns
         for col in table_df.select_dtypes(include=[np.number]).columns:
             if table_df[col].notna().any():
                 if table_df[col].abs().max() > 1000 or table_df[col].abs().min() < 0.001:
@@ -832,7 +960,7 @@ class SummaryTableBuilder:
             aspect='auto',
             color_continuous_scale=design.get_colormap(),
             title='📊 Parameter Correlation Matrix',
-            height=550
+            height=design.plot_height
         )
         
         fig.update_traces(
@@ -964,7 +1092,7 @@ class DatasetImprovementAnalyzer:
 
 
 # =============================================
-# ✅ DESIGN CONTROL PANEL COMPONENT
+# ✅ DESIGN CONTROL PANEL COMPONENT (FIXED)
 # =============================================
 def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> DesignConfig:
     """Render interactive design controls in sidebar."""
@@ -981,6 +1109,8 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             design.title_font_weight = st.selectbox("Title Weight", ["normal", "bold", "bolder"], 
                                                    index=["normal", "bold", "bolder"].index(design.title_font_weight),
                                                    key=f"{key_prefix}_title_weight")
+            # ✅ FIXED: Use hex format for color_picker
+            design.title_font_color = st.color_picker("Title Color", design.title_font_color, key=f"{key_prefix}_title_color")
         with col_t2:
             design.label_font_family = st.selectbox(
                 "Label Font", FONT_FAMILIES,
@@ -989,6 +1119,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             )
             design.label_font_size = st.slider("Label Size", 8, 18, design.label_font_size, 1, key=f"{key_prefix}_label_size")
             design.tick_font_size = st.slider("Tick Size", 7, 14, design.tick_font_size, 1, key=f"{key_prefix}_tick_size")
+            design.label_font_color = st.color_picker("Label Color", design.label_font_color, key=f"{key_prefix}_label_color")
         
         st.markdown("### Color & Colormap")
         col_c1, col_c2 = st.columns(2)
@@ -1011,7 +1142,9 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 preview_html += f'<div style="flex:1;background:{c};border-right:1px solid white"></div>'
             preview_html += '</div>'
             st.markdown(preview_html, unsafe_allow_html=True)
+            # ✅ FIXED: Use hex format for color_picker (was rgba - THIS WAS THE BUG!)
             design.bg_color = st.color_picker("Background", design.bg_color, key=f"{key_prefix}_bg")
+            design.plot_bg_color = st.color_picker("Plot Background", design.plot_bg_color, key=f"{key_prefix}_plot_bg")
         
         st.markdown("### Lines & Markers")
         col_l1, col_l2 = st.columns(2)
@@ -1026,12 +1159,14 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 key=f"{key_prefix}_marker_symbol"
             )
             design.marker_line_width = st.slider("Marker Border", 0, 3, design.marker_line_width, 0.5, key=f"{key_prefix}_marker_border")
+            design.marker_line_color = st.color_picker("Marker Border Color", design.marker_line_color, key=f"{key_prefix}_marker_color")
         
         st.markdown("### Layout")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             design.show_grid = st.checkbox("Show Grid", value=design.show_grid, key=f"{key_prefix}_grid")
             design.grid_color = st.color_picker("Grid Color", design.grid_color, key=f"{key_prefix}_grid_color")
+            design.plot_height = st.slider("Plot Height", 300, 800, design.plot_height, 50, key=f"{key_prefix}_height")
         with col_g2:
             design.legend_position = st.selectbox(
                 "Legend Position",
@@ -1053,6 +1188,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             annot_x = st.slider("X Position %", 0, 100, int(design.annotation_pos[0]*100), 5, key=f"{key_prefix}_annot_x")
             annot_y = st.slider("Y Position %", 0, 100, int(design.annotation_pos[1]*100), 5, key=f"{key_prefix}_annot_y")
             design.annotation_pos = (annot_x/100, annot_y/100)
+            design.annotation_font_size = st.slider("Annotation Font Size", 8, 20, design.annotation_font_size, 1, key=f"{key_prefix}_annot_size")
     
     return design
 
@@ -1061,6 +1197,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
 # MAIN STREAMLIT APPLICATION
 # =============================================
 def main():
+    # Initialize session state
     if 'loader' not in st.session_state:
         st.session_state.loader = EnhancedPKLLoader(SOLUTIONS_DIR)
     if 'metadata_df' not in st.session_state:
@@ -1070,6 +1207,7 @@ def main():
     if 'design_config' not in st.session_state:
         st.session_state.design_config = DesignConfig()
     
+    # ================= SIDEBAR CONFIGURATION =================
     with st.sidebar:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 📁 Data Management")
@@ -1091,6 +1229,7 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
+        # Target Variable Selection
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🎯 Target Variable")
         available_targets = []
@@ -1107,9 +1246,11 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
+        # ✅ RENDER DESIGN CONTROL PANEL
         st.session_state.design_config = render_design_panel(st.session_state.design_config)
         st.divider()
         
+        # Analysis Controls
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### ⚙️ Analysis Settings")
         normalize_radar = st.checkbox("Normalize radar chart values", value=True)
@@ -1145,6 +1286,7 @@ def main():
             )
         st.markdown('</div>', unsafe_allow_html=True)
     
+    # ================= MAIN CONTENT AREA =================
     if st.session_state.metadata_df.empty:
         st.info("👈 Load PKL files from the sidebar to begin analysis")
         with st.expander("📋 Expected PKL File Structure"):
@@ -1168,6 +1310,7 @@ def main():
     target = st.session_state.selected_target
     design = st.session_state.design_config
     
+    # ================= HEADER METRICS =================
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -1194,6 +1337,7 @@ def main():
             st.metric("EDL Usage", "N/A")
     st.markdown('</div>', unsafe_allow_html=True)
     
+    # ================= TABS FOR DIFFERENT VISUALIZATIONS =================
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Summary Table",
         "🕸️ Radar Comparison", 
@@ -1202,6 +1346,7 @@ def main():
         "💡 Dataset Improvements"
     ])
     
+    # ===== TAB 1: SUMMARY TABLE =====
     with tab1:
         st.markdown("### 📋 Simulation Summary Table")
         with st.expander("🔍 Filter & Sort Options", expanded=False):
@@ -1255,6 +1400,7 @@ def main():
         else:
             st.warning("No data matches current filters")
     
+    # ===== TAB 2: RADAR CHART =====
     with tab2:
         st.markdown("### 🕸️ Multi-Parameter Radar Comparison")
         col_r1, col_r2 = st.columns([2, 1])
@@ -1303,12 +1449,15 @@ def main():
             elif not available_params:
                 st.info("👈 Select at least one parameter from the sidebar")
     
+    # ===== TAB 3: ✅ N-DIMENSIONAL SUNBURST =====
     with tab3:
         st.markdown("### 🌟 N-Dimensional Hierarchical Parameter Exploration")
         st.info("💡 Select 2-5 dimensions to build hierarchical sunburst charts (inner → outer rings)")
         
+        # Get available dimensions
         available_dims = SunburstBuilder.get_dimension_selector_options(df)
         
+        # Dimension selectors (support up to 5 levels)
         dim_selectors = []
         cols = st.columns(min(5, len(available_dims) + 1))
         for i in range(5):
@@ -1324,9 +1473,11 @@ def main():
                 )
                 dim_selectors.append(selected)
         
+        # Filter out empty/invalid selections and remove duplicates
         selected_dimensions = [d for d in dim_selectors if d and d != "No dimensions available"]
-        selected_dimensions = list(dict.fromkeys(selected_dimensions))
+        selected_dimensions = list(dict.fromkeys(selected_dimensions))  # Remove duplicates, preserve order
         
+        # Aggregation and value column
         col_agg, col_val = st.columns(2)
         with col_agg:
             agg_method = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "std"], index=0)
@@ -1346,6 +1497,7 @@ def main():
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
+                # Insights panel
                 with st.expander("📊 Key Insights from Hierarchy"):
                     if all(d in df.columns for d in selected_dimensions[:2]):
                         target_col = f'metric_{value_col}' if value_col in DERIVED_METRICS else value_col
@@ -1372,6 +1524,7 @@ def main():
         elif len(selected_dimensions) < 2:
             st.info("👈 Select at least 2 dimensions to build the hierarchy")
     
+    # ===== TAB 4: CORRELATIONS =====
     with tab4:
         st.markdown("### 🔗 Parameter Correlation Analysis")
         valid_corr_params = [p for p in correlation_params if p in available_corr_params] if 'available_corr_params' in locals() else []
@@ -1408,6 +1561,7 @@ def main():
         else:
             st.info("👈 Select valid numeric parameters in the sidebar for correlation analysis")
     
+    # ===== TAB 5: DATASET IMPROVEMENTS =====
     with tab5:
         st.markdown("### 💡 Dataset Improvement Recommendations")
         with st.spinner("Analyzing parameter coverage..."):
@@ -1431,6 +1585,7 @@ def main():
             else:
                 st.info("✅ Dataset appears well-covered! Consider exploring new parameter combinations or higher resolution.")
             
+            # Parameter coverage visualization with design controls
             st.markdown("#### 📊 Current Parameter Coverage")
             coverage_cols = [c for c in ['c_bulk', 'core_radius_frac', 'shell_thickness_frac', 'L0_nm', 'k0_nd'] if c in df.columns]
             if coverage_cols:
@@ -1459,6 +1614,7 @@ def main():
                 fig_cov.update_yaxes(title_text="Count", tickfont=design.get_font_config("tick"))
                 st.plotly_chart(fig_cov, use_container_width=True)
             
+            # Export experimental design
             st.markdown("#### 🎯 Export Next Experimental Design")
             with st.expander("Generate parameter suggestions for new simulations"):
                 if gaps:
@@ -1493,6 +1649,9 @@ def main():
 - Increasing spatial resolution for validation cases (Nx=512)
                     """)
     
+    # =============================================
+    # FOOTER & HELP
+    # =============================================
     st.divider()
     with st.expander("❓ Help & Documentation"):
         st.markdown(f"""
@@ -1500,7 +1659,7 @@ def main():
 
 **🎨 Design Panel Features:**
 - **50+ colormaps**: Viridis, Plasma, Inferno, Turbo, Rainbow, Jet, Cividis, and more
-- **Typography controls**: Font family, size, weight for titles, labels, and ticks
+- **Typography controls**: Font family, size, weight, color for titles, labels, and ticks
 - **Line/Marker styling**: Adjust width, size, symbol, and border for all plot elements
 - **Layout options**: Grid visibility, legend positioning, hover modes, backgrounds
 
