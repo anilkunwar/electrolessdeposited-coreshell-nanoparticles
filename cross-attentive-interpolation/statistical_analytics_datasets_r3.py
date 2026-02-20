@@ -5,6 +5,7 @@ Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDI
 ✅ FIXED: All st.color_picker widgets now use valid hex format (#RRGGBB)
 ✅ FIXED: st.slider type mismatch for marker_line_width (int bounds vs float step)
 ✅ FIXED: NameError - design variable scope issue in footer
+✅ FIXED: TypeError in fig_cov.update_layout (removed invalid title_text argument)
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -1566,8 +1567,8 @@ def main():
             layout_updates = design.get_layout_updates()
             fig_cov.update_layout(
                 **layout_updates,
-                height=320, showlegend=False,
-                title_text="Parameter Distribution (more uniform = better coverage)",
+                height=320,
+                showlegend=False,
                 bargap=0.15,
                 title=dict(text="Parameter Distribution", x=0.5, font=design.get_font_config("title"))
             )
