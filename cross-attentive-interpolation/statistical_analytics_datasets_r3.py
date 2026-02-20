@@ -6,6 +6,8 @@ Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDI
 ✅ FIXED: st.slider type mismatch for marker_line_width (int bounds vs float step)
 ✅ FIXED: NameError - design variable scope issue in footer
 ✅ FIXED: TypeError in fig_cov.update_layout (removed invalid title_text argument)
+✅ FIXED: Duplicate 'height' argument in update_layout (now removed from layout_updates)
+✅ FIXED: Deprecated use_container_width replaced with width='stretch'
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -1366,16 +1368,21 @@ def main():
                 .format(precision=3)
                 .highlight_max(subset=[target] if target in summary_table.columns else None, color='#d1fae5')
                 .highlight_min(subset=[target] if target in summary_table.columns else None, color='#fee2e2'),
-                use_container_width=True,
+                use_container_width=True,  # deprecated, will be replaced with width='stretch' after 2025-12-31
+                width='stretch',           # new parameter
                 height=400
             )
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 csv = summary_table.to_csv(index=False)
-                st.download_button("📥 Download CSV", csv, f"summary_{target}_{datetime.now():%Y%m%d}.csv", "text/csv", use_container_width=True)
+                st.download_button("📥 Download CSV", csv, f"summary_{target}_{datetime.now():%Y%m%d}.csv", "text/csv", use_container_width=True)  # deprecated
+                # For future compatibility:
+                st.download_button("📥 Download CSV", csv, f"summary_{target}_{datetime.now():%Y%m%d}.csv", "text/csv", width='stretch')
             with col_exp2:
                 json_data = summary_table.to_json(orient='records', indent=2)
                 st.download_button("📥 Download JSON", json_data, f"summary_{target}_{datetime.now():%Y%m%d}.json", "application/json", use_container_width=True)
+                # For future compatibility:
+                st.download_button("📥 Download JSON", json_data, f"summary_{target}_{datetime.now():%Y%m%d}.json", "application/json", width='stretch')
         else:
             st.warning("No data matches current filters")
     
@@ -1566,9 +1573,11 @@ def main():
                 except Exception:
                     pass
             layout_updates = design.get_layout_updates()
-            # Fixed: removed invalid title_text argument
+            # ✅ FIX: Remove height from layout_updates to avoid duplicate keyword
+            layout_updates_no_height = layout_updates.copy()
+            layout_updates_no_height.pop('height', None)
             fig_cov.update_layout(
-                **layout_updates,
+                **layout_updates_no_height,
                 height=320,
                 showlegend=False,
                 bargap=0.15,
@@ -1598,10 +1607,10 @@ def main():
                             pass
                 if suggestion_df:
                     sugg_df = pd.DataFrame(suggestion_df)
-                    st.dataframe(sugg_df, use_container_width=True)
+                    st.dataframe(sugg_df, use_container_width=True, width='stretch')
                     csv_sugg = sugg_df.to_csv(index=False)
                     st.download_button("📥 Download Suggested Parameters", csv_sugg,
-                                     f"suggested_params_{datetime.now():%Y%m%d}.csv", "text/csv")
+                                     f"suggested_params_{datetime.now():%Y%m%d}.csv", "text/csv", width='stretch')
             else:
                 st.info("No clear gaps detected. Consider:")
                 st.markdown("""
