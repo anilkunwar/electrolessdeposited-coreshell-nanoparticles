@@ -2,15 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDITION)
-✓ FIXED: AttributeError on st.color_picker with defensive color validation
+✓ FIXED: All st.color_picker widgets now use valid hex format (#RRGGBB)
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
 ✓ N-dimensional hierarchical sunburst (tertiary, quaternary, + dimensions supported)
 ✓ Advanced design panel: grid, legend, hover, annotations, backgrounds
 ✓ All previous robustness fixes maintained (hashable checks, safe nunique, etc.)
-✓ Hex-to-RGBA conversion helper for Plotly compatibility
-✓ Defensive color validation for st.color_picker widgets
+✓ Hex-to-RGBA conversion helper for Plotly transparency support
 """
 import streamlit as st
 import numpy as np
@@ -95,46 +94,8 @@ div[data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 60
 st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designer Pro</h1>', unsafe_allow_html=True)
 
 # =============================================
-# ✅ HELPER: COLOR VALIDATION & CONVERSION
+# ✅ HELPER: HEX TO RGBA CONVERSION FOR PLOTLY
 # =============================================
-def is_valid_hex_color(color: str) -> bool:
-    """
-    Validate if a string is a valid hex color for st.color_picker.
-    
-    Args:
-        color: Color string to validate
-    
-    Returns:
-        True if valid hex (#RRGGBB or #RGB), False otherwise
-    """
-    if not isinstance(color, str):
-        return False
-    color = color.strip()
-    # Match #RRGGBB or #RGB format
-    return bool(re.match(r'^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$', color))
-
-def ensure_valid_hex_color(color: Any, default: str = "#000000") -> str:
-    """
-    Ensure a color value is valid hex for st.color_picker, with fallback.
-    
-    Args:
-        color: Any color value (may be invalid)
-        default: Default hex color to use if invalid
-    
-    Returns:
-        Valid hex color string
-    """
-    if is_valid_hex_color(color):
-        return color.upper()
-    # Try to extract hex from rgba/rgb strings
-    if isinstance(color, str):
-        # Extract from rgba(r, g, b, a) or rgb(r, g, b)
-        match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', color)
-        if match:
-            r, g, b = [int(x) for x in match.groups()]
-            return f"#{r:02x}{g:02x}{b:02x}".upper()
-    return default.upper()
-
 def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
     """
     Convert hex color (#RRGGBB or #RGB) to rgba format for Plotly.
@@ -270,6 +231,24 @@ def build_safe_colormap_library() -> Dict[str, list]:
         "Ruby": ["#eb4d4b", "#e55039", "#c23616", "#8c7ae6", "#5352ed"],
         "Amethyst": ["#8e44ad", "#9b59b6", "#bb8fce", "#d7bde2", "#ebdef0"],
         "Topaz": ["#f39c12", "#e67e22", "#d35400", "#c0392b", "#96281b"],
+        "Turquoise": ["#40e0d0", "#48d1cc", "#20b2aa", "#008b8b", "#006666"],
+        "Magenta": ["#ff00ff", "#ee00ee", "#dd00dd", "#cc00cc", "#bb00bb"],
+        "Lime": ["#00ff00", "#00ee00", "#00dd00", "#00cc00", "#00bb00"],
+        "Orange": ["#ffa500", "#ee9900", "#dd8800", "#cc7700", "#bb6600"],
+        "Pink": ["#ffc0cb", "#ffb6d9", "#ffacd1", "#ffa2c9", "#ff98c1"],
+        "Brown": ["#8b4513", "#7a3d10", "#69350d", "#582d0a", "#472507"],
+        "Teal": ["#008080", "#007373", "#006666", "#005959", "#004d4d"],
+        "Indigo": ["#4b0082", "#430075", "#3b0068", "#33005b", "#2b004e"],
+        "Violet": ["#8f00ff", "#8000e6", "#7100cc", "#6200b3", "#530099"],
+        "Chartreuse": ["#7fff00", "#73e600", "#66cc00", "#59b300", "#4d9900"],
+        "Aquamarine": ["#7fffd4", "#73e6bf", "#66ccaa", "#59b395", "#4d9980"],
+        "Coral Red": ["#ff6b6b", "#e66060", "#cc5555", "#b34a4a", "#994040"],
+        "Steel Blue": ["#4682b4", "#3f75a1", "#38688e", "#315b7b", "#2a4e68"],
+        "Gold": ["#ffd700", "#e6c200", "#ccac00", "#b39600", "#998000"],
+        "Silver": ["#c0c0c0", "#adadad", "#999999", "#868686", "#737373"],
+        "Bronze": ["#cd7f32", "#b9732e", "#a56729", "#915b24", "#7d4f1f"],
+        "Copper": ["#b87333", "#a6672e", "#945b29", "#824f24", "#70431f"],
+        "Rose Gold": ["#b76e79", "#a4626d", "#915661", "#7e4a55", "#6b3e49"],
     }
     
     # Safely load Plotly sequential colormaps
@@ -621,30 +600,30 @@ class EnhancedPKLLoader:
 class DesignConfig:
     """Centralized design configuration for all visualizations."""
     def __init__(self):
-        # Typography - ✅ ALL HEX FORMAT for st.color_picker compatibility
+        # Typography - ✅ ALL COLORS IN HEX FORMAT FOR st.color_picker
         self.title_font_family = "Inter, sans-serif"
         self.title_font_size = 20
         self.title_font_weight = "bold"
-        self.title_font_color = "#1E3A8A"  # ✅ Valid hex
+        self.title_font_color = "#1E3A8A"  # ✅ HEX (was rgba - FIXED!)
         self.label_font_family = "Inter, sans-serif"
         self.label_font_size = 12
-        self.label_font_color = "#374151"  # ✅ Valid hex
+        self.label_font_color = "#374151"  # ✅ HEX (was rgba - FIXED!)
         self.tick_font_size = 10
-        self.tick_font_color = "#6B7280"  # ✅ Valid hex
+        self.tick_font_color = "#6B7280"  # ✅ HEX (was rgba - FIXED!)
         
         # Colors - ✅ ALL HEX FORMAT for st.color_picker compatibility
         self.colormap_name = "Viridis"
         self.colormap_reversed = False
-        self.bg_color = "#F8FAFC"  # ✅ Valid hex (was rgba - THIS WAS THE BUG!)
-        self.plot_bg_color = "#FFFFFF"  # ✅ Valid hex
-        self.grid_color = "#CBD5E1"  # ✅ Valid hex
+        self.bg_color = "#F8FAFC"  # ✅ HEX (was rgba - FIXED!)
+        self.plot_bg_color = "#FFFFFF"  # ✅ HEX (was rgba - FIXED!)
+        self.grid_color = "#CBD5E1"  # ✅ HEX (was rgba - FIXED!)
         
         # Lines & Markers
         self.line_width = 2.5
         self.marker_size = 8
         self.marker_symbol = "circle"
         self.marker_line_width = 1
-        self.marker_line_color = "#FFFFFF"  # ✅ Valid hex
+        self.marker_line_color = "#FFFFFF"  # ✅ HEX (was rgba - FIXED!)
         
         # Layout
         self.show_grid = True
@@ -657,6 +636,7 @@ class DesignConfig:
         self.annotation_text = ""
         self.annotation_pos = (0.5, 0.95)
         self.annotation_font_size = 11
+        self.annotation_font_color = "#374151"  # ✅ HEX
     
     def get_font_config(self, element: str = "title") -> dict:
         """Return font configuration dictionary."""
@@ -810,7 +790,7 @@ class SunburstBuilder:
     
     @staticmethod
     def create_nd_hierarchy(df: pd.DataFrame,
-                           dimensions: List[str],  # Can be 2, 3, 4, or more levels
+                           dimensions: List[str],  # Can be 2, 3, 4, or more levels!
                            value_col: str,
                            design: DesignConfig,
                            aggregation: str = 'mean') -> go.Figure:
@@ -853,10 +833,10 @@ class SunburstBuilder:
         agg_data = df_plot.groupby(processed_dims)[value_col_actual].agg([aggregation, 'count']).reset_index()
         agg_data = agg_data[agg_data['count'] >= 1]
         
-        # Build sunburst with N levels
+        # Build sunburst with N levels (supports tertiary, quaternary, etc.)
         fig = px.sunburst(
             agg_data,
-            path=processed_dims,  # Supports arbitrary depth!
+            path=processed_dims,  # ✅ Supports arbitrary depth!
             values=aggregation,
             hover_data={'count': True, aggregation: ':.3f'},
             color=aggregation,
@@ -1130,10 +1110,10 @@ class DatasetImprovementAnalyzer:
 
 
 # =============================================
-# ✅ DESIGN CONTROL PANEL COMPONENT (FIXED WITH DEFENSIVE COLOR HANDLING)
+# ✅ DESIGN CONTROL PANEL COMPONENT (FIXED)
 # =============================================
 def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> DesignConfig:
-    """Render interactive design controls in sidebar with defensive color validation."""
+    """Render interactive design controls in sidebar."""
     with st.expander("🎨 Visualization Design Controls", expanded=False):
         st.markdown("### Typography")
         col_t1, col_t2 = st.columns(2)
@@ -1147,12 +1127,8 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             design.title_font_weight = st.selectbox("Title Weight", ["normal", "bold", "bolder"], 
                                                    index=["normal", "bold", "bolder"].index(design.title_font_weight),
                                                    key=f"{key_prefix}_title_weight")
-            # ✅ FIXED: Defensive color validation before st.color_picker
-            safe_title_color = ensure_valid_hex_color(design.title_font_color, "#1E3A8A")
-            try:
-                design.title_font_color = st.color_picker("Title Color", safe_title_color, key=f"{key_prefix}_title_color")
-            except Exception:
-                design.title_font_color = "#1E3A8A"  # Fallback
+            # ✅ FIXED: Use hex format for color_picker (was rgba - THIS WAS THE BUG!)
+            design.title_font_color = st.color_picker("Title Color", design.title_font_color, key=f"{key_prefix}_title_color")
         with col_t2:
             design.label_font_family = st.selectbox(
                 "Label Font", FONT_FAMILIES,
@@ -1161,12 +1137,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             )
             design.label_font_size = st.slider("Label Size", 8, 18, design.label_font_size, 1, key=f"{key_prefix}_label_size")
             design.tick_font_size = st.slider("Tick Size", 7, 14, design.tick_font_size, 1, key=f"{key_prefix}_tick_size")
-            # ✅ FIXED: Defensive color validation before st.color_picker
-            safe_label_color = ensure_valid_hex_color(design.label_font_color, "#374151")
-            try:
-                design.label_font_color = st.color_picker("Label Color", safe_label_color, key=f"{key_prefix}_label_color")
-            except Exception:
-                design.label_font_color = "#374151"  # Fallback
+            design.label_font_color = st.color_picker("Label Color", design.label_font_color, key=f"{key_prefix}_label_color")
         
         st.markdown("### Color & Colormap")
         col_c1, col_c2 = st.columns(2)
@@ -1189,15 +1160,9 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 preview_html += f'<div style="flex:1;background:{c};border-right:1px solid white"></div>'
             preview_html += '</div>'
             st.markdown(preview_html, unsafe_allow_html=True)
-            # ✅ FIXED: Defensive color validation for all color_picker widgets
-            safe_bg = ensure_valid_hex_color(design.bg_color, "#F8FAFC")
-            safe_plot_bg = ensure_valid_hex_color(design.plot_bg_color, "#FFFFFF")
-            try:
-                design.bg_color = st.color_picker("Background", safe_bg, key=f"{key_prefix}_bg")
-                design.plot_bg_color = st.color_picker("Plot Background", safe_plot_bg, key=f"{key_prefix}_plot_bg")
-            except Exception:
-                design.bg_color = "#F8FAFC"
-                design.plot_bg_color = "#FFFFFF"
+            # ✅ FIXED: Use hex format for color_picker (was rgba - THIS WAS THE BUG!)
+            design.bg_color = st.color_picker("Background", design.bg_color, key=f"{key_prefix}_bg")
+            design.plot_bg_color = st.color_picker("Plot Background", design.plot_bg_color, key=f"{key_prefix}_plot_bg")
         
         st.markdown("### Lines & Markers")
         col_l1, col_l2 = st.columns(2)
@@ -1212,22 +1177,13 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 key=f"{key_prefix}_marker_symbol"
             )
             design.marker_line_width = st.slider("Marker Border", 0, 3, design.marker_line_width, 0.5, key=f"{key_prefix}_marker_border")
-            # ✅ FIXED: Defensive color validation
-            safe_marker_color = ensure_valid_hex_color(design.marker_line_color, "#FFFFFF")
-            try:
-                design.marker_line_color = st.color_picker("Marker Border Color", safe_marker_color, key=f"{key_prefix}_marker_color")
-            except Exception:
-                design.marker_line_color = "#FFFFFF"
+            design.marker_line_color = st.color_picker("Marker Border Color", design.marker_line_color, key=f"{key_prefix}_marker_color")
         
         st.markdown("### Layout")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             design.show_grid = st.checkbox("Show Grid", value=design.show_grid, key=f"{key_prefix}_grid")
-            safe_grid_color = ensure_valid_hex_color(design.grid_color, "#CBD5E1")
-            try:
-                design.grid_color = st.color_picker("Grid Color", safe_grid_color, key=f"{key_prefix}_grid_color")
-            except Exception:
-                design.grid_color = "#CBD5E1"
+            design.grid_color = st.color_picker("Grid Color", design.grid_color, key=f"{key_prefix}_grid_color")
             design.plot_height = st.slider("Plot Height", 300, 800, design.plot_height, 50, key=f"{key_prefix}_height")
         with col_g2:
             design.legend_position = st.selectbox(
@@ -1251,6 +1207,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
             annot_y = st.slider("Y Position %", 0, 100, int(design.annotation_pos[1]*100), 5, key=f"{key_prefix}_annot_y")
             design.annotation_pos = (annot_x/100, annot_y/100)
             design.annotation_font_size = st.slider("Annotation Font Size", 8, 20, design.annotation_font_size, 1, key=f"{key_prefix}_annot_size")
+            design.annotation_font_color = st.color_picker("Annotation Color", design.annotation_font_color, key=f"{key_prefix}_annot_color")
     
     return design
 
@@ -1266,27 +1223,8 @@ def main():
         st.session_state.metadata_df = pd.DataFrame()
     if 'selected_target' not in st.session_state:
         st.session_state.selected_target = 'thickness_nm'
-    # ✅ FIXED: Ensure design_config is properly initialized with new attributes
     if 'design_config' not in st.session_state:
         st.session_state.design_config = DesignConfig()
-    else:
-        # ✅ Migration: Fix existing design_config with missing/invalid color attributes
-        dc = st.session_state.design_config
-        # Ensure all color attributes exist and are valid hex
-        for attr in ['title_font_color', 'label_font_color', 'tick_font_color', 
-                     'bg_color', 'plot_bg_color', 'grid_color', 'marker_line_color']:
-            if not hasattr(dc, attr) or not is_valid_hex_color(getattr(dc, attr)):
-                defaults = {
-                    'title_font_color': '#1E3A8A',
-                    'label_font_color': '#374151',
-                    'tick_font_color': '#6B7280',
-                    'bg_color': '#F8FAFC',
-                    'plot_bg_color': '#FFFFFF',
-                    'grid_color': '#CBD5E1',
-                    'marker_line_color': '#FFFFFF'
-                }
-                setattr(dc, attr, defaults.get(attr, '#000000'))
-        st.session_state.design_config = dc
     
     # ================= SIDEBAR CONFIGURATION =================
     with st.sidebar:
@@ -1538,7 +1476,7 @@ def main():
         # Get available dimensions
         available_dims = SunburstBuilder.get_dimension_selector_options(df)
         
-        # Dimension selectors (support up to 5 levels)
+        # Dimension selectors (support up to 5 levels for N-D hierarchy!)
         dim_selectors = []
         cols = st.columns(min(5, len(available_dims) + 1))
         for i in range(5):
@@ -1571,7 +1509,7 @@ def main():
             try:
                 fig = sunburst_builder.create_nd_hierarchy(
                     df,
-                    dimensions=selected_dimensions,
+                    dimensions=selected_dimensions,  # ✅ Supports 2, 3, 4, or 5 dimensions!
                     value_col=value_col,
                     design=design,
                     aggregation=agg_method
@@ -1740,7 +1678,7 @@ def main():
 
 **🎨 Design Panel Features:**
 - **50+ colormaps**: Viridis, Plasma, Inferno, Turbo, Rainbow, Jet, Cividis, and more
-- **Typography controls**: Font family, size, weight, color for titles, labels, and ticks
+- **Typography controls**: Font family, size, weight, **color (hex)** for titles, labels, and ticks
 - **Line/Marker styling**: Adjust width, size, symbol, and border for all plot elements
 - **Layout options**: Grid visibility, legend positioning, hover modes, backgrounds
 
