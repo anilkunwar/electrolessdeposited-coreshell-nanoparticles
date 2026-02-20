@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDITION)
-✓ FIXED: All st.color_picker widgets now use valid hex format (#RRGGBB)
+✓ FIXED: Streamlit slider TypeError (invalid numeric values from session state)
+✓ FIXED: Streamlit color_picker hex format error (RGBA → hex conversion)
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -10,6 +11,7 @@ Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDI
 ✓ Advanced design panel: grid, legend, hover, annotations, backgrounds
 ✓ All previous robustness fixes maintained (hashable checks, safe nunique, etc.)
 ✓ Hex-to-RGBA conversion helper for Plotly transparency support
+✓ Comprehensive session state migration for legacy values
 """
 import streamlit as st
 import numpy as np
@@ -94,21 +96,82 @@ div[data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 60
 st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designer Pro</h1>', unsafe_allow_html=True)
 
 # =============================================
-# ✅ HELPER: HEX TO RGBA CONVERSION FOR PLOTLY
+# ✅ HELPER: TYPE VALIDATION & CONVERSION
 # =============================================
-def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
+def ensure_numeric(value: Any, default: float, min_val: float = None, max_val: float = None) -> float:
     """
-    Convert hex color (#RRGGBB or #RGB) to rgba format for Plotly.
+    Ensure a value is a valid numeric type for Streamlit sliders.
     
     Args:
-        hex_color: Hex color string (e.g., "#f8fafc" or "#fff")
-        alpha: Opacity value (0.0 to 1.0)
+        value: The value to validate/coerce
+        default: Default value if conversion fails
+        min_val: Optional minimum bound (clamp if exceeded)
+        max_val: Optional maximum bound (clamp if exceeded)
     
     Returns:
-        RGBA string for Plotly (e.g., "rgba(248, 250, 252, 0.9)")
+        A valid float within bounds
     """
+    try:
+        if value is None:
+            return default
+        num_val = float(value)
+        # Check for NaN/Inf
+        if np.isnan(num_val) or np.isinf(num_val):
+            return default
+        # Clamp to bounds if specified
+        if min_val is not None and num_val < min_val:
+            return min_val
+        if max_val is not None and num_val > max_val:
+            return max_val
+        return num_val
+    except (ValueError, TypeError):
+        return default
+
+def ensure_int(value: Any, default: int, min_val: int = None, max_val: int = None) -> int:
+    """Ensure a value is a valid integer type for Streamlit sliders."""
+    try:
+        if value is None:
+            return default
+        int_val = int(float(value))  # Handle float strings
+        if min_val is not None and int_val < min_val:
+            return min_val
+        if max_val is not None and int_val > max_val:
+            return max_val
+        return int_val
+    except (ValueError, TypeError):
+        return default
+
+def ensure_hex(color_val: Any, default: str = "#F8FAFC") -> str:
+    """
+    Ensure a color value is valid hex format for st.color_picker.
+    
+    Args:
+        color_val: Color value (hex or rgba string)
+        default: Fallback hex color if conversion fails
+    
+    Returns:
+        Valid hex color string (#RRGGBB format)
+    """
+    try:
+        if color_val is None:
+            return default
+        if not isinstance(color_val, str):
+            return default
+        # Already valid hex
+        if color_val.startswith('#'):
+            # Validate hex format
+            hex_clean = color_val.lstrip('#')
+            if len(hex_clean) in [3, 6] and all(c in '0123456789abcdefABCDEF' for c in hex_clean):
+                return color_val.upper() if len(hex_clean) == 6 else color_val
+            return default
+        # Convert rgba to hex
+        return rgba_to_hex(color_val)
+    except Exception:
+        return default
+
+def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
+    """Convert hex color (#RRGGBB or #RGB) to rgba format for Plotly."""
     hex_color = hex_color.lstrip('#')
-    # Handle short hex format (#RGB -> #RRGGBB)
     if len(hex_color) == 3:
         hex_color = ''.join([c*2 for c in hex_color])
     try:
@@ -117,28 +180,18 @@ def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
         b = int(hex_color[4:6], 16)
         return f"rgba({r}, {g}, {b}, {alpha})"
     except (ValueError, IndexError):
-        # Fallback to gray if conversion fails
         return f"rgba(100, 100, 100, {alpha})"
 
 def rgba_to_hex(rgba_string: str) -> str:
-    """
-    Convert rgba string to hex format for st.color_picker.
-    
-    Args:
-        rgba_string: RGBA string (e.g., "rgba(248, 250, 252, 0.9)")
-    
-    Returns:
-        Hex color string (e.g., "#f8fafc")
-    """
+    """Convert rgba string to hex format for st.color_picker."""
     try:
-        # Extract rgb values from rgba(r, g, b, a)
-        match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', rgba_string)
+        match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', str(rgba_string))
         if match:
             r, g, b = [int(x) for x in match.groups()]
-            return f"#{r:02x}{g:02x}{b:02x}"
+            return f"#{r:02x}{g:02x}{b:02x}".upper()
     except Exception:
         pass
-    return "#f8fafc"  # Default fallback
+    return "#F8FAFC"
 
 # =============================================
 # ✅ EXPANDED COLOR MAP LIBRARY (50+ OPTIONS WITH SAFE LOADING)
@@ -176,79 +229,79 @@ def build_safe_colormap_library() -> Dict[str, list]:
     
     # Custom curated colormaps (always available - defined locally)
     custom_colormaps = {
-        "Ocean": ["#003f5c", "#2f4b7c", "#665191", "#a05195", "#d45087", "#f95d6a", "#ff7c43", "#ffa600"],
-        "Forest": ["#2d5016", "#4a7c2e", "#6ba847", "#8fd464", "#b8f086", "#e0ffad"],
-        "Sunset Glow": ["#ff6b6b", "#ffa500", "#ffd93d", "#6bcb77", "#4d96ff"],
-        "Arctic": ["#e6f7ff", "#b3e0ff", "#80c9ff", "#4db3ff", "#1a9dff", "#007acc", "#0059b3"],
-        "Volcano": ["#264653", "#2a9d8f", "#e9c46a", "#f4a261", "#e76f51"],
-        "Nebula": ["#1a1a2e", "#16213e", "#0f3460", "#533483", "#e94560"],
-        "Cyberpunk": ["#00f5ff", "#ff00ff", "#ffff00", "#00ff00", "#ff0000"],
-        "Pastel Dream": ["#ffd6e0", "#c7f0d8", "#fde4cf", "#c7ceea", "#f8e9a1"],
-        "Monochrome": ["#000000", "#333333", "#666666", "#999999", "#cccccc", "#ffffff"],
-        "Heat": ["#000080", "#0000ff", "#00ffff", "#00ff00", "#ffff00", "#ff0000", "#800000"],
-        "Ice Fire": ["#0066cc", "#3399ff", "#66ccff", "#ffffff", "#ffcc66", "#ff9933", "#cc3300"],
-        "Purple Haze": ["#1a0033", "#330066", "#660099", "#9933cc", "#cc66ff", "#ff99ff"],
-        "Golden Hour": ["#1a1a2e", "#2d2d44", "#4a4a6a", "#8b7355", "#d4a574", "#f5deb3"],
-        "Deep Sea": ["#001219", "#005f73", "#0a9396", "#94d2bd", "#e9d8a6", "#ee9b00"],
-        "Autumn": ["#582f0e", "#7f4f24", "#936639", "#a68a64", "#b6ad90", "#c2c5aa"],
-        "Spring": ["#606c38", "#283618", "#fefae0", "#dda15e", "#bc6c25"],
-        "Midnight": ["#03045e", "#0077b6", "#00b4d8", "#90e0ef", "#caf0f8"],
-        "Candy": ["#ffadad", "#ffd6a5", "#fdffb6", "#caffbf", "#9bf6ff", "#a0c4ff", "#bdb2ff"],
-        "Retro": ["#ef476f", "#ffd166", "#06d6a0", "#118ab2", "#073b4c"],
-        "Neon": ["#ff00ff", "#00ffff", "#ffff00", "#ff0080", "#8000ff"],
-        "Earth": ["#3d2b1f", "#5c4033", "#7f5539", "#9c6644", "#b87333", "#d4a574"],
-        "Galaxy": ["#0f0c29", "#302b63", "#24243e", "#4a3f7f", "#7b68a8", "#a890d0"],
-        "Mint": ["#00b894", "#00cec9", "#81ecec", "#a29bfe", "#dfe6e9"],
-        "Coral": ["#ff7675", "#fd79a8", "#fdcb6e", "#e17055", "#d63031"],
-        "Lavender": ["#6c5ce7", "#a29bfe", "#dfe6e9", "#b2bec3", "#636e72"],
-        "Sunrise": ["#fab1a0", "#ff7675", "#e84393", "#6c5ce7", "#00cec9"],
-        "Twilight": ["#2d3436", "#636e72", "#b2bec3", "#dfe6e9", "#fff"],
-        "Berry": ["#8e44ad", "#9b59b6", "#bb8fce", "#d7bde2", "#ebdef0"],
-        "Tropical": ["#00b894", "#00cec9", "#0984e3", "#6c5ce7", "#a29bfe"],
-        "Desert": ["#e17055", "#d63031", "#fdcb6e", "#f39c12", "#e67e22"],
-        "Arctic Ice": ["#74b9ff", "#0984e3", "#00cec9", "#81ecec", "#dff9fb"],
-        "Forest Night": ["#00b894", "#00a085", "#008871", "#006f5c", "#005747"],
-        "Urban": ["#2d3436", "#636e72", "#b2bec3", "#dfe6e9", "#fff"],
-        "Pastel Sunset": ["#ff9ff3", "#feca57", "#ff6b6b", "#48dbfb", "#1dd1a1"],
-        "Midnight Blue": ["#0c2461", "#1e3799", "#3c6382", "#5352ed", "#778beb"],
-        "Cherry Blossom": ["#ff9ff3", "#ff6b6b", "#feca57", "#54a0ff", "#5f27cd"],
-        "Ocean Breeze": ["#00d2d3", "#01a3a4", "#027b7b", "#035354", "#042c2c"],
-        "Golden Sunset": ["#ff9f43", "#ee5a24", "#c23616", "#8c7ae6", "#5352ed"],
-        "Mystic": ["#5f27cd", "#341f97", "#1e3799", "#0c2461", "#000"],
-        "Spring Meadow": ["#00b894", "#00cec9", "#81ecec", "#74b9ff", "#a29bfe"],
-        "Autumn Leaves": ["#e67e22", "#d35400", "#c0392b", "#96281b", "#7b241c"],
-        "Winter Frost": ["#dff9fb", "#c7ecee", "#95afc0", "#535c68", "#2f3542"],
-        "Summer Vibes": ["#ff9ff3", "#feca57", "#ff6b6b", "#48dbfb", "#1dd1a1"],
-        "Cosmic": ["#2c2c54", "#40407a", "#706fd3", "#47478b", "#1e1e2e"],
-        "Jungle": ["#2ed573", "#7bed9f", "#a3cb38", "#6ab04c", "#3c6382"],
-        "Volcanic": ["#ff4757", "#ff6b81", "#ff793f", "#ffa502", "#ffda79"],
-        "Aurora": ["#00d2d3", "#01a3a4", "#54a0ff", "#5f27cd", "#8e44ad"],
-        "Savanna": ["#ff9f43", "#ee5a24", "#c23616", "#8c7ae6", "#5352ed"],
-        "Glacier": ["#dff9fb", "#c7ecee", "#95afc0", "#535c68", "#2f3542"],
-        "Crimson": ["#eb4d4b", "#e55039", "#c23616", "#8c7ae6", "#5352ed"],
-        "Emerald": ["#00b894", "#00a085", "#008871", "#006f5c", "#005747"],
-        "Sapphire": ["#0984e3", "#0062cc", "#0047ab", "#003399", "#001a66"],
-        "Ruby": ["#eb4d4b", "#e55039", "#c23616", "#8c7ae6", "#5352ed"],
-        "Amethyst": ["#8e44ad", "#9b59b6", "#bb8fce", "#d7bde2", "#ebdef0"],
-        "Topaz": ["#f39c12", "#e67e22", "#d35400", "#c0392b", "#96281b"],
-        "Turquoise": ["#40e0d0", "#48d1cc", "#20b2aa", "#008b8b", "#006666"],
-        "Magenta": ["#ff00ff", "#ee00ee", "#dd00dd", "#cc00cc", "#bb00bb"],
-        "Lime": ["#00ff00", "#00ee00", "#00dd00", "#00cc00", "#00bb00"],
-        "Orange": ["#ffa500", "#ee9900", "#dd8800", "#cc7700", "#bb6600"],
-        "Pink": ["#ffc0cb", "#ffb6d9", "#ffacd1", "#ffa2c9", "#ff98c1"],
-        "Brown": ["#8b4513", "#7a3d10", "#69350d", "#582d0a", "#472507"],
-        "Teal": ["#008080", "#007373", "#006666", "#005959", "#004d4d"],
-        "Indigo": ["#4b0082", "#430075", "#3b0068", "#33005b", "#2b004e"],
-        "Violet": ["#8f00ff", "#8000e6", "#7100cc", "#6200b3", "#530099"],
-        "Chartreuse": ["#7fff00", "#73e600", "#66cc00", "#59b300", "#4d9900"],
-        "Aquamarine": ["#7fffd4", "#73e6bf", "#66ccaa", "#59b395", "#4d9980"],
-        "Coral Red": ["#ff6b6b", "#e66060", "#cc5555", "#b34a4a", "#994040"],
-        "Steel Blue": ["#4682b4", "#3f75a1", "#38688e", "#315b7b", "#2a4e68"],
-        "Gold": ["#ffd700", "#e6c200", "#ccac00", "#b39600", "#998000"],
-        "Silver": ["#c0c0c0", "#adadad", "#999999", "#868686", "#737373"],
-        "Bronze": ["#cd7f32", "#b9732e", "#a56729", "#915b24", "#7d4f1f"],
-        "Copper": ["#b87333", "#a6672e", "#945b29", "#824f24", "#70431f"],
-        "Rose Gold": ["#b76e79", "#a4626d", "#915661", "#7e4a55", "#6b3e49"],
+        "Ocean": ["#003F5C", "#2F4B7C", "#665191", "#A05195", "#D45087", "#F95D6A", "#FF7C43", "#FFA600"],
+        "Forest": ["#2D5016", "#4A7C2E", "#6BA847", "#8FD464", "#B8F086", "#E0FFAD"],
+        "Sunset Glow": ["#FF6B6B", "#FFA500", "#FFD93D", "#6BCB77", "#4D96FF"],
+        "Arctic": ["#E6F7FF", "#B3E0FF", "#80C9FF", "#4DB3FF", "#1A9DFF", "#007ACC", "#0059B3"],
+        "Volcano": ["#264653", "#2A9D8F", "#E9C46A", "#F4A261", "#E76F51"],
+        "Nebula": ["#1A1A2E", "#16213E", "#0F3460", "#533483", "#E94560"],
+        "Cyberpunk": ["#00F5FF", "#FF00FF", "#FFFF00", "#00FF00", "#FF0000"],
+        "Pastel Dream": ["#FFD6E0", "#C7F0D8", "#FDE4CF", "#C7CEEA", "#F8E9A1"],
+        "Monochrome": ["#000000", "#333333", "#666666", "#999999", "#CCCCCC", "#FFFFFF"],
+        "Heat": ["#000080", "#0000FF", "#00FFFF", "#00FF00", "#FFFF00", "#FF0000", "#800000"],
+        "Ice Fire": ["#0066CC", "#3399FF", "#66CCFF", "#FFFFFF", "#FFCC66", "#FF9933", "#CC3300"],
+        "Purple Haze": ["#1A0033", "#330066", "#660099", "#9933CC", "#CC66FF", "#FF99FF"],
+        "Golden Hour": ["#1A1A2E", "#2D2D44", "#4A4A6A", "#8B7355", "#D4A574", "#F5DEB3"],
+        "Deep Sea": ["#001219", "#005F73", "#0A9396", "#94D2BD", "#E9D8A6", "#EE9B00"],
+        "Autumn": ["#582F0E", "#7F4F24", "#936639", "#A68A64", "#B6AD90", "#C2C5AA"],
+        "Spring": ["#606C38", "#283618", "#FEFAE0", "#DDA15E", "#BC6C25"],
+        "Midnight": ["#03045E", "#0077B6", "#00B4D8", "#90E0EF", "#CAF0F8"],
+        "Candy": ["#FFADAD", "#FFD6A5", "#FDFFB6", "#CAFFBF", "#9BF6FF", "#A0C4FF", "#BDB2FF"],
+        "Retro": ["#EF476F", "#FFD166", "#06D6A0", "#118AB2", "#073B4C"],
+        "Neon": ["#FF00FF", "#00FFFF", "#FFFF00", "#FF0080", "#8000FF"],
+        "Earth": ["#3D2B1F", "#5C4033", "#7F5539", "#9C6644", "#B87333", "#D4A574"],
+        "Galaxy": ["#0F0C29", "#302B63", "#24243E", "#4A3F7F", "#7B68A8", "#A890D0"],
+        "Mint": ["#00B894", "#00CEC9", "#81ECEC", "#A29BFE", "#DFE6E9"],
+        "Coral": ["#FF7675", "#FD79A8", "#FDCB6E", "#E17055", "#D63031"],
+        "Lavender": ["#6C5CE7", "#A29BFE", "#DFE6E9", "#B2BEC3", "#636E72"],
+        "Sunrise": ["#FAB1A0", "#FF7675", "#E84393", "#6C5CE7", "#00CEC9"],
+        "Twilight": ["#2D3436", "#636E72", "#B2BEC3", "#DFE6E9", "#FFFFFF"],
+        "Berry": ["#8E44AD", "#9B59B6", "#BB8FCE", "#D7BDE2", "#EBDEF0"],
+        "Tropical": ["#00B894", "#00CEC9", "#0984E3", "#6C5CE7", "#A29BFE"],
+        "Desert": ["#E17055", "#D63031", "#FDCB6E", "#F39C12", "#E67E22"],
+        "Arctic Ice": ["#74B9FF", "#0984E3", "#00CEC9", "#81ECEC", "#DFF9FB"],
+        "Forest Night": ["#00B894", "#00A085", "#008871", "#006F5C", "#005747"],
+        "Urban": ["#2D3436", "#636E72", "#B2BEC3", "#DFE6E9", "#FFFFFF"],
+        "Pastel Sunset": ["#FF9FF3", "#FECA57", "#FF6B6B", "#48DBFB", "#1DD1A1"],
+        "Midnight Blue": ["#0C2461", "#1E3799", "#3C6382", "#5352ED", "#778BEB"],
+        "Cherry Blossom": ["#FF9FF3", "#FF6B6B", "#FECA57", "#54A0FF", "#5F27CD"],
+        "Ocean Breeze": ["#00D2D3", "#01A3A4", "#027B7B", "#035354", "#042C2C"],
+        "Golden Sunset": ["#FF9F43", "#EE5A24", "#C23616", "#8C7AE6", "#5352ED"],
+        "Mystic": ["#5F27CD", "#341F97", "#1E3799", "#0C2461", "#000000"],
+        "Spring Meadow": ["#00B894", "#00CEC9", "#81ECEC", "#74B9FF", "#A29BFE"],
+        "Autumn Leaves": ["#E67E22", "#D35400", "#C0392B", "#96281B", "#7B241C"],
+        "Winter Frost": ["#DFF9FB", "#C7ECEE", "#95AFC0", "#535C68", "#2F3542"],
+        "Summer Vibes": ["#FF9FF3", "#FECA57", "#FF6B6B", "#48DBFB", "#1DD1A1"],
+        "Cosmic": ["#2C2C54", "#40407A", "#706FD3", "#47478B", "#1E1E2E"],
+        "Jungle": ["#2ED573", "#7BED9F", "#A3CB38", "#6AB04C", "#3C6382"],
+        "Volcanic": ["#FF4757", "#FF6B81", "#FF793F", "#FFA502", "#FFDA79"],
+        "Aurora": ["#00D2D3", "#01A3A4", "#54A0FF", "#5F27CD", "#8E44AD"],
+        "Savanna": ["#FF9F43", "#EE5A24", "#C23616", "#8C7AE6", "#5352ED"],
+        "Glacier": ["#DFF9FB", "#C7ECEE", "#95AFC0", "#535C68", "#2F3542"],
+        "Crimson": ["#EB4D4B", "#E55039", "#C23616", "#8C7AE6", "#5352ED"],
+        "Emerald": ["#00B894", "#00A085", "#008871", "#006F5C", "#005747"],
+        "Sapphire": ["#0984E3", "#0062CC", "#0047AB", "#003399", "#001A66"],
+        "Ruby": ["#EB4D4B", "#E55039", "#C23616", "#8C7AE6", "#5352ED"],
+        "Amethyst": ["#8E44AD", "#9B59B6", "#BB8FCE", "#D7BDE2", "#EBDEF0"],
+        "Topaz": ["#F39C12", "#E67E22", "#D35400", "#C0392B", "#96281B"],
+        "Turquoise": ["#40E0D0", "#48D1CC", "#20B2AA", "#008B8B", "#006666"],
+        "Magenta": ["#FF00FF", "#EE00EE", "#DD00DD", "#CC00CC", "#BB00BB"],
+        "Lime": ["#00FF00", "#00EE00", "#00DD00", "#00CC00", "#00BB00"],
+        "Orange": ["#FFA500", "#EE9900", "#DD8800", "#CC7700", "#BB6600"],
+        "Pink": ["#FFC0CB", "#FFB6D9", "#FFACD1", "#FFA2C9", "#FF98C1"],
+        "Brown": ["#8B4513", "#7A3D10", "#69350D", "#582D0A", "#472507"],
+        "Teal": ["#008080", "#007373", "#006666", "#005959", "#004D4D"],
+        "Indigo": ["#4B0082", "#430075", "#3B0068", "#33005B", "#2B004E"],
+        "Violet": ["#8F00FF", "#8000E6", "#7100CC", "#6200B3", "#530099"],
+        "Chartreuse": ["#7FFF00", "#73E600", "#66CC00", "#59B300", "#4D9900"],
+        "Aquamarine": ["#7FFFD4", "#73E6BF", "#66CCAA", "#59B395", "#4D9980"],
+        "Coral Red": ["#FF6B6B", "#E66060", "#CC5555", "#B34A4A", "#994040"],
+        "Steel Blue": ["#4682B4", "#3F75A1", "#38688E", "#315B7B", "#2A4E68"],
+        "Gold": ["#FFD700", "#E6C200", "#CCAC00", "#B39600", "#998000"],
+        "Silver": ["#C0C0C0", "#ADADAD", "#999999", "#868686", "#737373"],
+        "Bronze": ["#CD7F32", "#B9732E", "#A56729", "#915B24", "#7D4F1F"],
+        "Copper": ["#B87333", "#A6672E", "#945B29", "#824F24", "#70431F"],
+        "Rose Gold": ["#B76E79", "#A4626D", "#915661", "#7E4A55", "#6B3E49"],
     }
     
     # Safely load Plotly sequential colormaps
@@ -294,8 +347,7 @@ def build_safe_colormap_library() -> Dict[str, list]:
         try:
             colormap_lib["Viridis"] = px.colors.sequential.Viridis
         except Exception:
-            # Ultimate fallback: manually defined Viridis
-            colormap_lib["Viridis"] = ["#440154", "#482777", "#3f4a8a", "#31678e", "#26838f", "#1f9e89", "#6cce5a", "#bade2e", "#fde725"]
+            colormap_lib["Viridis"] = ["#440154", "#482777", "#3F4A8A", "#31678E", "#26838F", "#1F9E89", "#6CCE5A", "#BADE2E", "#FDE725"]
     
     return colormap_lib
 
@@ -350,7 +402,7 @@ DERIVED_METRICS = {
     "convergence_metric": "L2 norm of field changes at final steps"
 }
 
-# Default radar colors with transparency (using rgba format for Plotly)
+# Default radar colors with transparency
 DEFAULT_RADAR_COLORS = [
     'rgba(31, 119, 180, 0.75)',
     'rgba(255, 127, 14, 0.75)',
@@ -421,7 +473,7 @@ def clean_value_for_plotly(val) -> float:
 def get_colormap(name: str, n_colors: int = None) -> list:
     """Retrieve colormap by name, optionally resampled to n_colors."""
     if name not in COLORMAP_LIBRARY:
-        return COLORMAP_LIBRARY.get("Viridis", ["#440154", "#482777", "#3f4a8a", "#31678e", "#26838f", "#1f9e89", "#6cce5a", "#bade2e", "#fde725"])
+        return COLORMAP_LIBRARY.get("Viridis", ["#440154", "#482777", "#3F4A8A", "#31678E", "#26838F", "#1F9E89", "#6CCE5A", "#BADE2E", "#FDE725"])
     cmap = COLORMAP_LIBRARY[name]
     if n_colors and len(cmap) != n_colors:
         from plotly.colors import sample_colorscale
@@ -485,7 +537,7 @@ class EnhancedPKLLoader:
         metadata['growth_model'] = 'Model B' if 'ModelB' in filename else 'Model A'
         return metadata
     
-    def compute_derived_metrics(self,  Dict) -> Dict[str, float]:
+    def compute_derived_metrics(self, data: Dict) -> Dict[str, float]:
         """Compute derived metrics from simulation snapshots."""
         metrics = {}
         try:
@@ -600,30 +652,30 @@ class EnhancedPKLLoader:
 class DesignConfig:
     """Centralized design configuration for all visualizations."""
     def __init__(self):
-        # Typography - ✅ ALL COLORS IN HEX FORMAT FOR st.color_picker
+        # Typography - ✅ ALL COLORS IN HEX FORMAT
         self.title_font_family = "Inter, sans-serif"
         self.title_font_size = 20
         self.title_font_weight = "bold"
-        self.title_font_color = "#1E3A8A"  # ✅ HEX (was rgba - FIXED!)
+        self.title_font_color = "#1E3A8A"
         self.label_font_family = "Inter, sans-serif"
         self.label_font_size = 12
-        self.label_font_color = "#374151"  # ✅ HEX (was rgba - FIXED!)
+        self.label_font_color = "#374151"
         self.tick_font_size = 10
-        self.tick_font_color = "#6B7280"  # ✅ HEX (was rgba - FIXED!)
+        self.tick_font_color = "#6B7280"
         
-        # Colors - ✅ ALL HEX FORMAT for st.color_picker compatibility
+        # Colors - ✅ ALL HEX FORMAT for st.color_picker
         self.colormap_name = "Viridis"
         self.colormap_reversed = False
-        self.bg_color = "#F8FAFC"  # ✅ HEX (was rgba - FIXED!)
-        self.plot_bg_color = "#FFFFFF"  # ✅ HEX (was rgba - FIXED!)
-        self.grid_color = "#CBD5E1"  # ✅ HEX (was rgba - FIXED!)
+        self.bg_color = "#F8FAFC"
+        self.plot_bg_color = "#FFFFFF"
+        self.grid_color = "#CBD5E1"
         
-        # Lines & Markers
+        # Lines & Markers - ✅ ALL NUMERIC VALUES VALIDATED
         self.line_width = 2.5
         self.marker_size = 8
         self.marker_symbol = "circle"
-        self.marker_line_width = 1
-        self.marker_line_color = "#FFFFFF"  # ✅ HEX (was rgba - FIXED!)
+        self.marker_line_width = 1.0
+        self.marker_line_color = "#FFFFFF"
         
         # Layout
         self.show_grid = True
@@ -636,7 +688,7 @@ class DesignConfig:
         self.annotation_text = ""
         self.annotation_pos = (0.5, 0.95)
         self.annotation_font_size = 11
-        self.annotation_font_color = "#374151"  # ✅ HEX
+        self.annotation_font_color = "#374151"
     
     def get_font_config(self, element: str = "title") -> dict:
         """Return font configuration dictionary."""
@@ -657,7 +709,6 @@ class DesignConfig:
         return {
             "font": self.get_font_config("label"),
             "title_font": self.get_font_config("title"),
-            # ✅ Convert hex to rgba for Plotly transparency support
             "plot_bgcolor": hex_to_rgba(self.plot_bg_color, 0.95),
             "paper_bgcolor": hex_to_rgba(self.bg_color, 0.98),
             "hovermode": self.hover_mode,
@@ -672,7 +723,7 @@ class DesignConfig:
             ),
             "xaxis": dict(
                 showgrid=self.show_grid,
-                gridcolor=self.grid_color,  # Plotly accepts hex for grid
+                gridcolor=self.grid_color,
                 tickfont=self.get_font_config("tick")
             ),
             "yaxis": dict(
@@ -728,7 +779,6 @@ class RadarChartBuilder:
         colors = design.get_colormap(len(radar_data))
         
         for i, entry in enumerate(radar_data):
-            # Convert hex to rgba for fill
             fill_color = colors[i % len(colors)]
             if fill_color.startswith('#'):
                 fill_color = hex_to_rgba(fill_color, 0.7)
@@ -739,7 +789,6 @@ class RadarChartBuilder:
                 except Exception:
                     fill_color = f"rgba(100, 100, 100, 0.7)"
             
-            # Line color (full opacity)
             line_color = fill_color.replace('0.7', '1.0').replace('0.75', '1.0')
             
             fig.add_trace(go.Scatterpolar(
@@ -790,12 +839,11 @@ class SunburstBuilder:
     
     @staticmethod
     def create_nd_hierarchy(df: pd.DataFrame,
-                           dimensions: List[str],  # Can be 2, 3, 4, or more levels!
+                           dimensions: List[str],
                            value_col: str,
                            design: DesignConfig,
                            aggregation: str = 'mean') -> go.Figure:
         """Create sunburst chart supporting N hierarchical dimensions."""
-        # Validate dimensions exist
         valid_dims = [d for d in dimensions if d in df.columns]
         if len(valid_dims) < 2:
             fig = go.Figure()
@@ -803,13 +851,11 @@ class SunburstBuilder:
                              font=design.get_font_config("label"))
             return fig
         
-        # Prepare data with binning for continuous variables
         df_plot = df.copy()
         processed_dims = []
         
         for dim in valid_dims:
             if df_plot[dim].dtype in ['float64', 'float32'] and df_plot[dim].nunique() > 8:
-                # Bin continuous variables
                 try:
                     bins = min(5, df_plot[dim].nunique())
                     df_plot[f"{dim}_bin"] = pd.qcut(df_plot[dim], q=bins, labels=False, duplicates='drop')
@@ -823,20 +869,17 @@ class SunburstBuilder:
                 df_plot[f"{dim}_label"] = df_plot[dim].astype(str)
                 processed_dims.append(f"{dim}_label")
         
-        # Determine value column
         value_col_actual = f"metric_{value_col}" if f"metric_{value_col}" in df_plot.columns else value_col
         if value_col_actual not in df_plot.columns:
             value_col_actual = df_plot.select_dtypes(include=[np.number]).columns[0]
         
-        # Aggregate data
         agg_func = getattr(pd.Series, aggregation, 'mean')
         agg_data = df_plot.groupby(processed_dims)[value_col_actual].agg([aggregation, 'count']).reset_index()
         agg_data = agg_data[agg_data['count'] >= 1]
         
-        # Build sunburst with N levels (supports tertiary, quaternary, etc.)
         fig = px.sunburst(
             agg_data,
-            path=processed_dims,  # ✅ Supports arbitrary depth!
+            path=processed_dims,
             values=aggregation,
             hover_data={'count': True, aggregation: ':.3f'},
             color=aggregation,
@@ -845,7 +888,6 @@ class SunburstBuilder:
             height=design.plot_height + 100
         )
         
-        # Apply design customizations
         fig.update_traces(
             hovertemplate='<br>'.join([
                 '<b>%{label}</b>',
@@ -877,7 +919,7 @@ class SunburstBuilder:
         candidates = []
         for c in safe_cols:
             if pd.api.types.is_numeric_dtype(df[c]):
-                if df[c].nunique() <= 50:  # Reasonable for hierarchy
+                if df[c].nunique() <= 50:
                     candidates.append(c)
             elif safe_nunique(df[c], max_unique=20):
                 candidates.append(c)
@@ -914,7 +956,6 @@ class SummaryTableBuilder:
         if target_var in table_df.columns and table_df[target_var].notna().any():
             table_df['rank'] = table_df[target_var].rank(pct=True)
         
-        # Format numeric columns
         for col in table_df.select_dtypes(include=[np.number]).columns:
             if table_df[col].notna().any():
                 if table_df[col].abs().max() > 1000 or table_df[col].abs().min() < 0.001:
@@ -1110,10 +1151,17 @@ class DatasetImprovementAnalyzer:
 
 
 # =============================================
-# ✅ DESIGN CONTROL PANEL COMPONENT (FIXED)
+# ✅ DESIGN CONTROL PANEL COMPONENT (FULLY FIXED)
 # =============================================
 def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> DesignConfig:
-    """Render interactive design controls in sidebar."""
+    """Render interactive design controls in sidebar with full type validation."""
+    
+    # Helper to ensure color is hex for color_picker
+    def ensure_hex(color_val):
+        if isinstance(color_val, str) and not color_val.startswith('#'):
+            return rgba_to_hex(color_val)
+        return color_val if isinstance(color_val, str) and color_val.startswith('#') else "#F8FAFC"
+    
     with st.expander("🎨 Visualization Design Controls", expanded=False):
         st.markdown("### Typography")
         col_t1, col_t2 = st.columns(2)
@@ -1123,21 +1171,42 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 index=FONT_FAMILIES.index(design.title_font_family) if design.title_font_family in FONT_FAMILIES else 0,
                 key=f"{key_prefix}_title_font"
             )
-            design.title_font_size = st.slider("Title Size", 14, 36, design.title_font_size, 1, key=f"{key_prefix}_title_size")
+            # ✅ FIXED: Ensure numeric value before slider
+            design.title_font_size = st.slider(
+                "Title Size", 14, 36, 
+                ensure_int(design.title_font_size, 20, 14, 36), 
+                1, key=f"{key_prefix}_title_size"
+            )
             design.title_font_weight = st.selectbox("Title Weight", ["normal", "bold", "bolder"], 
-                                                   index=["normal", "bold", "bolder"].index(design.title_font_weight),
+                                                   index=["normal", "bold", "bolder"].index(design.title_font_weight) if design.title_font_weight in ["normal", "bold", "bolder"] else 1,
                                                    key=f"{key_prefix}_title_weight")
-            # ✅ FIXED: Use hex format for color_picker (was rgba - THIS WAS THE BUG!)
-            design.title_font_color = st.color_picker("Title Color", design.title_font_color, key=f"{key_prefix}_title_color")
+            # ✅ FIXED: Ensure hex format before color_picker
+            design.title_font_color = st.color_picker(
+                "Title Color", 
+                ensure_hex(design.title_font_color), 
+                key=f"{key_prefix}_title_color"
+            )
         with col_t2:
             design.label_font_family = st.selectbox(
                 "Label Font", FONT_FAMILIES,
                 index=FONT_FAMILIES.index(design.label_font_family) if design.label_font_family in FONT_FAMILIES else 0,
                 key=f"{key_prefix}_label_font"
             )
-            design.label_font_size = st.slider("Label Size", 8, 18, design.label_font_size, 1, key=f"{key_prefix}_label_size")
-            design.tick_font_size = st.slider("Tick Size", 7, 14, design.tick_font_size, 1, key=f"{key_prefix}_tick_size")
-            design.label_font_color = st.color_picker("Label Color", design.label_font_color, key=f"{key_prefix}_label_color")
+            design.label_font_size = st.slider(
+                "Label Size", 8, 18, 
+                ensure_int(design.label_font_size, 12, 8, 18), 
+                1, key=f"{key_prefix}_label_size"
+            )
+            design.tick_font_size = st.slider(
+                "Tick Size", 7, 14, 
+                ensure_int(design.tick_font_size, 10, 7, 14), 
+                1, key=f"{key_prefix}_tick_size"
+            )
+            design.label_font_color = st.color_picker(
+                "Label Color", 
+                ensure_hex(design.label_font_color), 
+                key=f"{key_prefix}_label_color"
+            )
         
         st.markdown("### Color & Colormap")
         col_c1, col_c2 = st.columns(2)
@@ -1160,42 +1229,76 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 preview_html += f'<div style="flex:1;background:{c};border-right:1px solid white"></div>'
             preview_html += '</div>'
             st.markdown(preview_html, unsafe_allow_html=True)
-            # ✅ FIXED: Use hex format for color_picker (was rgba - THIS WAS THE BUG!)
-            design.bg_color = st.color_picker("Background", design.bg_color, key=f"{key_prefix}_bg")
-            design.plot_bg_color = st.color_picker("Plot Background", design.plot_bg_color, key=f"{key_prefix}_plot_bg")
+            # ✅ FIXED: Ensure hex format for all color pickers
+            design.bg_color = st.color_picker(
+                "Background", 
+                ensure_hex(design.bg_color), 
+                key=f"{key_prefix}_bg"
+            )
+            design.plot_bg_color = st.color_picker(
+                "Plot Background", 
+                ensure_hex(design.plot_bg_color), 
+                key=f"{key_prefix}_plot_bg"
+            )
         
         st.markdown("### Lines & Markers")
         col_l1, col_l2 = st.columns(2)
         with col_l1:
-            design.line_width = st.slider("Line Width", 0.5, 5.0, design.line_width, 0.1, key=f"{key_prefix}_line_width")
-            design.marker_size = st.slider("Marker Size", 3, 15, design.marker_size, 1, key=f"{key_prefix}_marker_size")
+            # ✅ FIXED: Ensure numeric values with bounds for all sliders
+            design.line_width = st.slider(
+                "Line Width", 0.5, 5.0, 
+                ensure_numeric(design.line_width, 2.5, 0.5, 5.0), 
+                0.1, key=f"{key_prefix}_line_width"
+            )
+            design.marker_size = st.slider(
+                "Marker Size", 3, 15, 
+                ensure_int(design.marker_size, 8, 3, 15), 
+                1, key=f"{key_prefix}_marker_size"
+            )
         with col_l2:
             design.marker_symbol = st.selectbox(
                 "Marker Symbol",
                 ["circle", "square", "diamond", "cross", "x", "triangle-up", "triangle-down", "pentagon"],
-                index=["circle", "square", "diamond", "cross", "x", "triangle-up", "triangle-down", "pentagon"].index(design.marker_symbol),
+                index=["circle", "square", "diamond", "cross", "x", "triangle-up", "triangle-down", "pentagon"].index(design.marker_symbol) if design.marker_symbol in ["circle", "square", "diamond", "cross", "x", "triangle-up", "triangle-down", "pentagon"] else 0,
                 key=f"{key_prefix}_marker_symbol"
             )
-            design.marker_line_width = st.slider("Marker Border", 0, 3, design.marker_line_width, 0.5, key=f"{key_prefix}_marker_border")
-            design.marker_line_color = st.color_picker("Marker Border Color", design.marker_line_color, key=f"{key_prefix}_marker_color")
+            # ✅ FIXED: This was the problematic slider - now with proper validation
+            design.marker_line_width = st.slider(
+                "Marker Border", 0, 3, 
+                ensure_numeric(design.marker_line_width, 1.0, 0, 3), 
+                0.5, key=f"{key_prefix}_marker_border"
+            )
+            design.marker_line_color = st.color_picker(
+                "Marker Border Color", 
+                ensure_hex(design.marker_line_color), 
+                key=f"{key_prefix}_marker_color"
+            )
         
         st.markdown("### Layout")
         col_g1, col_g2 = st.columns(2)
         with col_g1:
             design.show_grid = st.checkbox("Show Grid", value=design.show_grid, key=f"{key_prefix}_grid")
-            design.grid_color = st.color_picker("Grid Color", design.grid_color, key=f"{key_prefix}_grid_color")
-            design.plot_height = st.slider("Plot Height", 300, 800, design.plot_height, 50, key=f"{key_prefix}_height")
+            design.grid_color = st.color_picker(
+                "Grid Color", 
+                ensure_hex(design.grid_color), 
+                key=f"{key_prefix}_grid_color"
+            )
+            design.plot_height = st.slider(
+                "Plot Height", 300, 800, 
+                ensure_int(design.plot_height, 550, 300, 800), 
+                50, key=f"{key_prefix}_height"
+            )
         with col_g2:
             design.legend_position = st.selectbox(
                 "Legend Position",
                 ["bottom right", "bottom left", "top right", "top left", "center"],
-                index=["bottom right", "bottom left", "top right", "top left", "center"].index(design.legend_position),
+                index=["bottom right", "bottom left", "top right", "top left", "center"].index(design.legend_position) if design.legend_position in ["bottom right", "bottom left", "top right", "top left", "center"] else 0,
                 key=f"{key_prefix}_legend_pos"
             )
             design.hover_mode = st.selectbox(
                 "Hover Mode",
                 ["closest", "x", "y", "x unified", "y unified"],
-                index=["closest", "x", "y", "x unified", "y unified"].index(design.hover_mode),
+                index=["closest", "x", "y", "x unified", "y unified"].index(design.hover_mode) if design.hover_mode in ["closest", "x", "y", "x unified", "y unified"] else 0,
                 key=f"{key_prefix}_hover"
             )
         
@@ -1203,17 +1306,25 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
         design.annotation_enabled = st.checkbox("Add Annotation", value=design.annotation_enabled, key=f"{key_prefix}_annot_enable")
         if design.annotation_enabled:
             design.annotation_text = st.text_input("Annotation Text", design.annotation_text, key=f"{key_prefix}_annot_text")
-            annot_x = st.slider("X Position %", 0, 100, int(design.annotation_pos[0]*100), 5, key=f"{key_prefix}_annot_x")
-            annot_y = st.slider("Y Position %", 0, 100, int(design.annotation_pos[1]*100), 5, key=f"{key_prefix}_annot_y")
+            annot_x = st.slider("X Position %", 0, 100, ensure_int(design.annotation_pos[0]*100, 50, 0, 100), 5, key=f"{key_prefix}_annot_x")
+            annot_y = st.slider("Y Position %", 0, 100, ensure_int(design.annotation_pos[1]*100, 95, 0, 100), 5, key=f"{key_prefix}_annot_y")
             design.annotation_pos = (annot_x/100, annot_y/100)
-            design.annotation_font_size = st.slider("Annotation Font Size", 8, 20, design.annotation_font_size, 1, key=f"{key_prefix}_annot_size")
-            design.annotation_font_color = st.color_picker("Annotation Color", design.annotation_font_color, key=f"{key_prefix}_annot_color")
+            design.annotation_font_size = st.slider(
+                "Annotation Font Size", 8, 20, 
+                ensure_int(design.annotation_font_size, 11, 8, 20), 
+                1, key=f"{key_prefix}_annot_size"
+            )
+            design.annotation_font_color = st.color_picker(
+                "Annotation Color", 
+                ensure_hex(design.annotation_font_color), 
+                key=f"{key_prefix}_annot_color"
+            )
     
     return design
 
 
 # =============================================
-# MAIN STREAMLIT APPLICATION
+# MAIN STREAMLIT APPLICATION (WITH SESSION STATE MIGRATION)
 # =============================================
 def main():
     # Initialize session state
@@ -1225,6 +1336,38 @@ def main():
         st.session_state.selected_target = 'thickness_nm'
     if 'design_config' not in st.session_state:
         st.session_state.design_config = DesignConfig()
+    else:
+        # ✅ MIGRATION: Convert any legacy RGBA colors to hex (fixes st.color_picker errors)
+        design = st.session_state.design_config
+        color_attrs = [
+            'title_font_color', 'label_font_color', 'tick_font_color',
+            'bg_color', 'plot_bg_color', 'grid_color',
+            'marker_line_color', 'annotation_font_color'
+        ]
+        for attr in color_attrs:
+            old_val = getattr(design, attr, None)
+            if old_val and isinstance(old_val, str) and not old_val.startswith('#'):
+                setattr(design, attr, rgba_to_hex(old_val))
+        
+        # ✅ MIGRATION: Ensure all numeric values are valid numbers (fixes st.slider errors)
+        numeric_attrs = {
+            'title_font_size': (20, 14, 36),
+            'label_font_size': (12, 8, 18),
+            'tick_font_size': (10, 7, 14),
+            'line_width': (2.5, 0.5, 5.0),
+            'marker_size': (8, 3, 15),
+            'marker_line_width': (1.0, 0, 3),
+            'plot_height': (550, 300, 800),
+            'annotation_font_size': (11, 8, 20)
+        }
+        for attr, (default, min_v, max_v) in numeric_attrs.items():
+            val = getattr(design, attr, None)
+            if isinstance(default, int):
+                setattr(design, attr, ensure_int(val, default, min_v, max_v))
+            else:
+                setattr(design, attr, ensure_numeric(val, default, min_v, max_v))
+        
+        st.session_state.design_config = design
     
     # ================= SIDEBAR CONFIGURATION =================
     with st.sidebar:
@@ -1248,7 +1391,6 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
-        # Target Variable Selection
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🎯 Target Variable")
         available_targets = []
@@ -1269,7 +1411,6 @@ def main():
         st.session_state.design_config = render_design_panel(st.session_state.design_config)
         st.divider()
         
-        # Analysis Controls
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### ⚙️ Analysis Settings")
         normalize_radar = st.checkbox("Normalize radar chart values", value=True)
@@ -1473,10 +1614,8 @@ def main():
         st.markdown("### 🌟 N-Dimensional Hierarchical Parameter Exploration")
         st.info("💡 Select 2-5 dimensions to build hierarchical sunburst charts (inner → outer rings)")
         
-        # Get available dimensions
         available_dims = SunburstBuilder.get_dimension_selector_options(df)
         
-        # Dimension selectors (support up to 5 levels for N-D hierarchy!)
         dim_selectors = []
         cols = st.columns(min(5, len(available_dims) + 1))
         for i in range(5):
@@ -1492,11 +1631,9 @@ def main():
                 )
                 dim_selectors.append(selected)
         
-        # Filter out empty/invalid selections and remove duplicates
         selected_dimensions = [d for d in dim_selectors if d and d != "No dimensions available"]
-        selected_dimensions = list(dict.fromkeys(selected_dimensions))  # Remove duplicates, preserve order
+        selected_dimensions = list(dict.fromkeys(selected_dimensions))
         
-        # Aggregation and value column
         col_agg, col_val = st.columns(2)
         with col_agg:
             agg_method = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "std"], index=0)
@@ -1509,14 +1646,13 @@ def main():
             try:
                 fig = sunburst_builder.create_nd_hierarchy(
                     df,
-                    dimensions=selected_dimensions,  # ✅ Supports 2, 3, 4, or 5 dimensions!
+                    dimensions=selected_dimensions,
                     value_col=value_col,
                     design=design,
                     aggregation=agg_method
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # Insights panel
                 with st.expander("📊 Key Insights from Hierarchy"):
                     if all(d in df.columns for d in selected_dimensions[:2]):
                         target_col = f'metric_{value_col}' if value_col in DERIVED_METRICS else value_col
@@ -1604,7 +1740,6 @@ def main():
             else:
                 st.info("✅ Dataset appears well-covered! Consider exploring new parameter combinations or higher resolution.")
             
-            # Parameter coverage visualization with design controls
             st.markdown("#### 📊 Current Parameter Coverage")
             coverage_cols = [c for c in ['c_bulk', 'core_radius_frac', 'shell_thickness_frac', 'L0_nm', 'k0_nd'] if c in df.columns]
             if coverage_cols:
@@ -1633,7 +1768,6 @@ def main():
                 fig_cov.update_yaxes(title_text="Count", tickfont=design.get_font_config("tick"))
                 st.plotly_chart(fig_cov, use_container_width=True)
             
-            # Export experimental design
             st.markdown("#### 🎯 Export Next Experimental Design")
             with st.expander("Generate parameter suggestions for new simulations"):
                 if gaps:
@@ -1678,7 +1812,7 @@ def main():
 
 **🎨 Design Panel Features:**
 - **50+ colormaps**: Viridis, Plasma, Inferno, Turbo, Rainbow, Jet, Cividis, and more
-- **Typography controls**: Font family, size, weight, **color (hex)** for titles, labels, and ticks
+- **Typography controls**: Font family, size, weight, color for titles, labels, and ticks
 - **Line/Marker styling**: Adjust width, size, symbol, and border for all plot elements
 - **Layout options**: Grid visibility, legend positioning, hover modes, backgrounds
 
