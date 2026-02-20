@@ -10,7 +10,6 @@ Enhancements:
 - Thresholded material proxy (`max(phi,psi)+psi`) → discrete phases.
 - Global time slider that updates all tabs (fields, thickness, derived).
 - Fixed tensor shape and device errors in gated attention.
-- **Safe formatting** of parameters to avoid `None`‑related crashes.
 """
 import streamlit as st
 import numpy as np
@@ -34,18 +33,6 @@ from typing import List, Dict, Any, Optional, Tuple
 import time
 
 warnings.filterwarnings('ignore')
-
-# =============================================
-# HELPER: Safe formatting (handles None values)
-# =============================================
-def safe_format(val, format_spec):
-    """Return formatted string if val is not None, otherwise 'None'."""
-    if val is None:
-        return "None"
-    try:
-        return f"{val:{format_spec}}"
-    except (ValueError, TypeError):
-        return str(val)
 
 # =============================================
 # GLOBAL STYLING CONFIGURATION
@@ -237,6 +224,9 @@ class CoreShellInterpolator:
         """Gaussian kernel in normalised parameter space."""
         def norm_val(params, name):
             val = params.get(name, 0.5)
+            # Handle None values safely
+            if val is None:
+                val = 0.5
             return DepositionParameters.normalize(val, name)
 
         target_norm = np.array([
@@ -279,6 +269,9 @@ class CoreShellInterpolator:
             # continuous (normalised)
             for name in ['fc', 'rs', 'c_bulk', 'L0_nm']:
                 val = p.get(name, 0.5)
+                # Handle None values safely
+                if val is None:
+                    val = 0.5
                 norm_val = DepositionParameters.normalize(val, name)
                 feat.append(norm_val)
             # categorical: bc_type, use_edl, mode, growth_model
@@ -556,6 +549,15 @@ class HeatMapVisualizer:
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
 
+    def _safe_format_param(self, value, format_spec=".3f"):
+        """Safely format a parameter value, handling None and non-numeric types."""
+        if value is None:
+            return "N/A"
+        try:
+            return f"{float(value):{format_spec}}"
+        except (ValueError, TypeError):
+            return str(value)
+
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
                               L0_nm=20.0, figsize=(10,8), colorbar_label="",
                               vmin=None, vmax=None, target_params=None):
@@ -570,11 +572,16 @@ class HeatMapVisualizer:
         ax.set_ylabel('Y (nm)', fontsize=14, fontweight='bold')
         title_str = title
         if target_params:
-            fc = target_params.get('fc')
-            rs = target_params.get('rs')
-            cb = target_params.get('c_bulk')
-            # Use safe_format to handle None values
-            title_str += f"\nfc={safe_format(fc, '.3f')}, rs={safe_format(rs, '.3f')}, c_bulk={safe_format(cb, '.2f')}, L0={L0_nm} nm"
+            fc = target_params.get('fc', 0)
+            rs = target_params.get('rs', 0)
+            cb = target_params.get('c_bulk', 0)
+            L0_val = target_params.get('L0_nm', L0_nm)
+            # Use safe formatting to prevent None errors
+            fc_str = self._safe_format_param(fc, ".3f")
+            rs_str = self._safe_format_param(rs, ".3f")
+            cb_str = self._safe_format_param(cb, ".2f")
+            L0_str = self._safe_format_param(L0_val, ".1f")
+            title_str += f"\nfc={fc_str}, rs={rs_str}, c_bulk={cb_str}, L0={L0_str} nm"
         ax.set_title(title_str, fontsize=16, fontweight='bold')
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -595,10 +602,16 @@ class HeatMapVisualizer:
         ))
         title_str = title
         if target_params:
-            fc = target_params.get('fc')
-            rs = target_params.get('rs')
-            cb = target_params.get('c_bulk')
-            title_str += f"<br>fc={safe_format(fc, '.3f')}, rs={safe_format(rs, '.3f')}, c_bulk={safe_format(cb, '.2f')}, L0={L0_nm} nm"
+            fc = target_params.get('fc', 0)
+            rs = target_params.get('rs', 0)
+            cb = target_params.get('c_bulk', 0)
+            L0_val = target_params.get('L0_nm', L0_nm)
+            # Use safe formatting to prevent None errors
+            fc_str = self._safe_format_param(fc, ".3f")
+            rs_str = self._safe_format_param(rs, ".3f")
+            cb_str = self._safe_format_param(cb, ".2f")
+            L0_str = self._safe_format_param(L0_val, ".1f")
+            title_str += f"<br>fc={fc_str}, rs={rs_str}, c_bulk={cb_str}, L0={L0_str} nm"
         fig.update_layout(
             title=dict(text=title_str, font=dict(size=20), x=0.5),
             xaxis=dict(title="X (nm)", scaleanchor="y", scaleratio=1),
@@ -639,6 +652,11 @@ class ResultsManager:
     def __init__(self):
         pass
 
+    def _safe_get_param(self, params, key, default=0):
+        """Safely get a parameter value, handling None."""
+        val = params.get(key, default)
+        return default if val is None else val
+
     def prepare_export_data(self, interpolation_result, visualization_params):
         res = interpolation_result.copy()
         export = {
@@ -670,9 +688,9 @@ class ResultsManager:
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             p = export_data['result']['target_params']
-            fc = p.get('fc', 0)
-            rs = p.get('rs', 0)
-            cb = p.get('c_bulk', 0)
+            fc = self._safe_get_param(p, 'fc', 0)
+            rs = self._safe_get_param(p, 'rs', 0)
+            cb = self._safe_get_param(p, 'c_bulk', 0)
             filename = f"interp_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_{ts}.json"
         json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
         return json_str, filename
@@ -681,12 +699,14 @@ class ResultsManager:
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             p = interpolation_result['target_params']
-            fc = p.get('fc', 0)
-            rs = p.get('rs', 0)
-            cb = p.get('c_bulk', 0)
+            fc = self._safe_get_param(p, 'fc', 0)
+            rs = self._safe_get_param(p, 'rs', 0)
+            cb = self._safe_get_param(p, 'c_bulk', 0)
             filename = f"fields_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_{ts}.csv"
         shape = interpolation_result['shape']
         L0 = interpolation_result['target_params'].get('L0_nm', 20.0)
+        if L0 is None:
+            L0 = 20.0
         x = np.linspace(0, L0, shape[1])
         y = np.linspace(0, L0, shape[0])
         X, Y = np.meshgrid(x, y)
@@ -1037,6 +1057,8 @@ def main():
         res = st.session_state.interpolation_result
         target = res['target_params']
         L0_nm = target.get('L0_nm', 60.0)
+        if L0_nm is None:
+            L0_nm = 60.0
 
         # ---- Global time slider ----
         st.markdown('<h2 class="section-header">⏱️ Global Time Control</h2>', unsafe_allow_html=True)
@@ -1127,12 +1149,9 @@ def main():
         with tabs[1]:
             st.markdown('<h2 class="section-header">📈 Shell Thickness Evolution</h2>', unsafe_allow_html=True)
             thickness_time = res['derived']['thickness_time']
-            # Use safe_format for the title to avoid None errors
-            title_th = (f"Interpolated Thickness for fc={safe_format(target.get('fc'), '.3f')}, "
-                        f"rs={safe_format(target.get('rs'), '.3f')}, "
-                        f"c_bulk={safe_format(target.get('c_bulk'), '.2f')}")
+            # Pass current time to plot a vertical line
             fig_th = st.session_state.visualizer.create_thickness_plot(
-                thickness_time, title=title_th,
+                thickness_time, title=f"Interpolated Thickness for fc={target.get('fc', 0):.3f}, rs={target.get('rs', 0):.3f}, c_bulk={target.get('c_bulk', 0):.2f}",
                 current_time=res['time_norm']
             )
             st.pyplot(fig_th)
