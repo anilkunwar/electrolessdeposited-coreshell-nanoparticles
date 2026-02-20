@@ -4,7 +4,7 @@
 Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDITION)
 ✅ FIXED: All st.color_picker widgets now use valid hex format (#RRGGBB)
 ✅ FIXED: st.slider type mismatch for marker_line_width (int bounds vs float step)
-✅ FIXED: st.slider type mismatch for font sizes (int expected, float provided)
+✅ FIXED: NameError - design variable scope issue in footer
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -42,54 +42,54 @@ st.set_page_config(
 st.markdown("""
 <style>
 :root {
---primary-gradient: linear-gradient(90deg, #1E3A8A, #3B82F6, #10B981);
---card-bg: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
---border-accent: #3B82F6;
---font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
---font-mono: 'Fira Code', 'Consolas', monospace;
+    --primary-gradient: linear-gradient(90deg, #1E3A8A, #3B82F6, #10B981);
+    --card-bg: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+    --border-accent: #3B82F6;
+    --font-main: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'Fira Code', 'Consolas', monospace;
 }
 .main-header {
-font-size: 2.8rem;
-color: #1E3A8A;
-text-align: center;
-padding: 1.2rem;
-background: var(--primary-gradient);
--webkit-background-clip: text;
--webkit-text-fill-color: transparent;
-font-weight: 800;
-margin-bottom: 1.8rem;
-font-family: var(--font-main);
-letter-spacing: -0.02em;
+    font-size: 2.8rem;
+    color: #1E3A8A;
+    text-align: center;
+    padding: 1.2rem;
+    background: var(--primary-gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 800;
+    margin-bottom: 1.8rem;
+    font-family: var(--font-main);
+    letter-spacing: -0.02em;
 }
 .section-card {
-background: var(--card-bg);
-border-radius: 16px;
-padding: 1.4rem;
-margin: 0.6rem 0;
-border-left: 5px solid var(--border-accent);
-box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-transition: transform 0.2s ease;
+    background: var(--card-bg);
+    border-radius: 16px;
+    padding: 1.4rem;
+    margin: 0.6rem 0;
+    border-left: 5px solid var(--border-accent);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    transition: transform 0.2s ease;
 }
 .section-card:hover {
-transform: translateY(-2px);
+    transform: translateY(-2px);
 }
 .metric-card {
-background: white;
-border-radius: 12px;
-padding: 1rem;
-text-align: center;
-border: 1px solid #e2e8f0;
-box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    background: white;
+    border-radius: 12px;
+    padding: 1rem;
+    text-align: center;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
 }
 .stDataFrame { font-size: 0.92rem !important; }
 div[data-testid="stMetricValue"] { font-size: 1.6rem !important; font-weight: 600; }
 .design-control { margin: 0.4rem 0; }
 .colormap-preview {
-height: 24px;
-border-radius: 4px;
-margin: 2px 0;
-display: flex;
-border: 1px solid #cbd5e1;
+    height: 24px;
+    border-radius: 4px;
+    margin: 2px 0;
+    display: flex;
+    border: 1px solid #cbd5e1;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -100,9 +100,7 @@ st.markdown('<h1 class="main-header">🧪 Electroless Deposition Dataset Designe
 # ✅ HELPER: HEX TO RGBA CONVERSION FOR PLOTLY
 # =============================================
 def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
-    """
-    Convert hex color (#RRGGBB or #RGB) to rgba format for Plotly.
-    """
+    """Convert hex color (#RRGGBB or #RGB) to rgba format for Plotly."""
     hex_color = hex_color.lstrip('#')
     if len(hex_color) == 3:
         hex_color = ''.join([c*2 for c in hex_color])
@@ -115,9 +113,7 @@ def hex_to_rgba(hex_color: str, alpha: float = 0.9) -> str:
         return f"rgba(100, 100, 100, {alpha})"
 
 def rgba_to_hex(rgba_string: str) -> str:
-    """
-    Convert rgba string to hex format for st.color_picker.
-    """
+    """Convert rgba string to hex format for st.color_picker."""
     try:
         match = re.match(r'rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', rgba_string)
         if match:
@@ -543,38 +539,33 @@ class EnhancedPKLLoader:
 # =============================================
 class DesignConfig:
     def __init__(self):
-        # Typography - ALL COLORS IN HEX FORMAT
         self.title_font_family = "Inter, sans-serif"
-        self.title_font_size = 20  # ✅ INT for slider
+        self.title_font_size = 20
         self.title_font_weight = "bold"
         self.title_font_color = "#1E3A8A"
         self.label_font_family = "Inter, sans-serif"
-        self.label_font_size = 12  # ✅ INT for slider
+        self.label_font_size = 12
         self.label_font_color = "#374151"
-        self.tick_font_size = 10  # ✅ INT for slider
+        self.tick_font_size = 10
         self.tick_font_color = "#6B7280"
-        # Colors - ALL HEX FORMAT
         self.colormap_name = "Viridis"
         self.colormap_reversed = False
         self.bg_color = "#F8FAFC"
         self.plot_bg_color = "#FFFFFF"
         self.grid_color = "#CBD5E1"
-        # Lines & Markers
         self.line_width = 2.5
-        self.marker_size = 8  # ✅ INT for slider
+        self.marker_size = 8
         self.marker_symbol = "circle"
         self.marker_line_width = 1.0
         self.marker_line_color = "#FFFFFF"
-        # Layout
         self.show_grid = True
         self.legend_position = "bottom right"
         self.hover_mode = "closest"
-        self.plot_height = 550  # ✅ INT for slider
-        # Advanced
+        self.plot_height = 550
         self.annotation_enabled = False
         self.annotation_text = ""
         self.annotation_pos = (0.5, 0.95)
-        self.annotation_font_size = 11  # ✅ INT for slider
+        self.annotation_font_size = 11
         self.annotation_font_color = "#374151"
     
     def get_font_config(self, element: str = "title") -> dict:
@@ -979,11 +970,9 @@ class DatasetImprovementAnalyzer:
         return recommendations
 
 # =============================================
-# ✅ DESIGN CONTROL PANEL COMPONENT (FIXED SLIDER TYPES)
+# ✅ DESIGN CONTROL PANEL COMPONENT
 # =============================================
 def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> DesignConfig:
-    """Render interactive design controls in sidebar with safe color conversion."""
-    
     def ensure_hex(color_val):
         if isinstance(color_val, str) and not color_val.startswith('#'):
             return rgba_to_hex(color_val)
@@ -998,7 +987,6 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 index=FONT_FAMILIES.index(design.title_font_family) if design.title_font_family in FONT_FAMILIES else 0,
                 key=f"{key_prefix}_title_font"
             )
-            # ✅ FIX: Ensure int type for slider value
             design.title_font_size = int(st.slider(
                 "Title Size", 14, 36, int(design.title_font_size), 1,
                 key=f"{key_prefix}_title_size"
@@ -1019,12 +1007,10 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 index=FONT_FAMILIES.index(design.label_font_family) if design.label_font_family in FONT_FAMILIES else 0,
                 key=f"{key_prefix}_label_font"
             )
-            # ✅ FIX: Ensure int type for slider value
             design.label_font_size = int(st.slider(
                 "Label Size", 8, 18, int(design.label_font_size), 1,
                 key=f"{key_prefix}_label_size"
             ))
-            # ✅ FIX: Ensure int type for slider value
             design.tick_font_size = int(st.slider(
                 "Tick Size", 7, 14, int(design.tick_font_size), 1,
                 key=f"{key_prefix}_tick_size"
@@ -1077,7 +1063,6 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 "Line Width", 0.5, 5.0, float(design.line_width), 0.1,
                 key=f"{key_prefix}_line_width"
             ))
-            # ✅ FIX: Ensure int type for slider value
             design.marker_size = int(st.slider(
                 "Marker Size", 3, 15, int(design.marker_size), 1,
                 key=f"{key_prefix}_marker_size"
@@ -1108,7 +1093,6 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 ensure_hex(design.grid_color),
                 key=f"{key_prefix}_grid_color"
             )
-            # ✅ FIX: Ensure int type for slider value
             design.plot_height = int(st.slider(
                 "Plot Height", 300, 800, int(design.plot_height), 50,
                 key=f"{key_prefix}_height"
@@ -1146,7 +1130,6 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
                 key=f"{key_prefix}_annot_y"
             ))
             design.annotation_pos = (annot_x/100, annot_y/100)
-            # ✅ FIX: Ensure int type for slider value
             design.annotation_font_size = int(st.slider(
                 "Annotation Font Size", 8, 20, int(design.annotation_font_size), 1,
                 key=f"{key_prefix}_annot_size"
@@ -1160,7 +1143,7 @@ def render_design_panel(design: DesignConfig, key_prefix: str = "main") -> Desig
     return design
 
 # =============================================
-# MAIN STREAMLIT APPLICATION (with migration)
+# MAIN STREAMLIT APPLICATION
 # =============================================
 def main():
     # Initialize session state
@@ -1173,7 +1156,6 @@ def main():
     if 'design_config' not in st.session_state:
         st.session_state.design_config = DesignConfig()
     else:
-        # ✅ Migrate any legacy RGBA colors to hex (fixes st.color_picker errors)
         design = st.session_state.design_config
         color_attrs = [
             'title_font_color', 'label_font_color', 'bg_color', 'plot_bg_color',
@@ -1184,8 +1166,6 @@ def main():
             if old_val and isinstance(old_val, str) and not old_val.startswith('#'):
                 setattr(design, attr, rgba_to_hex(old_val))
         
-        # ✅ FIX: Ensure numeric values maintain correct types for sliders
-        # INT attributes (for sliders with step=1)
         int_attrs = [
             'title_font_size', 'label_font_size', 'tick_font_size',
             'marker_size', 'plot_height', 'annotation_font_size'
@@ -1199,7 +1179,6 @@ def main():
                     default_val = getattr(DesignConfig(), attr)
                     setattr(design, attr, default_val)
         
-        # FLOAT attributes (for sliders with step=0.1 or 0.5)
         float_attrs = [
             'line_width', 'marker_line_width'
         ]
@@ -1235,7 +1214,6 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
-        # Target Variable Selection
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 🎯 Target Variable")
         available_targets = []
@@ -1252,11 +1230,9 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
-        # ✅ RENDER DESIGN CONTROL PANEL
         st.session_state.design_config = render_design_panel(st.session_state.design_config)
         st.divider()
         
-        # Analysis Controls
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### ⚙️ Analysis Settings")
         normalize_radar = st.checkbox("Normalize radar chart values", value=True)
@@ -1632,12 +1608,12 @@ def main():
 - Increasing spatial resolution for validation cases (Nx=512)
 """)
 
-# =============================================
-# FOOTER & HELP
-# =============================================
-st.divider()
-with st.expander("❓ Help & Documentation"):
-    st.markdown(f"""
+    # =============================================
+    # ✅ FOOTER & HELP (MOVED INSIDE main() WHERE design IS IN SCOPE)
+    # =============================================
+    st.divider()
+    with st.expander("❓ Help & Documentation"):
+        st.markdown(f"""
 ### 🧪 Dataset Designer Pro Guide
 **🎨 Design Panel Features:**
 - **50+ colormaps**: Viridis, Plasma, Inferno, Turbo, Rainbow, Jet, Cividis, and more
@@ -1664,7 +1640,8 @@ with st.expander("❓ Help & Documentation"):
 - Use the Design Panel to adjust font sizes if labels appear clipped
 """)
 
-st.markdown(f"""
+    # ✅ FIX: Footer now inside main() where design variable is accessible
+    st.markdown(f"""
 <div style="text-align: center; padding: 1.2rem; color: #64748b; font-size: 0.92rem; font-family: {design.label_font_family};">
 🧪 Electroless Deposition Dataset Designer Pro v4.0 •
 Built with Streamlit + Plotly + Pandas •
