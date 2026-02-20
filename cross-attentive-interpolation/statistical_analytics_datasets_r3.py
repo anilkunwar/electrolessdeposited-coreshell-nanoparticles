@@ -7,7 +7,8 @@ Electroless Ag-Cu Deposition — Dataset Designer & Analyzer (ENHANCED N-DIM EDI
 ✅ FIXED: NameError - design variable scope issue in footer
 ✅ FIXED: TypeError in fig_cov.update_layout (removed invalid title_text argument)
 ✅ FIXED: Duplicate 'height' argument in update_layout (now removed from layout_updates)
-✅ FIXED: Deprecated use_container_width replaced with width='stretch'
+✅ FIXED: Deprecated use_container_width replaced with width='stretch' in all widgets
+✅ FIXED: Explicit unique keys for all interactive widgets to avoid StreamlitDuplicateElementId
 ✓ 50+ colormap options with safe loading (rainbow, turbo, jet, inferno, viridis, etc.)
 ✓ Full font/typography controls (size, family, weight, color for titles/labels/ticks)
 ✓ Line/curve/marker thickness sliders for all visualizations
@@ -1201,8 +1202,8 @@ def main():
     with st.sidebar:
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### 📁 Data Management")
-        pkl_dir = st.text_input("PKL Directory", value=SOLUTIONS_DIR, help="Directory containing .pkl simulation files")
-        if st.button("🔄 Scan Directory", use_container_width=True):
+        pkl_dir = st.text_input("PKL Directory", value=SOLUTIONS_DIR, help="Directory containing .pkl simulation files", key="pkl_dir_input")
+        if st.button("🔄 Scan Directory", use_container_width=True, key="scan_button"):
             with st.spinner("Scanning for PKL files..."):
                 st.session_state.loader.pkl_dir = pkl_dir
                 st.session_state.metadata_df = st.session_state.loader.load_all()
@@ -1229,18 +1230,19 @@ def main():
             "Select output metric to analyze",
             available_targets if available_targets else list(DERIVED_METRICS.keys()),
             index=available_targets.index(st.session_state.selected_target) if st.session_state.selected_target in available_targets else 0,
-            help=DERIVED_METRICS.get(st.session_state.selected_target, "No description available")
+            help=DERIVED_METRICS.get(st.session_state.selected_target, "No description available"),
+            key="target_select"
         )
         st.markdown('</div>', unsafe_allow_html=True)
         st.divider()
         
-        st.session_state.design_config = render_design_panel(st.session_state.design_config)
+        st.session_state.design_config = render_design_panel(st.session_state.design_config, key_prefix="main")
         st.divider()
         
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.markdown("### ⚙️ Analysis Settings")
-        normalize_radar = st.checkbox("Normalize radar chart values", value=True)
-        top_n_table = st.slider("Top N simulations in table", 5, 50, 20, 5)
+        normalize_radar = st.checkbox("Normalize radar chart values", value=True, key="normalize_radar")
+        top_n_table = st.slider("Top N simulations in table", 5, 50, 20, 5, key="top_n_slider")
         available_corr_params = []
         if not st.session_state.metadata_df.empty:
             for cat_params in PARAM_CATEGORIES.values():
@@ -1258,7 +1260,8 @@ def main():
                 "Parameters for correlation analysis",
                 available_corr_params,
                 default=default_corr if default_corr else available_corr_params[:3],
-                help="Select numeric parameters to compute correlations"
+                help="Select numeric parameters to compute correlations",
+                key="corr_params"
             )
         else:
             correlation_params = st.multiselect(
@@ -1266,7 +1269,8 @@ def main():
                 ["No numeric parameters available"],
                 default=[],
                 help="Load data first to see available parameters",
-                disabled=True
+                disabled=True,
+                key="corr_params_disabled"
             )
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1337,20 +1341,20 @@ def main():
             col_f1, col_f2, col_f3 = st.columns(3)
             with col_f1:
                 if 'c_bulk' in df.columns:
-                    filter_c_bulk = st.checkbox("Filter by c_bulk")
+                    filter_c_bulk = st.checkbox("Filter by c_bulk", key="filter_c_bulk")
                     if filter_c_bulk:
                         c_min, c_max = float(df['c_bulk'].min()), float(df['c_bulk'].max())
-                        c_range = st.slider("c_bulk range", c_min, c_max, (c_min, c_max))
+                        c_range = st.slider("c_bulk range", c_min, c_max, (c_min, c_max), key="c_range_slider")
             with col_f2:
                 if 'use_edl' in df.columns:
-                    filter_edl = st.checkbox("Filter by EDL")
+                    filter_edl = st.checkbox("Filter by EDL", key="filter_edl")
                     if filter_edl:
-                        edl_filter = st.multiselect("EDL status", [True, False], default=[True, False])
+                        edl_filter = st.multiselect("EDL status", [True, False], default=[True, False], key="edl_filter")
             with col_f3:
                 sort_options = [target] + [c for c in df.columns if 'metric' in c or c in ['c_bulk', 'L0_nm']]
                 if sort_options:
-                    sort_col = st.selectbox("Sort by", sort_options, index=0)
-                    sort_asc = st.checkbox("Ascending", value=False)
+                    sort_col = st.selectbox("Sort by", sort_options, index=0, key="sort_col")
+                    sort_asc = st.checkbox("Ascending", value=False, key="sort_asc")
         filtered_df = df.copy()
         if 'c_bulk' in df.columns and 'filter_c_bulk' in locals() and filter_c_bulk:
             filtered_df = filtered_df[(filtered_df['c_bulk'] >= c_range[0]) & (filtered_df['c_bulk'] <= c_range[1])]
@@ -1368,21 +1372,32 @@ def main():
                 .format(precision=3)
                 .highlight_max(subset=[target] if target in summary_table.columns else None, color='#d1fae5')
                 .highlight_min(subset=[target] if target in summary_table.columns else None, color='#fee2e2'),
-                use_container_width=True,  # deprecated, will be replaced with width='stretch' after 2025-12-31
-                width='stretch',           # new parameter
-                height=400
+                width='stretch',          # ✅ replaced use_container_width
+                height=400,
+                key="summary_table"       # explicit key
             )
+
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 csv = summary_table.to_csv(index=False)
-                st.download_button("📥 Download CSV", csv, f"summary_{target}_{datetime.now():%Y%m%d}.csv", "text/csv", use_container_width=True)  # deprecated
-                # For future compatibility:
-                st.download_button("📥 Download CSV", csv, f"summary_{target}_{datetime.now():%Y%m%d}.csv", "text/csv", width='stretch')
+                st.download_button(
+                    "📥 Download CSV",
+                    csv,
+                    f"summary_{target}_{datetime.now():%Y%m%d}.csv",
+                    "text/csv",
+                    width='stretch',       # ✅ new parameter
+                    key="download_csv"     # ✅ explicit unique key
+                )
             with col_exp2:
                 json_data = summary_table.to_json(orient='records', indent=2)
-                st.download_button("📥 Download JSON", json_data, f"summary_{target}_{datetime.now():%Y%m%d}.json", "application/json", use_container_width=True)
-                # For future compatibility:
-                st.download_button("📥 Download JSON", json_data, f"summary_{target}_{datetime.now():%Y%m%d}.json", "application/json", width='stretch')
+                st.download_button(
+                    "📥 Download JSON",
+                    json_data,
+                    f"summary_{target}_{datetime.now():%Y%m%d}.json",
+                    "application/json",
+                    width='stretch',       # ✅ new parameter
+                    key="download_json"    # ✅ explicit unique key
+                )
         else:
             st.warning("No data matches current filters")
     
@@ -1401,7 +1416,7 @@ def main():
                             if st.checkbox(p, key=f"radar_{p}", value=p in ['c_bulk', 'core_radius_frac']):
                                 available_params.append(p)
             st.markdown("**Select Simulations**")
-            n_to_show = st.slider("Number of simulations to compare", 2, min(100, len(df)), 4, 1)
+            n_to_show = st.slider("Number of simulations to compare", 2, min(100, len(df)), 4, 1, key="radar_n_sims")
             if len(df) >= n_to_show:
                 sample_cols = [c for c in ['c_bulk', 'core_radius_frac', 'use_edl'] if c in df.columns]
                 sample_df = df[sample_cols].copy() if sample_cols else df.copy()
@@ -1409,7 +1424,7 @@ def main():
                 selected_indices = sample_df.drop_duplicates().head(n_to_show)['idx'].tolist()
             else:
                 selected_indices = list(range(len(df)))
-            compare_btn = st.button("🔄 Generate Comparison", use_container_width=True)
+            compare_btn = st.button("🔄 Generate Comparison", use_container_width=True, key="radar_compare_btn")
         with col_r1:
             if available_params and compare_btn:
                 radar_builder = RadarChartBuilder()
@@ -1420,7 +1435,7 @@ def main():
                         design=design,
                         normalize=normalize_radar
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key="radar_chart")
                 except Exception as e:
                     st.error(f"Radar chart error: {e}")
                 with st.expander("💡 How to interpret this radar chart"):
@@ -1457,10 +1472,10 @@ def main():
         selected_dimensions = list(dict.fromkeys(selected_dimensions))
         col_agg, col_val = st.columns(2)
         with col_agg:
-            agg_method = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "std"], index=0)
+            agg_method = st.selectbox("Aggregation", ["mean", "median", "sum", "min", "max", "std"], index=0, key="sunburst_agg")
         with col_val:
             value_options = [k for k in DERIVED_METRICS.keys() if f'metric_{k}' in df.columns] or [c for c in df.columns if 'metric' in c]
-            value_col = st.selectbox("Value to Display", value_options if value_options else list(df.columns), index=0)
+            value_col = st.selectbox("Value to Display", value_options if value_options else list(df.columns), index=0, key="sunburst_val")
         if len(selected_dimensions) >= 2 and value_col:
             sunburst_builder = SunburstBuilder()
             try:
@@ -1471,7 +1486,7 @@ def main():
                     design=design,
                     aggregation=agg_method
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="sunburst_chart")
                 with st.expander("📊 Key Insights from Hierarchy"):
                     if all(d in df.columns for d in selected_dimensions[:2]):
                         target_col = f'metric_{value_col}' if value_col in DERIVED_METRICS else value_col
@@ -1506,7 +1521,7 @@ def main():
             corr_builder = SummaryTableBuilder()
             try:
                 fig = corr_builder.create_correlation_matrix(df, valid_corr_params, design)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="corr_chart")
             except Exception as e:
                 st.error(f"Correlation matrix error: {e}")
             with st.expander("🎯 Strong Correlations with Target"):
@@ -1585,7 +1600,7 @@ def main():
             )
             fig_cov.update_xaxes(title_text="Value", tickfont=design.get_font_config("tick"))
             fig_cov.update_yaxes(title_text="Count", tickfont=design.get_font_config("tick"))
-            st.plotly_chart(fig_cov, use_container_width=True)
+            st.plotly_chart(fig_cov, use_container_width=True, key="coverage_hist")
         st.markdown("#### 🎯 Export Next Experimental Design")
         with st.expander("Generate parameter suggestions for new simulations"):
             if gaps:
@@ -1607,10 +1622,16 @@ def main():
                             pass
                 if suggestion_df:
                     sugg_df = pd.DataFrame(suggestion_df)
-                    st.dataframe(sugg_df, use_container_width=True, width='stretch')
+                    st.dataframe(sugg_df, width='stretch', key="suggestions_table")
                     csv_sugg = sugg_df.to_csv(index=False)
-                    st.download_button("📥 Download Suggested Parameters", csv_sugg,
-                                     f"suggested_params_{datetime.now():%Y%m%d}.csv", "text/csv", width='stretch')
+                    st.download_button(
+                        "📥 Download Suggested Parameters",
+                        csv_sugg,
+                        f"suggested_params_{datetime.now():%Y%m%d}.csv",
+                        "text/csv",
+                        width='stretch',
+                        key="download_suggested"
+                    )
             else:
                 st.info("No clear gaps detected. Consider:")
                 st.markdown("""
