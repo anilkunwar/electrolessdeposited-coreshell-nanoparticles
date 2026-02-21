@@ -708,10 +708,24 @@ class CoreShellInterpolator:
                 c = (1 - alpha) * c1 + alpha * c2
                 psi = (1 - alpha) * psi1 + alpha * psi2
 
-        # Resize to target shape (handles 2D or 3D)
+        # ----- FIX: Ensure dimensionality matches target_shape -----
+        # If source is 3D but target is 2D, take a central slice
+        if len(target_shape) == 2 and phi.ndim == 3:
+            mid = phi.shape[0] // 2
+            phi = phi[mid]
+            psi = psi[mid]
+            c = c[mid]
+        # If source is 2D but target is 3D (unlikely), we could expand; for now just pass through
+        # (will cause error later if zoom fails, but we'll handle with safe zoom below)
+        # -----------------------------------------------------------
+
+        # Resize to target shape if necessary
         if phi.shape != target_shape:
-            # Use zoom; for 3D, factors are (d0/d0, d1/d1, d2/d2)
+            # Compute zoom factors ensuring same length as array dimensions
             factors = tuple(t / s for t, s in zip(target_shape, phi.shape))
+            # Safe zoom: if factors length < phi.ndim, pad with 1's for leading dims
+            if len(factors) < phi.ndim:
+                factors = (1,) * (phi.ndim - len(factors)) + factors
             phi = zoom(phi, factors, order=1)
             c = zoom(c, factors, order=1)
             psi = zoom(psi, factors, order=1)
@@ -1287,7 +1301,7 @@ def main():
 
         st.markdown("#### ⏱️ Temporal Attention (Parameter‑Aware)")
         use_parameter_aware_temporal = st.checkbox("Enable parameter‑aware temporal attention", value=True,
-                                                    help="Uces kernel over parameters and time to interpolate thickness")
+                                                    help="Uses kernel over parameters and time to interpolate thickness")
         temporal_sigma = st.slider("Temporal kernel σ", 0.01, 0.5, 0.1, 0.01,
                                    help="Width of time kernel for temporal attention")
 
