@@ -87,7 +87,11 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi4-streamlit-red)](https://electroless-deposition-fields-interpolation4.streamlit.app/) (interpolation functions with spatiotemporal information,  temporal results still not robust)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi5-streamlit-red)](https://electroless-deposition-fields-interpolation5.streamlit.app/) (interpolation functions with spatiotemporal information,  temporal results still not robust)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi5-streamlit-red)](https://electroless-deposition-fields-interpolation5.streamlit.app/) (interpolation functions with spatiotemporal information,  temporal results still not working)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi6-streamlit-red)](https://electroless-deposition-fields-interpolation6.streamlit.app/) (interpolation functions with spatiotemporal information,  temporal results starts to work, study of this code is needed)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi7-streamlit-red)](https://electroless-deposition-fields-interpolation7.streamlit.app/) (interpolation functions with spatiotemporal information,  temporal results still not working)
 
 
 Statistical Analytics:
