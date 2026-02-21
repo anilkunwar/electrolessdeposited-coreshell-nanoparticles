@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 Transformer‑Inspired Interpolation for Electroless Ag Shell Deposition on Cu Core
-FULL TEMPORAL SUPPORT + VICINITY‑BASED ATTENTION (No EDL/no‑EDL gating)
+FULL TEMPORAL SUPPORT + GATED ATTENTION (EDL / no‑EDL)
 ------------------------------------------------------------------------------
 Enhancements:
-- All sources treated uniformly; EDL/no‑EDL gating removed.
 - Vicinity‑based weighting: Gaussian kernel in normalised parameter space,
   blended with learned attention via a user‑controllable kernel strength.
 - Phase‑based voting for phi/psi → discrete phases, realistic thickness.
 - Safe formatting of parameters to avoid None‑related crashes.
+- All weight keys always present.
 """
 import streamlit as st
 import numpy as np
@@ -183,7 +183,7 @@ class PositionalEncoding(nn.Module):
         return x + pe.unsqueeze(0)
 
 # =============================================
-# CORE‑SHELL INTERPOLATOR with Vicinity‑based Attention (No Gating)
+# CORE‑SHELL INTERPOLATOR with Gated Attention (EDL / no‑EDL)
 # =============================================
 class CoreShellInterpolator:
     def __init__(self, d_model=64, nhead=8, num_layers=3,
@@ -211,7 +211,25 @@ class CoreShellInterpolator:
         # Real multi‑head attention
         self.attention = nn.MultiheadAttention(d_model, nhead, dropout=0.1, batch_first=True)
 
-        # Note: No EDL/no‑EDL gates; all sources treated uniformly
+        # Dual gates (optional, can be overridden by kernel strength)
+        self.edl_gate_net = nn.Sequential(
+            nn.Linear(d_model * 2 + 1, d_model),   # +1 for time_norm
+            nn.ReLU(),
+            nn.Linear(d_model, 1),
+            nn.Sigmoid()
+        )
+        self.no_edl_gate_net = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, 1),
+            nn.Sigmoid()
+        )
+
+        # Meta‑gate (blend between EDL and no‑EDL groups)
+        self.meta_gate = nn.Sequential(
+            nn.Linear(2, 1),   # inputs: target_use_edl (0/1), time_norm (0-1)
+            nn.Sigmoid()
+        )
 
     def set_parameter_sigma(self, param_sigma):
         self.param_sigma = param_sigma
@@ -354,46 +372,91 @@ class CoreShellInterpolator:
         if time_norm is None:
             time_norm = 1.0
 
-        # Extract parameters from all sources
-        source_params = [s['params'] for s in sources]
-        N_sources = len(source_params)
+        # Group sources by use_edl
+        edl_sources = [s for s in sources if s['params'].get('use_edl', False)]
+        no_edl_sources = [s for s in sources if not s['params'].get('use_edl', False)]
 
-        # Encode parameters (target + sources)
+        edl_params = [s['params'] for s in edl_sources]
+        no_edl_params = [s['params'] for s in no_edl_sources]
+
+        # Encode parameters
         target_features = self.encode_parameters([target_params])                     # (1, 12)
-        source_features = self.encode_parameters(source_params)                       # (N, 12)
+        edl_features = self.encode_parameters(edl_params) if edl_params else torch.zeros((1, self.d_model))
+        no_edl_features = self.encode_parameters(no_edl_params) if no_edl_params else torch.zeros((1, self.d_model))
 
-        # Stack: [target, sources...]
-        all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)  # (1, 1+N, 12)
-        proj = self.input_proj(all_features)                                            # (1, 1+N, d_model)
+        # Stack: [target, edl_sources..., no_edl_sources...]
+        all_features = torch.cat([target_features, edl_features, no_edl_features], dim=0).unsqueeze(0)  # (1, N_total, 12)
+        proj = self.input_proj(all_features)                                            # (1, N_total, d_model)
         proj = self.pos_encoder(proj)
-        transformer_out = self.transformer(proj)                                        # (1, 1+N, d_model)
+        transformer_out = self.transformer(proj)                                        # (1, N_total, d_model)
 
         target_rep = transformer_out[:, 0, :]                                           # (1, d_model)
-        source_reps = transformer_out[:, 1:, :]                                         # (1, N, d_model)
 
-        # Attention scores
-        attn_out, _ = self.attention(target_rep.unsqueeze(1), source_reps, source_reps)   # (1, 1, d_model)
-        attn_scores = attn_out.squeeze(1) / np.sqrt(self.d_model) / self.temperature      # (1, N)
+        # ========== EDL group ==========
+        edl_kernel_list = []    # will hold kernel weights (numpy)
+        edl_attn_list = []      # will hold attention scores (numpy)
+        if edl_params:
+            edl_reps = transformer_out[:, 1:1+len(edl_params), :]                       # (1, N_edl, d_model)
 
-        # Kernel weights
-        kernel_weights = self.compute_parameter_kernel(source_params, target_params)       # (N,)
-        kernel_weights_t = torch.FloatTensor(kernel_weights).unsqueeze(0).to(source_reps.device)  # (1, N)
+            # Attention scores for EDL group
+            edl_attn, _ = self.attention(target_rep.unsqueeze(1), edl_reps, edl_reps)   # (1, 1, d_model)
+            edl_scores = edl_attn.squeeze(1) / np.sqrt(self.d_model) / self.temperature  # (1, N_edl)
 
-        # Combine kernel and attention according to kernel_strength
-        blend = kernel_strength
-        combined = blend * kernel_weights_t + (1 - blend) * attn_scores
-        combined_weights = torch.softmax(combined, dim=-1)                                 # (1, N)
+            # Kernel weights
+            edl_kernel = self.compute_parameter_kernel(edl_params, target_params)       # (N_edl,)
+            edl_kernel_t = torch.FloatTensor(edl_kernel).unsqueeze(0).to(edl_reps.device) # (1, N_edl)
 
-        # Convert to numpy for further processing
-        combined_weights_np = combined_weights.squeeze().detach().cpu().numpy()
-        kernel_weights_np = kernel_weights
-        attn_scores_np = attn_scores.squeeze().detach().cpu().numpy()
+            # Combine kernel and attention according to kernel_strength
+            # (if kernel_strength == 1, ignore attention; if 0, ignore kernel)
+            blend = kernel_strength
+            edl_combined = blend * edl_kernel_t + (1 - blend) * edl_scores
+            edl_weights_raw = torch.softmax(edl_combined, dim=-1)                       # (1, N_edl)
+
+            edl_kernel_list = edl_kernel.tolist()
+            edl_attn_list = edl_scores.squeeze().detach().cpu().numpy().tolist()
+        else:
+            edl_weights_raw = torch.zeros((1, 0))
+
+        # ========== no‑EDL group ==========
+        no_edl_kernel_list = []
+        no_edl_attn_list = []
+        if no_edl_params:
+            no_edl_reps = transformer_out[:, 1+len(edl_params):, :]                       # (1, N_noedl, d_model)
+
+            no_edl_attn, _ = self.attention(target_rep.unsqueeze(1), no_edl_reps, no_edl_reps)
+            no_edl_scores = no_edl_attn.squeeze(1) / np.sqrt(self.d_model) / self.temperature
+
+            no_edl_kernel = self.compute_parameter_kernel(no_edl_params, target_params)
+            no_edl_kernel_t = torch.FloatTensor(no_edl_kernel).unsqueeze(0).to(no_edl_reps.device)
+
+            blend = kernel_strength
+            no_edl_combined = blend * no_edl_kernel_t + (1 - blend) * no_edl_scores
+            no_edl_weights_raw = torch.softmax(no_edl_combined, dim=-1)
+
+            no_edl_kernel_list = no_edl_kernel.tolist()
+            no_edl_attn_list = no_edl_scores.squeeze().detach().cpu().numpy().tolist()
+        else:
+            no_edl_weights_raw = torch.zeros((1, 0))
+
+        # ========== Meta‑gate: blend the two groups ==========
+        meta_input = torch.tensor([[1.0 if target_params.get('use_edl', False) else 0.0, time_norm]],
+                                  dtype=torch.float32)
+        meta_edl_weight = self.meta_gate(meta_input).item()      # scalar in [0,1]
+        meta_no_edl_weight = 1.0 - meta_edl_weight
+
+        # Convert to numpy weights and apply meta‑gate
+        edl_weights = edl_weights_raw.squeeze().detach().cpu().numpy() * meta_edl_weight
+        no_edl_weights = no_edl_weights_raw.squeeze().detach().cpu().numpy() * meta_no_edl_weight
+
+        combined_weights = np.concatenate([edl_weights, no_edl_weights])
+        combined_weights /= (combined_weights.sum() + 1e-8)
 
         # ========== Gather fields from all sources at the requested time ==========
+        all_sources = edl_sources + no_edl_sources
         source_fields = []
         source_thickness = []
 
-        for src in sources:
+        for src in all_sources:
             fields = self._get_fields_at_time(src, time_norm, target_shape)
             source_fields.append(fields)
 
@@ -428,7 +491,7 @@ class CoreShellInterpolator:
         flat_c = [c.ravel() for c in source_c_fields]
 
         votes = np.zeros((n_pixels, 3))
-        for w, phase_flat in zip(combined_weights_np, flat_phases):
+        for w, phase_flat in zip(combined_weights, flat_phases):
             np.add.at(votes, (np.arange(n_pixels), phase_flat), w)
 
         winning_phase = np.argmax(votes, axis=1)
@@ -441,7 +504,7 @@ class CoreShellInterpolator:
         new_psi_flat[cu_mask] = 1.0
 
         c_flat_avg = np.zeros(n_pixels)
-        for w, c_flat in zip(combined_weights_np, flat_c):
+        for w, c_flat in zip(combined_weights, flat_c):
             c_flat_avg += w * c_flat
         c_flat_avg[winning_phase != 0] = 0.0
 
@@ -467,7 +530,7 @@ class CoreShellInterpolator:
 
         thickness_interp = np.zeros_like(common_t_norm)
         for i, curve in enumerate(thickness_curves):
-            thickness_interp += combined_weights_np[i] * curve
+            thickness_interp += combined_weights[i] * curve
 
         # ========== Derived quantities at current time ==========
         material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'], threshold=0.5)
@@ -483,6 +546,10 @@ class CoreShellInterpolator:
         stats = DepositionPhysics.phase_stats(interp['phi'], interp['psi'], dx, dx, L0)
 
         # ========== Assemble result ==========
+        # Combine kernel, attention lists
+        kernel_list = edl_kernel_list + no_edl_kernel_list
+        attention_list = edl_attn_list + no_edl_attn_list
+
         result = {
             'fields': interp,
             'derived': {
@@ -496,20 +563,23 @@ class CoreShellInterpolator:
                 }
             },
             'weights': {
-                'combined': combined_weights_np.tolist(),
-                'kernel': kernel_weights_np.tolist(),
-                'attention': attn_scores_np.tolist()
+                'combined': combined_weights.tolist(),
+                'kernel': kernel_list,
+                'attention': attention_list,
+                'edl': edl_weights.tolist(),
+                'no_edl': no_edl_weights.tolist(),
+                'meta_edl': meta_edl_weight
             },
             'target_params': target_params,
             'shape': target_shape,
-            'num_sources': len(sources),
-            'source_params': source_params,
+            'num_sources': len(all_sources),
+            'source_params': [s['params'] for s in all_sources],
             'time_norm': time_norm
         }
         return result
 
 # =============================================
-# HEATMAP VISUALIZER (unchanged)
+# HEATMAP VISUALIZER (unchanged from previous version)
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
@@ -603,7 +673,7 @@ class ResultsManager:
         export = {
             'metadata': {
                 'generated_at': datetime.now().isoformat(),
-                'interpolation_method': 'core_shell_transformer_vicinity_attention',
+                'interpolation_method': 'core_shell_transformer_gated_phase_voting',
                 'visualization_params': visualization_params
             },
             'result': {
@@ -896,7 +966,7 @@ class EnhancedSolutionLoader:
 # MAIN STREAMLIT APP
 # =============================================
 def main():
-    st.set_page_config(page_title="Core‑Shell Deposition Interpolator (Vicinity‑based Attention)",
+    st.set_page_config(page_title="Core‑Shell Deposition Interpolator (Gated Attention + Temporal)",
                        layout="wide", page_icon="🧪", initial_sidebar_state="expanded")
     st.markdown("""
     <style>
@@ -908,7 +978,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition Interpolator (Vicinity‑based Attention)</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition Interpolator (Gated Attention + Temporal)</h1>', unsafe_allow_html=True)
 
     # Initialize session state
     if 'solutions' not in st.session_state:
@@ -924,7 +994,7 @@ def main():
     if 'interpolation_result' not in st.session_state:
         st.session_state.interpolation_result = None
     if 'temporal_cache' not in st.session_state:
-        st.session_state.temporal_cache = {}  # cache for (target_params_hash, time_norm, kernel_strength)
+        st.session_state.temporal_cache = {}  # cache for (target_params_hash, time_norm)
 
     # Sidebar
     with st.sidebar:
@@ -965,7 +1035,7 @@ def main():
         sigma_L = st.slider("Kernel σ (L0_nm)", 0.05, 0.3, 0.15, 0.01)
         temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
         n_time_points = st.slider("Number of time points for thickness curve", 20, 200, 100, 10)
-        # Kernel strength slider
+        # NEW: Kernel strength slider
         kernel_strength = st.slider("Kernel strength (0 = pure attention, 1 = pure vicinity)", 0.0, 1.0, 1.0, 0.05,
                                     help="Blend between learned attention (0) and vicinity‑based kernel (1). Set to 1 to enforce strict proximity weighting.")
 
@@ -989,7 +1059,7 @@ def main():
                     )
                     if res:
                         st.session_state.interpolation_result = res
-                        cache_key = (frozenset(target.items()), 1.0, kernel_strength)
+                        cache_key = (frozenset(target.items()), 1.0, kernel_strength)  # include kernel_strength in cache key
                         st.session_state.temporal_cache[cache_key] = res
                         st.success("Interpolation successful! Use the global slider below to explore time.")
                     else:
@@ -1145,7 +1215,7 @@ def main():
             st.pyplot(fig_pot)
 
         with tabs[3]:
-            st.markdown('<h2 class="section-header">⚖️ Attention & Kernel Weights</h2>', unsafe_allow_html=True)
+            st.markdown('<h2 class="section-header">⚖️ Attention Weights & Gate</h2>', unsafe_allow_html=True)
             df_weights = pd.DataFrame({
                 'Source index': range(len(res['weights']['combined'])),
                 'Combined weight': res['weights']['combined'],
@@ -1161,9 +1231,16 @@ def main():
             ax.bar(x + width/2, res['weights']['attention'], width, label='Attention', alpha=0.7)
             ax.set_xlabel('Source index')
             ax.set_ylabel('Weight')
-            ax.set_title('Comparison of kernel vs attention weights (blended)')
+            ax.set_title('Comparison of kernel vs attention weights')
             ax.legend()
             st.pyplot(fig_w)
+
+            # Show EDL-specific weights if available
+            if 'edl' in res['weights']:
+                st.subheader("EDL vs. no‑EDL weights")
+                st.write(f"Meta‑gate EDL weight: {res['weights']['meta_edl']:.3f}")
+                st.write(f"EDL group weights (after meta): {res['weights']['edl']}")
+                st.write(f"no‑EDL group weights (after meta): {res['weights']['no_edl']}")
 
         with tabs[4]:
             st.markdown('<h2 class="section-header">💾 Export Data</h2>', unsafe_allow_html=True)
