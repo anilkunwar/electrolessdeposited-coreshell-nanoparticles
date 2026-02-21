@@ -19,3 +19,4 @@ pandas
 xgboost
 s3fs
 cmasher
+einops
