@@ -826,6 +826,9 @@ class CoreShellInterpolator:
         global_blended = kernel_strength * kernel_tensor + (1 - kernel_strength) * global_attn_scores
         global_weights = torch.softmax(global_blended, dim=-1)  # (1, N)
 
+        # ---- Convert global weights to numpy array for later use (important for uncertainty) ----
+        global_weights_np = global_weights.detach().cpu().numpy().flatten()
+
         # ---- Spatial attention (if enabled) ----
         if self.use_spatial_attention:
             # Extract patches from each source field at the target time
@@ -897,11 +900,10 @@ class CoreShellInterpolator:
                 global_phi = np.zeros_like(interp_phi)
                 global_psi = np.zeros_like(interp_psi)
                 global_c = np.zeros_like(interp_c)
-                global_w = global_weights.detach().cpu().numpy().flatten()
                 for i in range(N):
-                    global_phi += global_w[i] * source_fields_at_time[i]['phi']
-                    global_psi += global_w[i] * source_fields_at_time[i]['psi']
-                    global_c += global_w[i] * source_fields_at_time[i]['c']
+                    global_phi += global_weights_np[i] * source_fields_at_time[i]['phi']
+                    global_psi += global_weights_np[i] * source_fields_at_time[i]['psi']
+                    global_c += global_weights_np[i] * source_fields_at_time[i]['c']
                 interp_phi[mask_zero] = global_phi[mask_zero]
                 interp_psi[mask_zero] = global_psi[mask_zero]
                 interp_c[mask_zero] = global_c[mask_zero]
@@ -912,7 +914,6 @@ class CoreShellInterpolator:
             interp = {'phi': np.zeros(target_shape),
                       'c': np.zeros(target_shape),
                       'psi': np.zeros(target_shape)}
-            global_weights_np = global_weights.detach().cpu().numpy().flatten()
             for i, fld in enumerate(source_fields_at_time):
                 interp['phi'] += global_weights_np[i] * fld['phi']
                 interp['c'] += global_weights_np[i] * fld['c']
@@ -953,7 +954,6 @@ class CoreShellInterpolator:
                 source_seq_tensors.append(torch.FloatTensor(th_interp).unsqueeze(-1))
 
             thickness_interp = np.zeros_like(common_t_norm)
-            global_weights_np = global_weights.detach().cpu().numpy().flatten()
             for i, seq in enumerate(source_seq_tensors):
                 thickness_interp += global_weights_np[i] * seq.squeeze().numpy()
 
