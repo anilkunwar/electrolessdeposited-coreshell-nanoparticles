@@ -13,7 +13,6 @@ Enhancements over preliminary version:
 - Full 3D support via configurable slicing or 3D patches.
 - Configurable patch size and overlap.
 - All new features are optional and backward‑compatible.
-- NEW: Parameter-dependent gating in temporal attention for c_bulk, L0_nm, fc, rs.
 """
 import streamlit as st
 import numpy as np
@@ -35,8 +34,9 @@ from scipy.ndimage import zoom, gaussian_filter
 from scipy.interpolate import interp1d
 from typing import List, Dict, Any, Optional, Tuple, Union
 import time
-from einops import rearrange, repeat # for easy patching
+from einops import rearrange, repeat  # for easy patching
 warnings.filterwarnings('ignore')
+
 # =============================================
 # GLOBAL STYLING CONFIGURATION (unchanged)
 # =============================================
@@ -54,9 +54,11 @@ plt.rcParams.update({
     'grid.linestyle': '--',
     'image.cmap': 'viridis'
 })
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SOLUTIONS_DIR = os.path.join(SCRIPT_DIR, "numerical_solutions")
 os.makedirs(SOLUTIONS_DIR, exist_ok=True)
+
 COLORMAP_OPTIONS = {
     'Sequential': ['viridis', 'plasma', 'inferno', 'magma', 'cividis', 'turbo', 'hot'],
     'Diverging': ['RdBu', 'RdYlBu', 'Spectral', 'coolwarm', 'bwr', 'seismic'],
@@ -64,30 +66,35 @@ COLORMAP_OPTIONS = {
     'Perceptually Uniform': ['viridis', 'plasma', 'inferno', 'magma', 'cividis'],
     'Publication Standard': ['viridis', 'plasma', 'inferno', 'magma', 'cividis', 'RdBu']
 }
+
 # =============================================
 # DEPOSITION PARAMETERS (normalisation) - unchanged
 # =============================================
 class DepositionParameters:
     """Normalises and stores core‑shell deposition parameters."""
     RANGES = {
-        'fc': (0.05, 0.45), # core/L
-        'rs': (0.01, 0.6), # Δr/r_core
-        'c_bulk': (0.1, 1.0), # bulk concentration
-        'L0_nm': (10.0, 100.0) # domain length in nm
+        'fc': (0.05, 0.45),       # core/L
+        'rs': (0.01, 0.6),         # Δr/r_core
+        'c_bulk': (0.1, 1.0),       # bulk concentration
+        'L0_nm': (10.0, 100.0)      # domain length in nm
     }
+    
     @staticmethod
     def normalize(value: float, param_name: str) -> float:
         low, high = DepositionParameters.RANGES[param_name]
         return (value - low) / (high - low)
+    
     @staticmethod
     def denormalize(norm_value: float, param_name: str) -> float:
         low, high = DepositionParameters.RANGES[param_name]
         return norm_value * (high - low) + low
+
 # =============================================
 # DEPOSITION PHYSICS (derived quantities) - extended with physics checks
 # =============================================
 class DepositionPhysics:
     """Computes derived quantities and physics‑informed constraints."""
+    
     @staticmethod
     def material_proxy(phi: np.ndarray, psi: np.ndarray, method: str = "max(phi, psi) + psi") -> np.ndarray:
         if method == "max(phi, psi) + psi":
@@ -98,9 +105,11 @@ class DepositionPhysics:
             return phi * (1.0 - psi) + 2.0 * psi
         else:
             raise ValueError(f"Unknown material proxy method: {method}")
+    
     @staticmethod
     def potential_proxy(c: np.ndarray, alpha_nd: float) -> np.ndarray:
         return -alpha_nd * c
+    
     @staticmethod
     def shell_thickness(phi: np.ndarray, psi: np.ndarray, core_radius_frac: float,
                         threshold: float = 0.5, dx: float = 1.0) -> float:
@@ -116,10 +125,11 @@ class DepositionPhysics:
             return max(0.0, thickness)
         else:
             return 0.0
+    
     @staticmethod
     def phase_stats(phi, psi, dx, dy, L0, threshold=0.5):
         ag_mask = (phi > threshold) & (psi <= 0.5)
-        cu_mask = psi > threshold
+        cu_mask = psi > 0.5
         electrolyte_mask = ~(ag_mask | cu_mask)
         cell_area_nd = dx * dy
         cell_area_real = cell_area_nd * (L0**2)
@@ -131,6 +141,7 @@ class DepositionPhysics:
             "Ag": (ag_area_nd, ag_area_nd * (L0**2)),
             "Cu": (cu_area_nd, cu_area_nd * (L0**2))
         }
+    
     @staticmethod
     def enforce_phase_constraints(phi, psi, threshold=0.5, interface_width=2.0):
         """
@@ -151,17 +162,21 @@ class DepositionPhysics:
         # Smooth interface using a tanh projection (optional)
         # For simplicity, we leave sharpening to the visualisation or a separate filter.
         return phi, psi
+
 # =============================================
 # ROBUST SOLUTION LOADER (unchanged, but now also extracts 3D fields if present)
 # =============================================
 class EnhancedSolutionLoader:
     """Loads PKL files from numerical_solutions, parsing filenames as fallback."""
+    
     def __init__(self, solutions_dir: str = SOLUTIONS_DIR):
         self.solutions_dir = solutions_dir
         self._ensure_directory()
         self.cache = {}
+    
     def _ensure_directory(self):
         os.makedirs(self.solutions_dir, exist_ok=True)
+    
     def scan_solutions(self) -> List[Dict[str, Any]]:
         all_files = []
         for ext in ['*.pkl', '*.pickle']:
@@ -184,6 +199,7 @@ class EnhancedSolutionLoader:
             except:
                 continue
         return file_info
+    
     def parse_filename(self, filename: str) -> Dict[str, any]:
         """Extract parameters from filenames like:
         AgCu_2D_c0.100_L040.0nm_fc0.100_rs0.010_Neu_EDL2.0_k0.40_M0.20_D0.050_Nx256_steps100000.pkl
@@ -243,6 +259,7 @@ class EnhancedSolutionLoader:
         if steps_match:
             params['n_steps'] = int(steps_match.group(1))
         return params
+    
     def _ensure_2d(self, arr):
         """Convert to 2D numpy array; take middle slice if 3D."""
         if arr is None:
@@ -257,6 +274,7 @@ class EnhancedSolutionLoader:
             return arr[:n*n].reshape(n, n)
         else:
             return arr
+    
     def _ensure_3d(self, arr, target_shape=None):
         """Ensure array is 3D; if 2D, add a singleton depth dimension."""
         if arr is None:
@@ -266,6 +284,7 @@ class EnhancedSolutionLoader:
         if arr.ndim == 2:
             return arr[np.newaxis, :, :]
         return arr
+    
     def _convert_tensors(self, data):
         if isinstance(data, dict):
             for key, value in data.items():
@@ -279,6 +298,7 @@ class EnhancedSolutionLoader:
                     data[i] = item.cpu().numpy()
                 elif isinstance(item, (dict, list)):
                     self._convert_tensors(item)
+    
     def read_simulation_file(self, file_path):
         try:
             with open(file_path, 'rb') as f:
@@ -286,7 +306,7 @@ class EnhancedSolutionLoader:
             standardized = {
                 'params': {},
                 'history': [],
-                'thickness_history': [], # store thickness vs time
+                'thickness_history': [],   # store thickness vs time
                 'metadata': {
                     'filename': os.path.basename(file_path),
                     'loaded_at': datetime.now().isoformat(),
@@ -316,7 +336,7 @@ class EnhancedSolutionLoader:
                             t, phi, c, psi = snap
                             snap_dict = {
                                 't_nd': t,
-                                'phi': self._ensure_3d(phi), # store as 3D always
+                                'phi': self._ensure_3d(phi),   # store as 3D always
                                 'c': self._ensure_3d(c),
                                 'psi': self._ensure_3d(psi)
                             }
@@ -352,6 +372,7 @@ class EnhancedSolutionLoader:
         except Exception as e:
             st.sidebar.error(f"Error loading {os.path.basename(file_path)}: {e}")
             return None
+    
     def load_all_solutions(self, use_cache=True, max_files=None):
         solutions = []
         file_info = self.scan_solutions()
@@ -371,6 +392,7 @@ class EnhancedSolutionLoader:
                 solutions.append(sol)
         st.sidebar.success(f"Loaded {len(solutions)} solutions.")
         return solutions
+
 # =============================================
 # NEW: PATCH EMBEDDING AND SPATIAL ATTENTION MODULES
 # =============================================
@@ -380,9 +402,11 @@ class PatchEmbed(nn.Module):
         super().__init__()
         self.patch_size = patch_size
         self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+    
     def forward(self, x):
         # x: (B, C, H, W)
-        return self.proj(x).flatten(2).transpose(1, 2) # (B, num_patches, embed_dim)
+        return self.proj(x).flatten(2).transpose(1, 2)  # (B, num_patches, embed_dim)
+
 class SpatialCrossAttention(nn.Module):
     """
     Multi‑head cross‑attention between target patch embeddings and source patch embeddings.
@@ -393,104 +417,60 @@ class SpatialCrossAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+    
     def forward(self, target_patches, source_patches):
         """
         target_patches: (1, num_patches_target, embed_dim)
-        source_patches: (1, num_sources * num_patches_source, embed_dim) (concatenated sources)
+        source_patches: (1, num_sources * num_patches_source, embed_dim)  (concatenated sources)
         We want per‑source, per‑patch weights. For simplicity, we compute attention between target patches
         and all source patches, then average over target patches and sum over patches per source.
         """
         attn_output, attn_weights = self.cross_attn(target_patches, source_patches, source_patches)
         # attn_weights: (1, num_patches_target, num_sources * num_patches_source)
         # Reshape to separate sources
-        num_sources = source_patches.size(1) // source_patches.size(1) # TODO: need num_sources as argument
+        num_sources = source_patches.size(1) // source_patches.size(1)  # TODO: need num_sources as argument
         # For now, we return raw weights for later aggregation.
         return attn_weights
+
 # =============================================
-# NEW: TEMPORAL ATTENTION FOR THICKNESS EVOLUTION – EXPANDED WITH PARAMETER GATING
+# NEW: TEMPORAL ATTENTION FOR THICKNESS EVOLUTION
 # =============================================
 class TemporalAttention(nn.Module):
     """
     Processes a sequence of thickness values (time steps) using self‑attention,
     then attends to source thickness sequences to interpolate.
-    NEW: Parameter-dependent gating: embeds target/source parameters and applies per-parameter gates.
     """
-    def __init__(self, d_model=32, nhead=4, num_layers=2, param_dim=4):  # param_dim for c_bulk, L0_nm, fc, rs
+    def __init__(self, d_model=32, nhead=4, num_layers=2):
         super().__init__()
         self.d_model = d_model
-        self.param_dim = param_dim
-        self.time_proj = nn.Linear(1, d_model)
-        self.param_proj = nn.Linear(param_dim, d_model)
+        self.input_proj = nn.Linear(1, d_model)
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        # Per-parameter gate MLPs (one for each key parameter)
-        self.gate_mlps = nn.ModuleList([nn.Sequential(
-            nn.Linear(2, d_model // param_dim),  # input: |target_p - source_p| + p_weight (learnable?)
-            nn.ReLU(),
-            nn.Linear(d_model // param_dim, 1),
-            nn.Sigmoid()
-        ) for _ in range(param_dim)])
-
-    def forward(self, target_t, source_sequences, target_params, source_params_list):
+    
+    def forward(self, target_t, source_sequences, source_masks=None):
         """
-        target_t: (1, num_time_points, 1) (normalised time points for target)
+        target_t: (1, num_time_points, 1)  (normalised time points for target)
         source_sequences: list of (num_time_points_source, 1) for each source
-        target_params: tensor (1, param_dim) normalized [c_bulk, L0_nm, fc, rs]
-        source_params_list: list of tensors (param_dim,) for each source
-        Returns interpolated thickness at target_t, with parameter-gated attention.
+        We first embed each source sequence and apply self‑attention.
+        Then cross‑attention between target (query) and source sequences (keys/values).
+        Returns interpolated thickness values at target_t.
         """
         # Embed target time points
-        target_time_emb = self.time_proj(target_t)  # (1, T, d_model)
-        # Embed target params and add to time emb (conditioning)
-        target_param_emb = self.param_proj(target_params)  # (1, d_model)
-        target_param_emb = target_param_emb.unsqueeze(1).expand(-1, target_t.size(1), -1)  # (1, T, d_model)
-        target_emb = target_time_emb + target_param_emb  # Additive conditioning
-
-        # Process each source
+        target_emb = self.input_proj(target_t)  # (1, T, d_model)
+        # For each source, embed and run through transformer
         source_embs = []
-        gates_per_source = []
-        for seq, src_params in zip(source_sequences, source_params_list):
-            # Embed time sequence
-            seq_emb = self.time_proj(seq.unsqueeze(0))  # (1, T_src, d_model)
-            # Embed source params and add
-            src_param_emb = self.param_proj(src_params.unsqueeze(0))  # (1, d_model)
-            src_param_emb = src_param_emb.unsqueeze(1).expand(-1, seq.size(0), -1)  # (1, T_src, d_model)
-            seq_emb = seq_emb + src_param_emb
-            # Run through transformer
+        for seq in source_sequences:
+            seq_emb = self.input_proj(seq.unsqueeze(0))  # (1, T_src, d_model)
             seq_emb = self.transformer(seq_emb)
             source_embs.append(seq_emb)
-
-            # Compute per-parameter gates: based on |target_p - src_p|
-            param_diffs = torch.abs(target_params - src_params.unsqueeze(0))  # (1, param_dim)
-            gates = []
-            for i in range(self.param_dim):
-                diff_i = param_diffs[:, i].unsqueeze(-1)  # (1,1)
-                gate_i = self.gate_mlps[i](torch.cat([diff_i, torch.ones_like(diff_i)], dim=-1))  # Dummy p_weight=1
-                gates.append(gate_i.squeeze())
-            overall_gate = torch.prod(torch.stack(gates))  # Multiply gates (strict matching)
-            gates_per_source.append(overall_gate)
-
-        # Stack gates and normalize (soft weights for sources)
-        gates_tensor = torch.stack(gates_per_source).unsqueeze(0)  # (1, N_sources)
-        gates_tensor = torch.softmax(gates_tensor, dim=-1)  # Normalize
-
-        # Concatenate source embs
+        # Concatenate sources along time dimension
         source_concat = torch.cat(source_embs, dim=1)  # (1, sum(T_src), d_model)
-
-        # Cross-attention
-        attn_out, attn_weights = self.cross_attn(target_emb, source_concat, source_concat)  # (1, T, d_model)
-
-        # Apply source gates to attn_weights (approximate by scaling output per source group)
-        # Since source_concat is concatenated, we'd need to slice attn_weights per source length.
-        # For simplicity, we apply gates to attn_out as post-scaling (assuming equal contribution).
-        # Better: scale the value vectors before attention, but since it's post, we can re-weight.
-        # For now, we leave as-is and multiply final thickness by average gate (heuristic).
-        # Advanced: during cross_attn, modulate value by gates repeated over T_src.
-
-        # Project back
-        thickness = attn_out.mean(dim=-1)  # (1, T) simple mean pooling
-        return thickness
+        # Cross‑attention
+        attn_out, attn_weights = self.cross_attn(target_emb, source_concat, source_concat)
+        # attn_out: (1, T, d_model); project back to thickness
+        thickness = attn_out.mean(dim=-1, keepdim=True)  # simple pooling, could use a linear layer
+        return thickness.squeeze(-1)  # (1, T)
 
 # =============================================
 # CORE‑SHELL INTERPOLATOR – EXPANDED WITH LOCAL SPATIAL ATTENTION
@@ -506,7 +486,7 @@ class CoreShellInterpolator:
                  patch_size=16,
                  spatial_embed_dim=64,
                  spatial_nhead=4,
-                 blend_mode='gate'): # 'gate' or 'product' or 'add'
+                 blend_mode='gate'):   # 'gate' or 'product' or 'add'
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
@@ -517,6 +497,7 @@ class CoreShellInterpolator:
         self.spatial_embed_dim = spatial_embed_dim
         self.spatial_nhead = spatial_nhead
         self.blend_mode = blend_mode
+        
         # Global parameter encoder (same as before)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -526,8 +507,9 @@ class CoreShellInterpolator:
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.input_proj = nn.Linear(12, d_model) # 4 cont + up to 8 categorical
+        self.input_proj = nn.Linear(12, d_model)   # 4 cont + up to 8 categorical
         self.pos_encoder = PositionalEncoding(d_model)
+        
         # Gate network for blending kernel and attention (global)
         self.gate_net = nn.Sequential(
             nn.Linear(d_model * 2, d_model),
@@ -535,6 +517,7 @@ class CoreShellInterpolator:
             nn.Linear(d_model, 1),
             nn.Sigmoid()
         )
+        
         # Spatial attention modules (if enabled)
         if use_spatial_attention:
             # Patch embedding for each field (phi, psi, c) – 3 channels
@@ -550,21 +533,26 @@ class CoreShellInterpolator:
             self.spatial_cross_attn = nn.MultiheadAttention(spatial_embed_dim, spatial_nhead, batch_first=True)
             # A linear layer to combine global and local weights (if needed)
             self.blend_layer = nn.Linear(2, 1) if blend_mode == 'learned' else None
+        
         # Temporal attention for thickness
         self.temporal_attn = TemporalAttention(d_model=32, nhead=4, num_layers=2)
+    
     def set_parameter_sigma(self, param_sigma):
         self.param_sigma = param_sigma
+    
     def compute_parameter_kernel(self, source_params: List[Dict], target_params: Dict):
         """Gaussian kernel in normalised parameter space (unchanged)."""
         def norm_val(params, name):
             val = params.get(name, 0.5)
             return DepositionParameters.normalize(val, name)
+        
         target_norm = np.array([
             norm_val(target_params, 'fc'),
             norm_val(target_params, 'rs'),
             norm_val(target_params, 'c_bulk'),
             norm_val(target_params, 'L0_nm')
         ])
+        
         weights = []
         for src in source_params:
             src_norm = np.array([
@@ -576,6 +564,7 @@ class CoreShellInterpolator:
             diff = src_norm - target_norm
             w = np.exp(-0.5 * np.sum((diff / self.param_sigma)**2))
             weights.append(w)
+        
         # Categorical factors
         cat_factor = []
         for src in source_params:
@@ -587,7 +576,9 @@ class CoreShellInterpolator:
             if src.get('mode') != target_params.get('mode'):
                 factor *= 0.1
             cat_factor.append(factor)
+        
         return np.array(weights) * np.array(cat_factor)
+    
     def encode_parameters(self, params_list: List[Dict]) -> torch.Tensor:
         """Encode parameters into feature vectors (unchanged)."""
         features = []
@@ -608,6 +599,7 @@ class CoreShellInterpolator:
                 feat.append(0.0)
             features.append(feat[:12])
         return torch.FloatTensor(features)
+    
     def _extract_patches(self, field_dict: Dict[str, np.ndarray]) -> torch.Tensor:
         """
         Convert a dict of fields (phi, psi, c) to a tensor of patches.
@@ -625,22 +617,26 @@ class CoreShellInterpolator:
             c = c[mid]
         # Stack channels: (3, H, W)
         stack = np.stack([phi, psi, c], axis=0)
-        tensor = torch.FloatTensor(stack).unsqueeze(0) # (1, 3, H, W)
+        tensor = torch.FloatTensor(stack).unsqueeze(0)  # (1, 3, H, W)
         # Use patch embedding
-        patches = self.patch_embed(tensor) # (1, num_patches, embed_dim)
+        patches = self.patch_embed(tensor)  # (1, num_patches, embed_dim)
         return patches
+    
     def _get_fields_at_time(self, source: Dict, time_norm: float, target_shape: Tuple[int, ...]):
         """Linear interpolation in time for a given source (works for 2D or 3D)."""
         history = source.get('history', [])
         if not history:
             # Return zeros of appropriate shape
             return {'phi': np.zeros(target_shape), 'c': np.zeros(target_shape), 'psi': np.zeros(target_shape)}
+        
         t_max = 1.0
         if source.get('thickness_history'):
             t_max = source['thickness_history'][-1]['t_nd']
         else:
             t_max = history[-1]['t_nd']
+        
         t_target = time_norm * t_max
+        
         if len(history) == 1:
             snap = history[0]
             phi = snap['phi']
@@ -670,18 +666,31 @@ class CoreShellInterpolator:
                 phi = (1 - alpha) * phi1 + alpha * phi2
                 c = (1 - alpha) * c1 + alpha * c2
                 psi = (1 - alpha) * psi1 + alpha * psi2
-        # Resize to target shape (handles 2D or 3D)
+        
+        # ✅ FIXED: Resize to target shape with dimension-safe zoom
         if phi.shape != target_shape:
-            # Use zoom; for 3D, factors are (d0/d0, d1/d1, d2/d2)
-            factors = tuple(t / s for t, s in zip(target_shape, phi.shape))
+            # Ensure factors length matches phi.ndim exactly
+            factors = []
+            for i in range(phi.ndim):
+                if i < len(target_shape):
+                    # Scale this dimension
+                    factors.append(float(target_shape[i]) / float(phi.shape[i]))
+                else:
+                    # No scaling for extra dimensions (e.g., channel/batch)
+                    factors.append(1.0)
+            factors = tuple(factors)
+            
+            # Apply zoom with verified factors
             phi = zoom(phi, factors, order=1)
             c = zoom(c, factors, order=1)
             psi = zoom(psi, factors, order=1)
+        
         return {'phi': phi, 'c': c, 'psi': psi}
+    
     def interpolate_fields(self,
                            sources: List[Dict],
                            target_params: Dict,
-                           target_shape: Tuple[int, ...] = (256, 256), # can be (D, H, W) or (H,W)
+                           target_shape: Tuple[int, ...] = (256, 256),  # can be (D, H, W) or (H,W)
                            n_time_points: int = 100,
                            time_norm: Optional[float] = None,
                            kernel_strength: float = 1.0,
@@ -693,13 +702,16 @@ class CoreShellInterpolator:
         """
         if not sources:
             return None
+        
         if time_norm is None:
             time_norm = 1.0
+        
         # Prepare source data
         source_params = []
-        source_fields_at_time = [] # fields at requested time_norm
-        source_thickness_hist = [] # raw thickness histories
-        source_patches = [] # patch embeddings (if using spatial attention)
+        source_fields_at_time = []   # fields at requested time_norm
+        source_thickness_hist = []   # raw thickness histories
+        source_patches = []           # patch embeddings (if using spatial attention)
+        
         for src in sources:
             if 'params' not in src or 'history' not in src or len(src['history']) == 0:
                 continue
@@ -714,9 +726,11 @@ class CoreShellInterpolator:
             params.setdefault('mode', params.get('mode', '2D (planar)'))
             params.setdefault('growth_model', params.get('growth_model', 'Model A'))
             source_params.append(params)
+            
             # Get fields at target time
             fields_t = self._get_fields_at_time(src, time_norm, target_shape)
             source_fields_at_time.append(fields_t)
+            
             # Thickness history
             thick_hist = src.get('thickness_history', [])
             if thick_hist:
@@ -735,45 +749,55 @@ class CoreShellInterpolator:
                     'th_nm': np.array([0.0, 0.0]),
                     't_max': 1.0
                 })
+        
         N = len(source_params)
         if N == 0:
             st.error("No valid source fields.")
             return None
+        
         # ---- Global parameter attention (as before) ----
-        source_features = self.encode_parameters(source_params) # (N, 12)
-        target_features = self.encode_parameters([target_params]) # (1, 12)
-        all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0) # (1, 1+N, 12)
-        proj = self.input_proj(all_features) # (1, 1+N, d_model)
+        source_features = self.encode_parameters(source_params)          # (N, 12)
+        target_features = self.encode_parameters([target_params])       # (1, 12)
+        all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)  # (1, 1+N, 12)
+        proj = self.input_proj(all_features)                             # (1, 1+N, d_model)
         proj = self.pos_encoder(proj)
-        transformer_out = self.transformer(proj) # (1, 1+N, d_model)
-        target_rep = transformer_out[:, 0, :] # (1, d_model)
-        source_reps = transformer_out[:, 1:, :] # (1, N, d_model)
+        transformer_out = self.transformer(proj)                         # (1, 1+N, d_model)
+        target_rep = transformer_out[:, 0, :]                            # (1, d_model)
+        source_reps = transformer_out[:, 1:, :]                          # (1, N, d_model)
+        
         # Global attention scores
         global_attn_scores = torch.matmul(target_rep.unsqueeze(1), source_reps.transpose(1,2)).squeeze(1)
         global_attn_scores = global_attn_scores / np.sqrt(self.d_model) / self.temperature
+        
         # Physics kernel
         kernel_weights = self.compute_parameter_kernel(source_params, target_params)
-        kernel_tensor = torch.FloatTensor(kernel_weights).unsqueeze(0) # (1, N)
+        kernel_tensor = torch.FloatTensor(kernel_weights).unsqueeze(0)   # (1, N)
+        
         # Gate for blending kernel and attention (global)
-        target_exp = target_rep.expand(N, -1).unsqueeze(0) # (1, N, d_model)
-        gate_input = torch.cat([target_exp, source_reps], dim=-1) # (1, N, 2*d_model)
-        gate = self.gate_net(gate_input).squeeze(-1) # (1, N)
+        target_exp = target_rep.expand(N, -1).unsqueeze(0)               # (1, N, d_model)
+        gate_input = torch.cat([target_exp, source_reps], dim=-1)        # (1, N, 2*d_model)
+        gate = self.gate_net(gate_input).squeeze(-1)                     # (1, N)
+        
         # Blend according to kernel_strength (0= pure attention, 1= pure kernel)
         global_blended = kernel_strength * kernel_tensor + (1 - kernel_strength) * global_attn_scores
+        
         # Apply gate? In original, gate was used to combine kernel and attention; here we keep it as additional info.
         # We'll produce final global weights as softmax of global_blended.
-        global_weights = torch.softmax(global_blended, dim=-1) # (1, N)
+        global_weights = torch.softmax(global_blended, dim=-1)           # (1, N)
+        
         # ---- Spatial attention (if enabled) ----
         if self.use_spatial_attention:
             # Extract patches from each source field at the target time
             source_patch_embs = []
             for fld in source_fields_at_time:
-                patches = self._extract_patches(fld) # (1, num_patches, embed_dim)
+                patches = self._extract_patches(fld)                     # (1, num_patches, embed_dim)
                 # Optionally pass through patch transformer
                 patches = self.patch_transformer(patches)
                 source_patch_embs.append(patches)
+            
             # Concatenate sources along patch dimension
-            source_patches_concat = torch.cat(source_patch_embs, dim=1) # (1, N * num_patches, embed_dim)
+            source_patches_concat = torch.cat(source_patch_embs, dim=1)  # (1, N * num_patches, embed_dim)
+            
             # For target, we need patch embeddings at the target time (same fields? target fields not known yet)
             # Instead, we use a learned query or we can use the target parameter representation as query.
             # One approach: use the target parameter embedding to generate a query for each patch.
@@ -784,10 +808,16 @@ class CoreShellInterpolator:
             # global representation and all source patches, then aggregate per source.
             # This yields per‑source per‑patch weights.
             # We'll use target_rep (global) as query for all patches.
-            target_rep_exp = target_rep.unsqueeze(1).expand(-1, source_patches_concat.size(1), -1) # (1, N*num_patches, d_model)
+            target_rep_exp = target_rep.unsqueeze(1).expand(-1, source_patches_concat.size(1), -1)  # (1, N*num_patches, d_model)
+            
             # But target_rep is d_model, spatial_embed_dim may differ; we need a projection.
             # For simplicity, we assume d_model == spatial_embed_dim, or we add a linear layer.
-            # We'll skip and assume they match for now.
+            # We'll add a projection if needed.
+            if self.d_model != self.spatial_embed_dim:
+                # Dummy: we just use the first d_model dimensions? Not good. Better to project.
+                # In practice, we should have a linear layer. We'll skip and assume they match for now.
+                pass
+            
             # Compute cross‑attention: target_rep (expanded) as query, source patches as key/value
             # Actually we want per‑patch attention, so we need a query for each patch. We'll use a learned patch token.
             # We'll implement a simplified version: treat each source patch independently and compute similarity with target rep.
@@ -795,17 +825,20 @@ class CoreShellInterpolator:
             # Instead, we keep per‑patch weights and use them to blend fields patch‑wise.
             # For now, we'll compute a similarity score between target_rep and each source patch (using dot product),
             # then softmax over patches to get per‑patch weights across sources.
-            sim = torch.matmul(target_rep, source_patches_concat.transpose(1,2)) # (1, 1, N*num_patches)
-            sim = sim.squeeze(1) / np.sqrt(self.spatial_embed_dim) # (1, N*num_patches)
-            patch_weights_all = torch.softmax(sim, dim=-1) # (1, N*num_patches)
+            sim = torch.matmul(target_rep, source_patches_concat.transpose(1,2))  # (1, 1, N*num_patches)
+            sim = sim.squeeze(1) / np.sqrt(self.spatial_embed_dim)                # (1, N*num_patches)
+            patch_weights_all = torch.softmax(sim, dim=-1)                         # (1, N*num_patches)
+            
             # Reshape to (1, N, num_patches) and sum over patches to get per‑source weights? Not good because we lose locality.
             # Better: keep per‑patch weights and later apply them to each patch when reconstructing the field.
             # We'll store these patch_weights_all for later use.
-            spatial_weights_per_patch = patch_weights_all.view(1, N, -1) # (1, N, num_patches)
+            spatial_weights_per_patch = patch_weights_all.view(1, N, -1)           # (1, N, num_patches)
+            
             # Blend global and spatial weights. For each source, we can combine global weight (scalar) with spatial weight (vector)
             # by e.g., product or addition. We'll use a simple product and renormalize.
             # We need to expand global_weights to match patch dimension.
-            global_expanded = global_weights.unsqueeze(-1).expand(-1, -1, spatial_weights_per_patch.size(-1)) # (1, N, num_patches)
+            global_expanded = global_weights.unsqueeze(-1).expand(-1, -1, spatial_weights_per_patch.size(-1))  # (1, N, num_patches)
+            
             if self.blend_mode == 'product':
                 blended_patch_weights = global_expanded * spatial_weights_per_patch
             elif self.blend_mode == 'add':
@@ -814,30 +847,35 @@ class CoreShellInterpolator:
                 # Use a learned gate per patch? Too heavy. For now product.
                 blended_patch_weights = global_expanded * spatial_weights_per_patch
             else:
-                blended_patch_weights = spatial_weights_per_patch # fallback to pure spatial
+                blended_patch_weights = spatial_weights_per_patch  # fallback to pure spatial
+            
             # Normalize across sources for each patch
             blended_patch_weights = blended_patch_weights / (blended_patch_weights.sum(dim=1, keepdim=True) + 1e-8)
+            
             # Now we have per‑source per‑patch weights. We need to apply them to each patch when reconstructing.
             # We'll later do weighted sum of source patches, then reassemble the field.
         else:
             blended_patch_weights = None
+        
         # ---- Interpolate fields ----
         # If using spatial attention, we do patch‑wise weighted sum; else, global weighted sum.
         if self.use_spatial_attention and blended_patch_weights is not None:
             # We need to patch each source field and reconstruct after weighted sum.
             # For each source, we have its fields (phi, psi, c). We'll patch them, apply weights, then reconstruct.
             num_patches = blended_patch_weights.size(-1)
-            H, W = target_shape[-2:] # assume 2D for patching
+            H, W = target_shape[-2:]  # assume 2D for patching
             patch_size = self.patch_size
             assert H % patch_size == 0 and W % patch_size == 0, "Target shape must be divisible by patch_size"
             num_patches_h = H // patch_size
             num_patches_w = W // patch_size
             assert num_patches == num_patches_h * num_patches_w, "Patch count mismatch"
+            
             # Initialize accumulator arrays for each field
             interp_phi = np.zeros(target_shape)
             interp_psi = np.zeros(target_shape)
             interp_c = np.zeros(target_shape)
             weight_sum = np.zeros(target_shape)
+            
             # For each source, extract patches, weight them, and add to accumulator
             for src_idx in range(N):
                 phi_s = source_fields_at_time[src_idx]['phi']
@@ -857,10 +895,12 @@ class CoreShellInterpolator:
                         interp_psi[h_start:h_end, w_start:w_end] += w_patch * psi_s[h_start:h_end, w_start:w_end]
                         interp_c[h_start:h_end, w_start:w_end] += w_patch * c_s[h_start:h_end, w_start:w_end]
                         weight_sum[h_start:h_end, w_start:w_end] += w_patch
+            
             # Normalize
             interp_phi = np.divide(interp_phi, weight_sum, where=weight_sum>0)
             interp_psi = np.divide(interp_psi, weight_sum, where=weight_sum>0)
             interp_c = np.divide(interp_c, weight_sum, where=weight_sum>0)
+            
             # Fill zeros where no weight with overall weighted average
             mask_zero = weight_sum == 0
             if np.any(mask_zero):
@@ -876,6 +916,7 @@ class CoreShellInterpolator:
                 interp_phi[mask_zero] = global_phi[mask_zero]
                 interp_psi[mask_zero] = global_psi[mask_zero]
                 interp_c[mask_zero] = global_c[mask_zero]
+            
             interp = {'phi': interp_phi, 'psi': interp_psi, 'c': interp_c}
         else:
             # Global weighted average (as before)
@@ -885,58 +926,56 @@ class CoreShellInterpolator:
             global_weights_np = global_weights.detach().cpu().numpy().flatten()
             for i, fld in enumerate(source_fields_at_time):
                 interp['phi'] += global_weights_np[i] * fld['phi']
-                interp['c'] += global_weights_np[i] * fld['c']
+                interp['c']   += global_weights_np[i] * fld['c']
                 interp['psi'] += global_weights_np[i] * fld['psi']
-        # Optional smoothing (can be disabled if using patch attention)
-        if not self.use_spatial_attention:
-            interp['phi'] = gaussian_filter(interp['phi'], sigma=1.0)
-            interp['c'] = gaussian_filter(interp['c'], sigma=1.0)
-            interp['psi'] = gaussian_filter(interp['psi'], sigma=1.0)
+            
+            # Optional smoothing (can be disabled if using patch attention)
+            if not self.use_spatial_attention:
+                interp['phi'] = gaussian_filter(interp['phi'], sigma=1.0)
+                interp['c']   = gaussian_filter(interp['c'], sigma=1.0)
+                interp['psi'] = gaussian_filter(interp['psi'], sigma=1.0)
+        
         # ---- Physics‑informed post‑processing ----
         if apply_physics_constraints:
             interp['phi'], interp['psi'] = DepositionPhysics.enforce_phase_constraints(interp['phi'], interp['psi'])
-        # ---- Interpolate thickness evolution with parameter-gated temporal attention ----
-        common_t_norm = torch.tensor(np.linspace(0, 1, n_time_points)).unsqueeze(0).unsqueeze(-1).float()  # (1, T, 1)
+        
+        # ---- Interpolate thickness evolution ----
+        # Use temporal attention for better alignment
+        common_t_norm = np.linspace(0, 1, n_time_points)
+        
         # Prepare source thickness sequences as tensors
         source_seq_tensors = []
-        source_param_tensors = []
-        for thick, params in zip(source_thickness_hist, source_params):
+        for thick in source_thickness_hist:
             t_norm_src = thick['t_norm']
             th_src = thick['th_nm']
-            # Interpolate onto common grid for fixed length
+            # Interpolate onto common grid for loss? For attention, we need fixed length sequences.
+            # We'll pad/truncate to a fixed length (e.g., n_time_points) using linear interpolation.
             if len(t_norm_src) > 1:
                 f = interp1d(t_norm_src, th_src, kind='linear', bounds_error=False, fill_value='extrapolate')
-                th_interp = f(common_t_norm.squeeze().numpy())
+                th_interp = f(common_t_norm)
             else:
-                th_interp = np.full_like(common_t_norm.squeeze().numpy(), th_src[0] if len(th_src)>0 else 0.0)
+                th_interp = np.full_like(common_t_norm, th_src[0] if len(th_src)>0 else 0.0)
             source_seq_tensors.append(torch.FloatTensor(th_interp).unsqueeze(-1))  # (T, 1)
-            # Key params tensor: normalized [c_bulk, L0_nm, fc, rs]
-            key_params = torch.tensor([
-                DepositionParameters.normalize(params.get('c_bulk', 0.5), 'c_bulk'),
-                DepositionParameters.normalize(params.get('L0_nm', 20.0), 'L0_nm'),
-                DepositionParameters.normalize(params.get('fc', 0.18), 'fc'),
-                DepositionParameters.normalize(params.get('rs', 0.2), 'rs')
-            ]).float()
-            source_param_tensors.append(key_params)
-        # Target key params
-        target_key_params = torch.tensor([
-            DepositionParameters.normalize(target_params.get('c_bulk', 0.5), 'c_bulk'),
-            DepositionParameters.normalize(target_params.get('L0_nm', 20.0), 'L0_nm'),
-            DepositionParameters.normalize(target_params.get('fc', 0.18), 'fc'),
-            DepositionParameters.normalize(target_params.get('rs', 0.2), 'rs')
-        ]).unsqueeze(0).float()  # (1, 4)
-        # Call temporal attention with parameters
-        thickness_interp_t = self.temporal_attn(common_t_norm, source_seq_tensors, target_key_params, source_param_tensors)
-        thickness_interp = thickness_interp_t.squeeze().detach().cpu().numpy()
+        
+        # Stack sources into a batch dimension
+        # We'll use a simple weighted average for now; temporal attention can be added later.
+        # For simplicity, we keep the linear interpolation as before.
+        thickness_interp = np.zeros_like(common_t_norm)
+        for i, seq in enumerate(source_seq_tensors):
+            thickness_interp += global_weights_np[i] * seq.squeeze().numpy()
+        
+        # (We could replace with temporal attention, but that requires training)
+        
         # ---- Derived quantities ----
         material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'])
         alpha = target_params.get('alpha_nd', 2.0)
         potential = DepositionPhysics.potential_proxy(interp['c'], alpha)
         fc = target_params.get('fc', target_params.get('core_radius_frac', 0.18))
-        dx = 1.0 / (target_shape[-1] - 1) if len(target_shape)==2 else 1.0 / (target_shape[-1]-1) # approximate
+        dx = 1.0 / (target_shape[-1] - 1) if len(target_shape)==2 else 1.0 / (target_shape[-1]-1)  # approximate
         L0 = target_params.get('L0_nm', 20.0) * 1e-9
         thickness_nm = DepositionPhysics.shell_thickness(interp['phi'], interp['psi'], fc, dx=dx) * L0 * 1e9
         stats = DepositionPhysics.phase_stats(interp['phi'], interp['psi'], dx, dx, L0)
+        
         # ---- Uncertainty (variance across sources) ----
         # Compute pixel‑wise variance of phi, weighted by global weights
         phi_stack = np.stack([f['phi'] for f in source_fields_at_time], axis=0)
@@ -948,6 +987,7 @@ class CoreShellInterpolator:
         if sum_w_sq < 1.0:
             weighted_var /= (1 - sum_w_sq + 1e-8)
         uncertainty_map = np.sqrt(weighted_var)
+        
         result = {
             'fields': interp,
             'derived': {
@@ -956,10 +996,10 @@ class CoreShellInterpolator:
                 'thickness_nm': thickness_nm,
                 'phase_stats': stats,
                 'thickness_time': {
-                    't_norm': common_t_norm.squeeze().numpy().tolist(),
+                    't_norm': common_t_norm.tolist(),
                     'th_nm': thickness_interp.tolist()
                 },
-                'uncertainty_phi': uncertainty_map.tolist() # added
+                'uncertainty_phi': uncertainty_map.tolist()   # added
             },
             'weights': {
                 'combined': global_weights_np.tolist(),
@@ -975,6 +1015,7 @@ class CoreShellInterpolator:
             'use_spatial_attention': self.use_spatial_attention
         }
         return result
+    
     def _ensure_2d(self, arr):
         if arr is None:
             return np.zeros((1,1))
@@ -984,6 +1025,7 @@ class CoreShellInterpolator:
             mid = arr.shape[0] // 2
             return arr[mid, :, :]
         return arr
+
 # =============================================
 # POSITIONAL ENCODING (unchanged)
 # =============================================
@@ -992,6 +1034,7 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.max_len = max_len
+    
     def forward(self, x):
         seq_len = x.size(1)
         position = torch.arange(seq_len, dtype=torch.float).unsqueeze(1)
@@ -1001,17 +1044,20 @@ class PositionalEncoding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         return x + pe.unsqueeze(0)
+
 # =============================================
 # HEATMAP VISUALIZER – extended to show uncertainty
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
         self.colormaps = COLORMAP_OPTIONS
+    
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
+    
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
-                              L0_nm=20.0, figsize=(10,8), colorbar_label="",
-                              vmin=None, vmax=None, target_params=None):
+                             L0_nm=20.0, figsize=(10,8), colorbar_label="",
+                             vmin=None, vmax=None, target_params=None):
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         extent = self._get_extent(L0_nm)
         im = ax.imshow(field_data, cmap=cmap_name, vmin=vmin, vmax=vmax,
@@ -1031,9 +1077,10 @@ class HeatMapVisualizer:
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         return fig
+    
     def create_interactive_heatmap(self, field_data, title, cmap_name='viridis',
-                                    L0_nm=20.0, width=800, height=700,
-                                    target_params=None):
+                                   L0_nm=20.0, width=800, height=700,
+                                   target_params=None):
         ny, nx = field_data.shape
         x = np.linspace(0, L0_nm, nx)
         y = np.linspace(0, L0_nm, ny)
@@ -1057,6 +1104,7 @@ class HeatMapVisualizer:
             width=width, height=height
         )
         return fig
+    
     def create_thickness_plot(self, thickness_time, source_curves=None, weights=None,
                               title="Shell Thickness Evolution", figsize=(10,6),
                               current_time=None):
@@ -1079,9 +1127,10 @@ class HeatMapVisualizer:
         ax.legend(loc='best')
         plt.tight_layout()
         return fig
+    
     def create_uncertainty_map(self, uncertainty_data, title="Uncertainty (φ)",
-                                cmap_name='hot', L0_nm=20.0, figsize=(10,8),
-                                target_params=None):
+                               cmap_name='hot', L0_nm=20.0, figsize=(10,8),
+                               target_params=None):
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         extent = self._get_extent(L0_nm)
         im = ax.imshow(uncertainty_data, cmap=cmap_name, extent=extent, aspect='equal', origin='lower')
@@ -1093,12 +1142,14 @@ class HeatMapVisualizer:
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         return fig
+
 # =============================================
 # RESULTS MANAGER – updated to include uncertainty
 # =============================================
 class ResultsManager:
     def __init__(self):
         pass
+    
     def prepare_export_data(self, interpolation_result, visualization_params):
         res = interpolation_result.copy()
         export = {
@@ -1126,6 +1177,7 @@ class ResultsManager:
             else:
                 export['result'][dname] = val
         return export
+    
     def export_to_json(self, export_data, filename=None):
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1136,6 +1188,7 @@ class ResultsManager:
             filename = f"interp_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_{ts}.json"
         json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
         return json_str, filename
+    
     def export_to_csv(self, interpolation_result, filename=None):
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1158,6 +1211,7 @@ class ResultsManager:
         df = pd.DataFrame(data)
         csv_str = df.to_csv(index=False)
         return csv_str, filename
+    
     def _json_serializer(self, obj):
         if isinstance(obj, np.integer): return int(obj)
         elif isinstance(obj, np.floating): return float(obj)
@@ -1165,6 +1219,7 @@ class ResultsManager:
         elif isinstance(obj, datetime): return obj.isoformat()
         elif isinstance(obj, torch.Tensor): return obj.cpu().numpy().tolist()
         else: return str(obj)
+
 # =============================================
 # MAIN STREAMLIT APP – updated with new options
 # =============================================
@@ -1174,13 +1229,14 @@ def main():
     st.markdown("""
     <style>
     .main-header { font-size: 3.2rem; color: #1E3A8A; text-align: center; padding: 1rem;
-    background: linear-gradient(90deg, #1E3A8A, #3B82F6, #10B981); -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent; font-weight: 900; margin-bottom: 1rem; }
+                   background: linear-gradient(90deg, #1E3A8A, #3B82F6, #10B981); -webkit-background-clip: text;
+                   -webkit-text-fill-color: transparent; font-weight: 900; margin-bottom: 1rem; }
     .section-header { font-size: 2.0rem; color: #374151; font-weight: 800;
-    border-left: 6px solid #3B82F6; padding-left: 1.2rem; margin-top: 1.8rem; margin-bottom: 1.2rem; }
+                      border-left: 6px solid #3B82F6; padding-left: 1.2rem; margin-top: 1.8rem; margin-bottom: 1.2rem; }
     </style>
     """, unsafe_allow_html=True)
     st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition Interpolator (Enhanced with Local Spatial Attention)</h1>', unsafe_allow_html=True)
+    
     # Initialize session state
     if 'solutions' not in st.session_state:
         st.session_state.solutions = []
@@ -1197,6 +1253,7 @@ def main():
         st.session_state.interpolation_result = None
     if 'temporal_cache' not in st.session_state:
         st.session_state.temporal_cache = {}
+    
     # Sidebar
     with st.sidebar:
         st.markdown('<h2 class="section-header">⚙️ Configuration</h2>', unsafe_allow_html=True)
@@ -1213,6 +1270,7 @@ def main():
                 st.session_state.temporal_cache = {}
                 st.success("Cache cleared")
         st.divider()
+        
         st.markdown('<h2 class="section-header">🎯 Target Parameters</h2>', unsafe_allow_html=True)
         fc = st.slider("Core / L (fc)", 0.05, 0.45, 0.18, 0.01)
         rs = st.slider("Δr / r_core (rs)", 0.01, 0.6, 0.2, 0.01)
@@ -1224,6 +1282,7 @@ def main():
         growth_model = st.selectbox("Growth model", ["Model A", "Model B"], index=0)
         alpha_nd = st.slider("α (coupling)", 0.0, 10.0, 2.0, 0.1)
         st.divider()
+        
         st.markdown('<h2 class="section-header">⚛️ Interpolation Settings</h2>', unsafe_allow_html=True)
         sigma_fc = st.slider("Kernel σ (fc)", 0.05, 0.3, 0.15, 0.01)
         sigma_rs = st.slider("Kernel σ (rs)", 0.05, 0.3, 0.15, 0.01)
@@ -1232,6 +1291,7 @@ def main():
         temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
         n_time_points = st.slider("Number of time points for thickness curve", 20, 200, 100, 10)
         kernel_strength = st.slider("Kernel strength (0 = pure attention, 1 = pure vicinity)", 0.0, 1.0, 1.0, 0.05)
+        
         # NEW: Spatial attention options
         st.markdown("#### 🧩 Local Spatial Attention")
         use_spatial_attention = st.checkbox("Enable patch‑based spatial attention", value=False)
@@ -1245,7 +1305,9 @@ def main():
             spatial_embed_dim = 64
             spatial_nhead = 4
             blend_mode = 'product'
+        
         apply_physics = st.checkbox("Apply physics constraints (phase separation)", value=True)
+        
         if st.button("🧠 Perform Interpolation", type="primary", use_container_width=True):
             if not st.session_state.solutions:
                 st.error("Please load solutions first!")
@@ -1272,7 +1334,7 @@ def main():
                     }
                     # Determine target shape: if mode is 3D, we need 3D shape; but for simplicity we use 2D slices.
                     # We'll use (256,256) for 2D. For 3D, we could use (64,256,256) but that's heavy.
-                    target_shape = (256, 256) # default 2D
+                    target_shape = (256, 256)  # default 2D
                     res = interpolator.interpolate_fields(
                         st.session_state.solutions, target, target_shape=target_shape,
                         n_time_points=n_time_points, time_norm=1.0,
@@ -1286,11 +1348,13 @@ def main():
                         st.success("Interpolation successful! Use the global slider below to explore time.")
                     else:
                         st.error("Interpolation failed.")
+    
     # Main area (similar to before, but with uncertainty map)
     if st.session_state.interpolation_result:
         res = st.session_state.interpolation_result
         target = res['target_params']
         L0_nm = target.get('L0_nm', 60.0)
+        
         # Global time slider
         st.markdown('<h2 class="section-header">⏱️ Global Time Control</h2>', unsafe_allow_html=True)
         col1, col2 = st.columns([3, 1])
@@ -1304,7 +1368,7 @@ def main():
                 # Use current interpolator settings
                 interp = st.session_state.interpolator
                 cache_key = (frozenset(target.items()), current_time, ks,
-                             interp.use_spatial_attention, interp.patch_size)
+                            interp.use_spatial_attention, interp.patch_size)
                 if cache_key in st.session_state.temporal_cache:
                     st.session_state.interpolation_result = st.session_state.temporal_cache[cache_key]
                 else:
@@ -1317,8 +1381,10 @@ def main():
                         if new_res:
                             st.session_state.temporal_cache[cache_key] = new_res
                             st.session_state.interpolation_result = new_res
-                st.rerun()
+                    st.rerun()
+        
         tabs = st.tabs(["📊 Fields", "📈 Thickness Evolution", "🧪 Derived Quantities", "⚖️ Weights", "📉 Uncertainty", "💾 Export"])
+        
         with tabs[0]:
             st.markdown('<h2 class="section-header">📊 Interpolated Fields</h2>', unsafe_allow_html=True)
             field_choice = st.selectbox("Select field", ['c (concentration)', 'phi (shell)', 'psi (core)'], key='field_choice')
@@ -1339,6 +1405,7 @@ def main():
                     cmap_name=cmap, L0_nm=L0_nm, target_params=target
                 )
                 st.plotly_chart(fig_inter, use_container_width=True)
+        
         with tabs[1]:
             st.markdown('<h2 class="section-header">📈 Shell Thickness Evolution</h2>', unsafe_allow_html=True)
             thickness_time = res['derived']['thickness_time']
@@ -1347,6 +1414,7 @@ def main():
                 thickness_time, title=title_th, current_time=res['time_norm']
             )
             st.pyplot(fig_th)
+        
         with tabs[2]:
             st.markdown('<h2 class="section-header">🧪 Derived Quantities at current time</h2>', unsafe_allow_html=True)
             col1, col2 = st.columns(2)
@@ -1380,6 +1448,7 @@ def main():
                 colorbar_label="-α·c"
             )
             st.pyplot(fig_pot)
+        
         with tabs[3]:
             st.markdown('<h2 class="section-header">⚖️ Attention Weights & Gate</h2>', unsafe_allow_html=True)
             df_weights = pd.DataFrame({
@@ -1402,6 +1471,7 @@ def main():
             ax.set_title('Comparison of weights')
             ax.legend()
             st.pyplot(fig_w)
+        
         with tabs[4]:
             st.markdown('<h2 class="section-header">📉 Uncertainty (φ field)</h2>', unsafe_allow_html=True)
             if 'uncertainty_phi' in res['derived']:
@@ -1413,6 +1483,7 @@ def main():
                 st.pyplot(fig_unc)
             else:
                 st.info("Uncertainty not computed (requires multiple sources).")
+        
         with tabs[5]:
             st.markdown('<h2 class="section-header">💾 Export Data</h2>', unsafe_allow_html=True)
             col_exp1, col_exp2 = st.columns(2)
@@ -1436,5 +1507,6 @@ def main():
             })
     else:
         st.info("Load solutions and set target parameters in the sidebar, then click 'Perform Interpolation'.")
+
 if __name__ == "__main__":
     main()
