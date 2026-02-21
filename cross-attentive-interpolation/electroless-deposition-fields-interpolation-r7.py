@@ -12,8 +12,9 @@ Enhancements in this version:
 - Parameter-Conditioned Temporal Attention
 - Physics-informed time warping
 - Uncertainty quantification
-- Patch-based spatial attention (optional)
+- Patch-based spatial attention REMOVED (preserves physics-based models)
 - Full 3D support via configurable slicing
+- Fixed: CoreShellInterpolator now properly inherits from nn.Module
 """
 import streamlit as st
 import numpy as np
@@ -439,32 +440,7 @@ class EnhancedSolutionLoader:
         return solutions
 
 # =============================================
-# PATCH EMBEDDING AND SPATIAL ATTENTION MODULES
-# =============================================
-class PatchEmbed(nn.Module):
-    """Convert field patches to embeddings using a small CNN."""
-    def __init__(self, patch_size=16, in_channels=3, embed_dim=64):
-        super().__init__()
-        self.patch_size = patch_size
-        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x):
-        return self.proj(x).flatten(2).transpose(1, 2)
-
-class SpatialCrossAttention(nn.Module):
-    """Multi‑head cross‑attention between target and source patch embeddings."""
-    def __init__(self, embed_dim=64, num_heads=4):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-
-    def forward(self, target_patches, source_patches):
-        attn_output, attn_weights = self.cross_attn(target_patches, source_patches, source_patches)
-        return attn_weights
-
-# =============================================
-# ⭐ NEW: PARAMETER-AWARE TEMPORAL ATTENTION ⭐
+# ⭐ PARAMETER-AWARE TEMPORAL ATTENTION ⭐
 # =============================================
 class ParameterAwareTemporalAttention(nn.Module):
     """
@@ -641,9 +617,6 @@ class ParameterAwareTemporalAttention(nn.Module):
         # attn_weights shape: (batch, num_target_times, total_source_times)
         # We apply a bias that decays with |target_idx - source_idx|
         
-        # Reconstruct source time indices tensor for bias calculation
-        # Note: This assumes sources are aligned to the same common grid (common_t_norm)
-        # If sources have different lengths, this bias encourages matching relative progress.
         bias_matrix = torch.zeros_like(attn_weights)
         current_src_idx = 0
         for src_idx, src_time_tensor in enumerate(source_time_indices):
@@ -653,27 +626,19 @@ class ParameterAwareTemporalAttention(nn.Module):
             target_indices = torch.arange(num_target_times, device=attn_weights.device).unsqueeze(1) # (num_target, 1)
             
             # Calculate distance |target_idx - source_idx|
-            # Normalize by max length to keep bias scale consistent
             dist = torch.abs(target_indices - src_indices).float() 
             # Apply exponential decay bias: exp(-strength * dist)
-            # This ensures n matches n strongly, n+1 is weaker, n+2 is weaker still
             segment_bias = torch.exp(-self.time_step_bias_strength * dist / max(num_target_times, src_len))
             
             bias_matrix[:, :, current_src_idx:current_src_idx+src_len] = segment_bias
             current_src_idx += src_len
             
-        # Apply bias to attention weights (before softmax was applied inside cross_attn, 
-        # but here we modify the output weights for analysis or re-weight the output)
-        # To strictly enforce logic in the output, we multiply the attention output by the bias preference
-        # Or we can add bias to logits before softmax. Since cross_attn returns softmaxed weights:
-        # We will re-weight the attention distribution to favor time-aligned steps.
+        # Apply bias to attention weights
         attn_weights_biased = attn_weights * (bias_matrix + 1e-6)
         # Renormalize
         attn_weights_biased = attn_weights_biased / (attn_weights_biased.sum(dim=-1, keepdim=True) + 1e-8)
         
-        # Re-compute output based on biased weights (approximation for inference)
-        # For strict implementation, we should add bias to logits inside cross_attn call.
-        # Here we apply it as a post-hoc weighting factor to ensure logic compliance without rewriting nn.MultiheadAttention
+        # Re-compute output based on biased weights
         attn_output = attn_output * (bias_matrix.sum(dim=-1, keepdim=True) / (num_sources + 1e-6))
 
         # Layer norm and residual
@@ -688,7 +653,6 @@ class ParameterAwareTemporalAttention(nn.Module):
         start_idx = 0
         for src_idx, src_len in enumerate(source_time_lengths):
             end_idx = start_idx + src_len
-            # Use biased weights for analysis
             src_attn = attn_weights_biased[:, :, start_idx:end_idx].sum(dim=-1)  # (batch, num_target_times)
             attention_per_source.append(src_attn)
             start_idx = end_idx
@@ -764,34 +728,50 @@ class TemporalAttention(nn.Module):
             return thickness.squeeze(-1), None
 
 # =============================================
+# POSITIONAL ENCODING
+# =============================================
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        self.d_model = d_model
+        self.max_len = max_len
+    def forward(self, x):
+        seq_len = x.size(1)
+        position = torch.arange(seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() *
+                             (-np.log(10000.0) / self.d_model))
+        pe = torch.zeros(seq_len, self.d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        return x + pe.unsqueeze(0)
+
+# =============================================
 # CORE‑SHELL INTERPOLATOR – WITH PARAMETER-AWARE TEMPORAL ATTENTION
 # =============================================
-class CoreShellInterpolator:
+class CoreShellInterpolator(nn.Module):
+    """
+    Core-Shell Interpolator with Parameter-Aware Temporal Attention.
+    NOTE: Now properly inherits from nn.Module to fix AttributeError on self.eval()
+    Spatial attention REMOVED to preserve physics-based models.
+    """
     def __init__(self,
                  d_model=64,
                  nhead=8,
                  num_layers=3,
                  param_sigma=[0.15, 0.15, 0.15, 0.15],
                  temperature=1.0,
-                 use_spatial_attention=False,
-                 patch_size=16,
-                 spatial_embed_dim=64,
-                 spatial_nhead=4,
                  blend_mode='gate',
                  use_parameter_aware_temporal=True,
                  use_time_warping=True,
                  temporal_d_model=64,
                  temporal_nhead=4,
                  temporal_layers=2):
+        super().__init__()  # ✅ FIXED: Call parent nn.Module __init__
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
         self.param_sigma = np.array(param_sigma, dtype=np.float32)
         self.temperature = temperature
-        self.use_spatial_attention = use_spatial_attention
-        self.patch_size = patch_size
-        self.spatial_embed_dim = spatial_embed_dim
-        self.spatial_nhead = spatial_nhead
         self.blend_mode = blend_mode
         self.use_parameter_aware_temporal = use_parameter_aware_temporal
         self.use_time_warping = use_time_warping
@@ -815,22 +795,6 @@ class CoreShellInterpolator:
             nn.Linear(d_model, 1),
             nn.Sigmoid()
         )
-        
-        # Spatial attention modules
-        if use_spatial_attention:
-            self.patch_embed = PatchEmbed(patch_size=patch_size,
-                                          in_channels=3,
-                                          embed_dim=spatial_embed_dim)
-            self.patch_transformer = nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(d_model=spatial_embed_dim,
-                                           nhead=spatial_nhead,
-                                           batch_first=True),
-                num_layers=2
-            )
-            self.spatial_cross_attn = nn.MultiheadAttention(spatial_embed_dim,
-                                                            spatial_nhead,
-                                                            batch_first=True)
-            self.blend_layer = nn.Linear(2, 1) if blend_mode == 'learned' else None
         
         # ⭐ Parameter-aware temporal attention ⭐
         self.temporal_attn = TemporalAttention(
@@ -904,21 +868,6 @@ class CoreShellInterpolator:
             features.append(feat[:12])
         return torch.FloatTensor(features)
 
-    def _extract_patches(self, field_dict: Dict[str, np.ndarray]) -> torch.Tensor:
-        """Convert field dict to patch embeddings."""
-        phi = field_dict['phi']
-        psi = field_dict['psi']
-        c = field_dict['c']
-        if phi.ndim == 3:
-            mid = phi.shape[0] // 2
-            phi = phi[mid]
-            psi = psi[mid]
-            c = c[mid]
-        stack = np.stack([phi, psi, c], axis=0).astype(np.float32)
-        tensor = torch.FloatTensor(stack).unsqueeze(0)
-        patches = self.patch_embed(tensor)
-        return patches
-
     def _get_fields_at_time(self, source: Dict, time_norm: float, target_shape: Tuple[int, ...]):
         """Linear interpolation in time for a given source."""
         history = source.get('history', [])
@@ -965,7 +914,7 @@ class CoreShellInterpolator:
                 c = (1 - alpha) * c1 + alpha * c2
                 psi = (1 - alpha) * psi1 + alpha * psi2
         
-        # ✅ FIXED: Dimension-safe zoom
+        # Dimension-safe zoom
         if phi.shape != target_shape:
             factors = []
             for i in range(phi.ndim):
@@ -991,205 +940,133 @@ class CoreShellInterpolator:
         """Interpolate fields and thickness evolution with parameter-aware temporal attention."""
         # Ensure inference mode
         self.eval()
-        torch.no_grad().__enter__()
         
-        try:
-            if not sources:
-                return None
-            if time_norm is None:
-                time_norm = 1.0
-            
-            # Prepare source data
-            source_params = []
-            source_fields_at_time = []
-            source_thickness_hist = []
-            
-            for src in sources:
-                if 'params' not in src or 'history' not in src or len(src['history']) == 0:
-                    continue
-                params = src['params'].copy()
-                params.setdefault('fc', params.get('core_radius_frac', 0.18))
-                params.setdefault('rs', params.get('shell_thickness_frac', 0.2))
-                params.setdefault('c_bulk', params.get('c_bulk', 1.0))
-                params.setdefault('L0_nm', params.get('L0_nm', 20.0))
-                params.setdefault('bc_type', params.get('bc_type', 'Neu'))
-                params.setdefault('use_edl', params.get('use_edl', False))
-                params.setdefault('mode', params.get('mode', '2D (planar)'))
-                params.setdefault('growth_model', params.get('growth_model', 'Model A'))
-                source_params.append(params)
+        with torch.no_grad():
+            try:
+                if not sources:
+                    return None
+                if time_norm is None:
+                    time_norm = 1.0
                 
-                fields_t = self._get_fields_at_time(src, time_norm, target_shape)
-                source_fields_at_time.append(fields_t)
+                # Prepare source data
+                source_params = []
+                source_fields_at_time = []
+                source_thickness_hist = []
                 
-                thick_hist = src.get('thickness_history', [])
-                if thick_hist:
-                    t_vals = np.array([th['t_nd'] for th in thick_hist], dtype=np.float32)
-                    th_vals = np.array([th['th_nm'] for th in thick_hist], dtype=np.float32)
-                    t_max = t_vals[-1] if len(t_vals) > 0 else 1.0
-                    t_norm = t_vals / t_max
-                    source_thickness_hist.append({
-                        't_norm': t_norm,
-                        'th_nm': th_vals,
-                        't_max': t_max
-                    })
+                for src in sources:
+                    if 'params' not in src or 'history' not in src or len(src['history']) == 0:
+                        continue
+                    params = src['params'].copy()
+                    params.setdefault('fc', params.get('core_radius_frac', 0.18))
+                    params.setdefault('rs', params.get('shell_thickness_frac', 0.2))
+                    params.setdefault('c_bulk', params.get('c_bulk', 1.0))
+                    params.setdefault('L0_nm', params.get('L0_nm', 20.0))
+                    params.setdefault('bc_type', params.get('bc_type', 'Neu'))
+                    params.setdefault('use_edl', params.get('use_edl', False))
+                    params.setdefault('mode', params.get('mode', '2D (planar)'))
+                    params.setdefault('growth_model', params.get('growth_model', 'Model A'))
+                    source_params.append(params)
+                    
+                    fields_t = self._get_fields_at_time(src, time_norm, target_shape)
+                    source_fields_at_time.append(fields_t)
+                    
+                    thick_hist = src.get('thickness_history', [])
+                    if thick_hist:
+                        t_vals = np.array([th['t_nd'] for th in thick_hist], dtype=np.float32)
+                        th_vals = np.array([th['th_nm'] for th in thick_hist], dtype=np.float32)
+                        t_max = t_vals[-1] if len(t_vals) > 0 else 1.0
+                        t_norm = t_vals / t_max
+                        source_thickness_hist.append({
+                            't_norm': t_norm,
+                            'th_nm': th_vals,
+                            't_max': t_max
+                        })
+                    else:
+                        source_thickness_hist.append({
+                            't_norm': np.array([0.0, 1.0], dtype=np.float32),
+                            'th_nm': np.array([0.0, 0.0], dtype=np.float32),
+                            't_max': 1.0
+                        })
+                
+                N = len(source_params)
+                if N == 0:
+                    st.error("No valid source fields.")
+                    return None
+                
+                # ---- Global parameter attention ----
+                source_features = self.encode_parameters(source_params)
+                target_features = self.encode_parameters([target_params])
+                all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)
+                proj = self.input_proj(all_features)
+                proj = self.pos_encoder(proj)
+                transformer_out = self.transformer(proj)
+                target_rep = transformer_out[:, 0, :]
+                source_reps = transformer_out[:, 1:, :]
+                global_attn_scores = torch.matmul(target_rep.unsqueeze(1), source_reps.transpose(1,2)).squeeze(1)
+                global_attn_scores = global_attn_scores / np.sqrt(self.d_model) / self.temperature
+                kernel_weights = self.compute_parameter_kernel(source_params, target_params)
+                kernel_tensor = torch.FloatTensor(kernel_weights).unsqueeze(0)
+                target_exp = target_rep.expand(N, -1).unsqueeze(0)
+                gate_input = torch.cat([target_exp, source_reps], dim=-1)
+                gate = self.gate_net(gate_input).squeeze(-1)
+                global_blended = kernel_strength * kernel_tensor + (1 - kernel_strength) * global_attn_scores
+                global_weights = torch.softmax(global_blended, dim=-1)
+                
+                # ---- ⭐ PARAMETER-AWARE TEMPORAL ATTENTION FOR THICKNESS ⭐ ----
+                common_t_norm = np.linspace(0, 1, n_time_points, dtype=np.float32)
+                target_times = torch.FloatTensor(common_t_norm).unsqueeze(0).unsqueeze(-1)  # (1, T, 1)
+                
+                # Encode target parameters for temporal attention
+                target_params_for_attn = torch.FloatTensor([
+                    DepositionParameters.normalize(target_params.get('fc', 0.18), 'fc'),
+                    DepositionParameters.normalize(target_params.get('rs', 0.2), 'rs'),
+                    DepositionParameters.normalize(target_params.get('c_bulk', 0.5), 'c_bulk'),
+                    DepositionParameters.normalize(target_params.get('L0_nm', 60.0), 'L0_nm')
+                ]).unsqueeze(0)  # (1, 4)
+                
+                # Prepare source sequences and parameters
+                source_seq_tensors = []
+                source_param_tensors = []
+                for i, thick in enumerate(source_thickness_hist):
+                    t_norm_src = thick['t_norm']
+                    th_src = thick['th_nm']
+                    if len(t_norm_src) > 1:
+                        f = interp1d(t_norm_src, th_src, kind='linear', bounds_error=False, fill_value='extrapolate')
+                        th_interp = f(common_t_norm).astype(np.float32)
+                    else:
+                        th_interp = np.full_like(common_t_norm, th_src[0] if len(th_src)>0 else 0.0, dtype=np.float32)
+                    source_seq_tensors.append(torch.FloatTensor(th_interp).unsqueeze(-1))
+                    
+                    # Source parameters for temporal attention
+                    src_params = torch.FloatTensor([
+                        DepositionParameters.normalize(source_params[i].get('fc', 0.18), 'fc'),
+                        DepositionParameters.normalize(source_params[i].get('rs', 0.2), 'rs'),
+                        DepositionParameters.normalize(source_params[i].get('c_bulk', 0.5), 'c_bulk'),
+                        DepositionParameters.normalize(source_params[i].get('L0_nm', 60.0), 'L0_nm')
+                    ])
+                    source_param_tensors.append(src_params)
+                
+                source_param_tensor = torch.stack(source_param_tensors, dim=0)  # (N, 4)
+                
+                # Use parameter-aware temporal attention
+                if self.use_parameter_aware_temporal:
+                    thickness_pred, temporal_attn_weights = self.temporal_attn(
+                        target_t=target_times,
+                        source_sequences=source_seq_tensors,
+                        source_params=source_param_tensor,
+                        target_params=target_params_for_attn
+                    )
+                    thickness_interp = thickness_pred.squeeze(0).squeeze(-1).detach().cpu().numpy()
+                    temporal_attention_info = temporal_attn_weights.squeeze(0).detach().cpu().numpy() if temporal_attn_weights is not None else None
                 else:
-                    source_thickness_hist.append({
-                        't_norm': np.array([0.0, 1.0], dtype=np.float32),
-                        'th_nm': np.array([0.0, 0.0], dtype=np.float32),
-                        't_max': 1.0
-                    })
-            
-            N = len(source_params)
-            if N == 0:
-                st.error("No valid source fields.")
-                return None
-            
-            # ---- Global parameter attention ----
-            source_features = self.encode_parameters(source_params)
-            target_features = self.encode_parameters([target_params])
-            all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)
-            proj = self.input_proj(all_features)
-            proj = self.pos_encoder(proj)
-            transformer_out = self.transformer(proj)
-            target_rep = transformer_out[:, 0, :]
-            source_reps = transformer_out[:, 1:, :]
-            global_attn_scores = torch.matmul(target_rep.unsqueeze(1), source_reps.transpose(1,2)).squeeze(1)
-            global_attn_scores = global_attn_scores / np.sqrt(self.d_model) / self.temperature
-            kernel_weights = self.compute_parameter_kernel(source_params, target_params)
-            kernel_tensor = torch.FloatTensor(kernel_weights).unsqueeze(0)
-            target_exp = target_rep.expand(N, -1).unsqueeze(0)
-            gate_input = torch.cat([target_exp, source_reps], dim=-1)
-            gate = self.gate_net(gate_input).squeeze(-1)
-            global_blended = kernel_strength * kernel_tensor + (1 - kernel_strength) * global_attn_scores
-            global_weights = torch.softmax(global_blended, dim=-1)
-            
-            # ---- ⭐ PARAMETER-AWARE TEMPORAL ATTENTION FOR THICKNESS ⭐ ----
-            common_t_norm = np.linspace(0, 1, n_time_points, dtype=np.float32)
-            target_times = torch.FloatTensor(common_t_norm).unsqueeze(0).unsqueeze(-1)  # (1, T, 1)
-            
-            # Encode target parameters for temporal attention
-            target_params_for_attn = torch.FloatTensor([
-                DepositionParameters.normalize(target_params.get('fc', 0.18), 'fc'),
-                DepositionParameters.normalize(target_params.get('rs', 0.2), 'rs'),
-                DepositionParameters.normalize(target_params.get('c_bulk', 0.5), 'c_bulk'),
-                DepositionParameters.normalize(target_params.get('L0_nm', 60.0), 'L0_nm')
-            ]).unsqueeze(0)  # (1, 4)
-            
-            # Prepare source sequences and parameters
-            source_seq_tensors = []
-            source_param_tensors = []
-            for i, thick in enumerate(source_thickness_hist):
-                t_norm_src = thick['t_norm']
-                th_src = thick['th_nm']
-                if len(t_norm_src) > 1:
-                    f = interp1d(t_norm_src, th_src, kind='linear', bounds_error=False, fill_value='extrapolate')
-                    th_interp = f(common_t_norm).astype(np.float32)
-                else:
-                    th_interp = np.full_like(common_t_norm, th_src[0] if len(th_src)>0 else 0.0, dtype=np.float32)
-                source_seq_tensors.append(torch.FloatTensor(th_interp).unsqueeze(-1))
+                    # Fallback to simple weighted average
+                    thickness_interp = np.zeros_like(common_t_norm)
+                    global_weights_np = global_weights.detach().cpu().numpy().flatten()
+                    for i, seq in enumerate(source_seq_tensors):
+                        thickness_interp += global_weights_np[i] * seq.squeeze().numpy()
+                    temporal_attention_info = None
                 
-                # Source parameters for temporal attention
-                src_params = torch.FloatTensor([
-                    DepositionParameters.normalize(source_params[i].get('fc', 0.18), 'fc'),
-                    DepositionParameters.normalize(source_params[i].get('rs', 0.2), 'rs'),
-                    DepositionParameters.normalize(source_params[i].get('c_bulk', 0.5), 'c_bulk'),
-                    DepositionParameters.normalize(source_params[i].get('L0_nm', 60.0), 'L0_nm')
-                ])
-                source_param_tensors.append(src_params)
-            
-            source_param_tensor = torch.stack(source_param_tensors, dim=0)  # (N, 4)
-            
-            # Use parameter-aware temporal attention
-            if self.use_parameter_aware_temporal:
-                thickness_pred, temporal_attn_weights = self.temporal_attn(
-                    target_t=target_times,
-                    source_sequences=source_seq_tensors,
-                    source_params=source_param_tensor,
-                    target_params=target_params_for_attn
-                )
-                thickness_interp = thickness_pred.squeeze(0).squeeze(-1).detach().cpu().numpy()
-                temporal_attention_info = temporal_attn_weights.squeeze(0).detach().cpu().numpy() if temporal_attn_weights is not None else None
-            else:
-                # Fallback to simple weighted average
-                thickness_interp = np.zeros_like(common_t_norm)
-                global_weights_np = global_weights.detach().cpu().numpy().flatten()
-                for i, seq in enumerate(source_seq_tensors):
-                    thickness_interp += global_weights_np[i] * seq.squeeze().numpy()
-                temporal_attention_info = None
-            
-            # ---- Spatial attention (if enabled) ----
-            if self.use_spatial_attention:
-                source_patch_embs = []
-                for fld in source_fields_at_time:
-                    patches = self._extract_patches(fld)
-                    patches = self.patch_transformer(patches)
-                    source_patch_embs.append(patches)
-                source_patches_concat = torch.cat(source_patch_embs, dim=1)
-                sim = torch.matmul(target_rep, source_patches_concat.transpose(1,2))
-                sim = sim.squeeze(1) / np.sqrt(self.spatial_embed_dim)
-                patch_weights_all = torch.softmax(sim, dim=-1)
-                spatial_weights_per_patch = patch_weights_all.view(1, N, -1)
-                global_expanded = global_weights.unsqueeze(-1).expand(-1, -1, spatial_weights_per_patch.size(-1))
-                if self.blend_mode == 'product':
-                    blended_patch_weights = global_expanded * spatial_weights_per_patch
-                elif self.blend_mode == 'add':
-                    blended_patch_weights = global_expanded + spatial_weights_per_patch
-                else:
-                    blended_patch_weights = global_expanded * spatial_weights_per_patch
-                blended_patch_weights = blended_patch_weights / (blended_patch_weights.sum(dim=1, keepdim=True) + 1e-8)
-            else:
-                blended_patch_weights = None
-            
-            # ---- Interpolate fields ----
-            if self.use_spatial_attention and blended_patch_weights is not None:
-                num_patches = blended_patch_weights.size(-1)
-                H, W = target_shape[-2:]
-                patch_size = self.patch_size
-                assert H % patch_size == 0 and W % patch_size == 0, "Target shape must be divisible by patch_size"
-                num_patches_h = H // patch_size
-                num_patches_w = W // patch_size
-                assert num_patches == num_patches_h * num_patches_w, "Patch count mismatch"
-                interp_phi = np.zeros(target_shape, dtype=np.float32)
-                interp_psi = np.zeros(target_shape, dtype=np.float32)
-                interp_c = np.zeros(target_shape, dtype=np.float32)
-                weight_sum = np.zeros(target_shape, dtype=np.float32)
-                
-                for src_idx in range(N):
-                    phi_s = source_fields_at_time[src_idx]['phi']
-                    psi_s = source_fields_at_time[src_idx]['psi']
-                    c_s = source_fields_at_time[src_idx]['c']
-                    for i in range(num_patches_h):
-                        for j in range(num_patches_w):
-                            w_patch = blended_patch_weights[0, src_idx, i*num_patches_w + j].item()
-                            if w_patch == 0:
-                                continue
-                            h_start = i * patch_size
-                            h_end = h_start + patch_size
-                            w_start = j * patch_size
-                            w_end = w_start + patch_size
-                            interp_phi[h_start:h_end, w_start:w_end] += w_patch * phi_s[h_start:h_end, w_start:w_end]
-                            interp_psi[h_start:h_end, w_start:w_end] += w_patch * psi_s[h_start:h_end, w_start:w_end]
-                            interp_c[h_start:h_end, w_start:w_end] += w_patch * c_s[h_start:h_end, w_start:w_end]
-                            weight_sum[h_start:h_end, w_start:w_end] += w_patch
-                
-                interp_phi = np.divide(interp_phi, weight_sum, where=weight_sum>0)
-                interp_psi = np.divide(interp_psi, weight_sum, where=weight_sum>0)
-                interp_c = np.divide(interp_c, weight_sum, where=weight_sum>0)
-                mask_zero = weight_sum == 0
-                if np.any(mask_zero):
-                    global_phi = np.zeros_like(interp_phi)
-                    global_psi = np.zeros_like(interp_psi)
-                    global_c = np.zeros_like(interp_c)
-                    global_w = global_weights.detach().cpu().numpy().flatten()
-                    for i in range(N):
-                        global_phi += global_w[i] * source_fields_at_time[i]['phi']
-                        global_psi += global_w[i] * source_fields_at_time[i]['psi']
-                        global_c += global_w[i] * source_fields_at_time[i]['c']
-                    interp_phi[mask_zero] = global_phi[mask_zero]
-                    interp_psi[mask_zero] = global_psi[mask_zero]
-                    interp_c[mask_zero] = global_c[mask_zero]
-                interp = {'phi': interp_phi, 'psi': interp_psi, 'c': interp_c}
-            else:
+                # ---- Interpolate fields (NO SPATIAL ATTENTION - preserves physics) ----
                 interp = {'phi': np.zeros(target_shape, dtype=np.float32),
                           'c': np.zeros(target_shape, dtype=np.float32),
                           'psi': np.zeros(target_shape, dtype=np.float32)}
@@ -1198,102 +1075,72 @@ class CoreShellInterpolator:
                     interp['phi'] += global_weights_np[i] * fld['phi']
                     interp['c']   += global_weights_np[i] * fld['c']
                     interp['psi'] += global_weights_np[i] * fld['psi']
-            
-            if not self.use_spatial_attention:
+                
+                # Apply Gaussian filter for smoothness
                 interp['phi'] = gaussian_filter(interp['phi'], sigma=1.0)
                 interp['c']   = gaussian_filter(interp['c'], sigma=1.0)
                 interp['psi'] = gaussian_filter(interp['psi'], sigma=1.0)
-            
-            # ---- Physics‑informed post‑processing ----
-            if apply_physics_constraints:
-                interp['phi'], interp['psi'] = DepositionPhysics.enforce_phase_constraints(interp['phi'], interp['psi'])
-            
-            # ---- Derived quantities ----
-            material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'])
-            alpha = target_params.get('alpha_nd', 2.0)
-            potential = DepositionPhysics.potential_proxy(interp['c'], alpha)
-            fc = target_params.get('fc', target_params.get('core_radius_frac', 0.18))
-            dx = 1.0 / (target_shape[-1] - 1) if len(target_shape)==2 else 1.0 / (target_shape[-1]-1)
-            L0 = target_params.get('L0_nm', 20.0) * 1e-9
-            thickness_nm = DepositionPhysics.shell_thickness(interp['phi'], interp['psi'], fc, dx=dx) * L0 * 1e9
-            stats = DepositionPhysics.phase_stats(interp['phi'], interp['psi'], dx, dx, L0)
-            
-            # ---- Uncertainty ----
-            phi_stack = np.stack([f['phi'] for f in source_fields_at_time], axis=0)
-            weighted_mean = np.sum(global_weights_np[:, None, None] * phi_stack, axis=0)
-            weighted_var = np.sum(global_weights_np[:, None, None] * (phi_stack - weighted_mean)**2, axis=0)
-            sum_w_sq = np.sum(global_weights_np**2)
-            if sum_w_sq < 1.0:
-                weighted_var /= (1 - sum_w_sq + 1e-8)
-            uncertainty_map = np.sqrt(weighted_var)
-            
-            # ---- Time warping info ----
-            target_warp_factor = DepositionPhysics.compute_time_warp_factor(target_params)
-            source_warp_factors = [DepositionPhysics.compute_time_warp_factor(p) for p in source_params]
-            
-            result = {
-                'fields': interp,
-                'derived': {
-                    'material': material,
-                    'potential': potential,
-                    'thickness_nm': thickness_nm,
-                    'phase_stats': stats,
-                    'thickness_time': {
-                        't_norm': common_t_norm.tolist(),
-                        'th_nm': thickness_interp.tolist()
+                
+                # ---- Physics‑informed post‑processing ----
+                if apply_physics_constraints:
+                    interp['phi'], interp['psi'] = DepositionPhysics.enforce_phase_constraints(interp['phi'], interp['psi'])
+                
+                # ---- Derived quantities ----
+                material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'])
+                alpha = target_params.get('alpha_nd', 2.0)
+                potential = DepositionPhysics.potential_proxy(interp['c'], alpha)
+                fc = target_params.get('fc', target_params.get('core_radius_frac', 0.18))
+                dx = 1.0 / (target_shape[-1] - 1) if len(target_shape)==2 else 1.0 / (target_shape[-1]-1)
+                L0 = target_params.get('L0_nm', 20.0) * 1e-9
+                thickness_nm = DepositionPhysics.shell_thickness(interp['phi'], interp['psi'], fc, dx=dx) * L0 * 1e9
+                stats = DepositionPhysics.phase_stats(interp['phi'], interp['psi'], dx, dx, L0)
+                
+                # ---- Uncertainty ----
+                phi_stack = np.stack([f['phi'] for f in source_fields_at_time], axis=0)
+                weighted_mean = np.sum(global_weights_np[:, None, None] * phi_stack, axis=0)
+                weighted_var = np.sum(global_weights_np[:, None, None] * (phi_stack - weighted_mean)**2, axis=0)
+                sum_w_sq = np.sum(global_weights_np**2)
+                if sum_w_sq < 1.0:
+                    weighted_var /= (1 - sum_w_sq + 1e-8)
+                uncertainty_map = np.sqrt(weighted_var)
+                
+                # ---- Time warping info ----
+                target_warp_factor = DepositionPhysics.compute_time_warp_factor(target_params)
+                source_warp_factors = [DepositionPhysics.compute_time_warp_factor(p) for p in source_params]
+                
+                result = {
+                    'fields': interp,
+                    'derived': {
+                        'material': material,
+                        'potential': potential,
+                        'thickness_nm': thickness_nm,
+                        'phase_stats': stats,
+                        'thickness_time': {
+                            't_norm': common_t_norm.tolist(),
+                            'th_nm': thickness_interp.tolist()
+                        },
+                        'uncertainty_phi': uncertainty_map.tolist(),
+                        'temporal_attention_weights': temporal_attention_info.tolist() if temporal_attention_info is not None else None,
+                        'time_warp_factor': target_warp_factor,
+                        'source_warp_factors': source_warp_factors
                     },
-                    'uncertainty_phi': uncertainty_map.tolist(),
-                    'temporal_attention_weights': temporal_attention_info.tolist() if temporal_attention_info is not None else None,
-                    'time_warp_factor': target_warp_factor,
-                    'source_warp_factors': source_warp_factors
-                },
-                'weights': {
-                    'combined': global_weights_np.tolist(),
-                    'kernel': kernel_weights.tolist(),
-                    'attention': global_attn_scores.squeeze().detach().cpu().numpy().tolist(),
-                    'gate': gate.squeeze().detach().cpu().numpy().tolist()
-                },
-                'target_params': target_params,
-                'shape': target_shape,
-                'num_sources': N,
-                'source_params': source_params,
-                'time_norm': time_norm,
-                'use_spatial_attention': self.use_spatial_attention,
-                'use_parameter_aware_temporal': self.use_parameter_aware_temporal,
-                'use_time_warping': self.use_time_warping
-            }
-            return result
-        finally:
-            torch.no_grad().__exit__(None, None, None)
-            gc.collect()
-
-    def _ensure_2d(self, arr):
-        if arr is None:
-            return np.zeros((1,1), dtype=np.float32)
-        if torch.is_tensor(arr):
-            arr = arr.cpu().numpy()
-        if arr.ndim == 3:
-            mid = arr.shape[0] // 2
-            return arr[mid, :, :].astype(np.float32)
-        return arr.astype(np.float32)
-
-# =============================================
-# POSITIONAL ENCODING
-# =============================================
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super().__init__()
-        self.d_model = d_model
-        self.max_len = max_len
-    def forward(self, x):
-        seq_len = x.size(1)
-        position = torch.arange(seq_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() *
-                             (-np.log(10000.0) / self.d_model))
-        pe = torch.zeros(seq_len, self.d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        return x + pe.unsqueeze(0)
+                    'weights': {
+                        'combined': global_weights_np.tolist(),
+                        'kernel': kernel_weights.tolist(),
+                        'attention': global_attn_scores.squeeze().detach().cpu().numpy().tolist(),
+                        'gate': gate.squeeze().detach().cpu().numpy().tolist()
+                    },
+                    'target_params': target_params,
+                    'shape': target_shape,
+                    'num_sources': N,
+                    'source_params': source_params,
+                    'time_norm': time_norm,
+                    'use_parameter_aware_temporal': self.use_parameter_aware_temporal,
+                    'use_time_warping': self.use_time_warping
+                }
+                return result
+            finally:
+                gc.collect()
 
 # =============================================
 # HEATMAP VISUALIZER
@@ -1418,7 +1265,6 @@ class ResultsManager:
             'metadata': {
                 'generated_at': datetime.now().isoformat(),
                 'interpolation_method': 'core_shell_transformer_parameter_aware',
-                'use_spatial_attention': res.get('use_spatial_attention', False),
                 'use_parameter_aware_temporal': res.get('use_parameter_aware_temporal', False),
                 'use_time_warping': res.get('use_time_warping', False),
                 'visualization_params': visualization_params
@@ -1551,18 +1397,6 @@ def main():
         temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
         n_time_points = st.slider("Number of time points for thickness curve", 20, 200, 100, 10)
         kernel_strength = st.slider("Kernel strength (0 = pure attention, 1 = pure vicinity)", 0.0, 1.0, 1.0, 0.05)
-        st.markdown("#### 🧩 Local Spatial Attention")
-        use_spatial_attention = st.checkbox("Enable patch‑based spatial attention", value=False)
-        if use_spatial_attention:
-            patch_size = st.slider("Patch size (pixels)", 8, 64, 16, 8)
-            spatial_embed_dim = st.slider("Spatial embedding dimension", 16, 128, 64, 16)
-            spatial_nhead = st.slider("Spatial attention heads", 1, 8, 4, 1)
-            blend_mode = st.selectbox("Blend global/local", ["product", "add"], index=0)
-        else:
-            patch_size = 16
-            spatial_embed_dim = 64
-            spatial_nhead = 4
-            blend_mode = 'product'
         st.markdown("#### ⏱️ Parameter-Aware Temporal Attention")
         use_parameter_aware_temporal = st.checkbox("Enable parameter-aware temporal attention", value=True,
                                                    help="Makes thickness evolution depend on physical parameters")
@@ -1584,11 +1418,7 @@ def main():
                         num_layers=3,
                         param_sigma=[sigma_fc, sigma_rs, sigma_c, sigma_L],
                         temperature=temperature,
-                        use_spatial_attention=use_spatial_attention,
-                        patch_size=patch_size,
-                        spatial_embed_dim=spatial_embed_dim,
-                        spatial_nhead=spatial_nhead,
-                        blend_mode=blend_mode,
+                        blend_mode='gate',
                         use_parameter_aware_temporal=use_parameter_aware_temporal,
                         use_time_warping=use_time_warping,
                         temporal_d_model=temporal_d_model,
@@ -1611,7 +1441,7 @@ def main():
                     if res:
                         st.session_state.interpolation_result = res
                         cache_key = (frozenset(target.items()), 1.0, kernel_strength,
-                                     use_spatial_attention, patch_size, use_parameter_aware_temporal)
+                                     use_parameter_aware_temporal)
                         st.session_state.temporal_cache[cache_key] = res
                         st.success("Interpolation successful! Parameter-aware temporal attention enabled.")
                     else:
@@ -1632,7 +1462,6 @@ def main():
                 ks = kernel_strength if 'kernel_strength' in locals() else 1.0
                 interp = st.session_state.interpolator
                 cache_key = (frozenset(target.items()), current_time, ks,
-                             interp.use_spatial_attention, interp.patch_size,
                              interp.use_parameter_aware_temporal)
                 if cache_key in st.session_state.temporal_cache:
                     st.session_state.interpolation_result = st.session_state.temporal_cache[cache_key]
@@ -1785,7 +1614,6 @@ def main():
                 "num_sources": res['num_sources'],
                 "current_time_norm": res.get('time_norm', 1.0),
                 "final_thickness_nm": res['derived']['thickness_nm'],
-                "spatial_attention_used": res.get('use_spatial_attention', False),
                 "parameter_aware_temporal_used": res.get('use_parameter_aware_temporal', False),
                 "time_warping_used": res.get('use_time_warping', False)
             })
