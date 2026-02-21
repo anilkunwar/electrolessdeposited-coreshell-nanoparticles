@@ -252,7 +252,7 @@ class EnhancedSolutionLoader:
         if arr.ndim == 3:
             mid = arr.shape[0] // 2
             return arr[mid, :, :]
-        elif arr.ndim = 1:
+        elif arr.ndim == 1:
             n = int(np.sqrt(arr.size))
             return arr[:n*n].reshape(n, n)
         else:
