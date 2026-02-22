@@ -1,16 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Transformer‑Inspired Interpolation for Electroless Ag Shell Deposition on Cu Core
-FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL‑TIME UNITS
-- Physics‑aware feature encoding with log‑scaled concentration
-- Domain‑specific kernel with weighted distances and hard categorical constraints
+Transformer-Inspired Interpolation for Electroless Ag Shell Deposition on Cu Core
+FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL-TIME UNITS
+- Physics-aware feature encoding with log-scaled concentration
+- Domain-specific kernel with weighted distances and hard categorical constraints
 - Three-tier temporal caching: thickness curve (always) + sparse key frames (10) + LRU field cache (3)
 - Streaming animation with disk-backed frames for long sequences
 - Real-time temporal interpolation between key frames
 - **Real physical time (seconds) from source PKL τ₀**
 - **Gated attention based on absolute L0 difference** (prioritises sources with similar physical scale)
-- **Discrete colourbar for material proxy** (electrolyte / Ag / Cu) using custom colours from original simulation
+- **Hierarchical composite gating** (L0 → fc → rs → c_bulk) for improved parameter sensitivity
+- **Discrete material colorbar with EXACT phase-field colors**:
+  * Electrolyte (red):    RGBA(0.894, 0.102, 0.110, 1.0) → proxy=0: phi≤0.5 AND psi≤0.5
+  * Ag shell (orange):    RGBA(1.000, 0.498, 0.000, 1.0) → proxy=1: phi>0.5 AND psi≤0.5
+  * Cu core (gray):       RGBA(0.600, 0.600, 0.600, 1.0) → proxy=2: psi>0.5
+- **THERMODYNAMICALLY CONSISTENT TIME SCALING**: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY
+  * Domain size L0 affects spatial resolution, NOT temporal dynamics speed
+  * No artificial ω speedup factor that violates phase-field kinetics
 """
 import streamlit as st
 import numpy as np
@@ -80,6 +87,29 @@ COLORMAP_OPTIONS = {
 }
 
 # =============================================
+# EXACT PHASE-FIELD MATERIAL COLORS (matching phase field generator)
+# =============================================
+MATERIAL_COLORS_EXACT = {
+    'electrolyte': (0.894, 0.102, 0.110, 1.0),  # Red
+    'Ag':          (1.000, 0.498, 0.000, 1.0),  # Orange
+    'Cu':          (0.600, 0.600, 0.600, 1.0)   # Gray
+}
+MATERIAL_COLORMAP_MATPLOTLIB = ListedColormap([
+    MATERIAL_COLORS_EXACT['electrolyte'][:3],
+    MATERIAL_COLORS_EXACT['Ag'][:3],
+    MATERIAL_COLORS_EXACT['Cu'][:3]
+], name='phase_field_materials')
+MATERIAL_BOUNDARY_NORM = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], ncolors=3)
+MATERIAL_COLORSCALE_PLOTLY = [
+    [0.0, f"rgb({int(0.894*255)},{int(0.102*255)},{int(0.110*255)})"],
+    [0.333, f"rgb({int(0.894*255)},{int(0.102*255)},{int(0.110*255)})"],
+    [0.334, f"rgb({int(1.000*255)},{int(0.498*255)},{int(0.000*255)})"],
+    [0.666, f"rgb({int(1.000*255)},{int(0.498*255)},{int(0.000*255)})"],
+    [0.667, f"rgb({int(0.600*255)},{int(0.600*255)},{int(0.600*255)})"],
+    [1.0, f"rgb({int(0.600*255)},{int(0.600*255)},{int(0.600*255)})"]
+]
+
+# =============================================
 # DEPOSITION PARAMETERS (normalisation)
 # =============================================
 class DepositionParameters:
@@ -112,6 +142,10 @@ class DepositionParameters:
             return 10**log_val
         else:
             return norm_value * (high - low) + low
+
+    # =========================================================
+    # REMOVED: compute_dynamics_speed - THERMODYNAMICALLY INCONSISTENT
+    # =========================================================
 
 # =============================================
 # DEPOSITION PHYSICS (derived quantities)
@@ -167,7 +201,6 @@ class DepositionPhysics:
 
     @staticmethod
     def compute_growth_rate(thickness_history: List[Dict], time_idx: int) -> float:
-        """Compute instantaneous growth rate from thickness history."""
         if time_idx == 0 or time_idx >= len(thickness_history):
             return 0.0
         dt = thickness_history[time_idx]['t_nd'] - thickness_history[time_idx-1]['t_nd']
@@ -187,9 +220,8 @@ class TemporalCacheEntry:
     fields: Optional[Dict[str, np.ndarray]] = None
     thickness_nm: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
-    
+
     def get_size_mb(self) -> float:
-        """Estimate memory footprint."""
         if self.fields is None:
             return 0.001
         total_bytes = sum(arr.nbytes for arr in self.fields.values())
@@ -197,12 +229,10 @@ class TemporalCacheEntry:
 
 class TemporalFieldManager:
     """
-    Three-tier temporal management system:
-    Tier 1: Thickness evolution curve (always in memory, ~1KB)
-    Tier 2: Sparse key frames (10 frames, ~15MB) for fast interpolation
-    Tier 3: LRU field cache (3 frames, ~4.5MB) for interactive exploration
+    Three-tier temporal management system.
+    KEY PRINCIPLE: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY.
+    Domain size L0 affects spatial resolution, NOT temporal dynamics speed.
     """
-    
     def __init__(self, interpolator, sources: List[Dict], target_params: Dict,
                  n_key_frames: int = 10, lru_size: int = 3):
         self.interpolator = interpolator
@@ -210,29 +240,20 @@ class TemporalFieldManager:
         self.target_params = target_params
         self.n_key_frames = n_key_frames
         self.lru_size = lru_size
-        
         self.avg_tau0 = None
         self.avg_t_max_nd = None
-        
-        # Tier 1: Thickness curve
         self.thickness_time: Optional[Dict] = None
         self.weights: Optional[Dict] = None
         self._compute_thickness_curve()
-        
-        # Tier 2: Sparse key frames
         self.key_times: np.ndarray = np.linspace(0, 1, n_key_frames)
         self.key_frames: Dict[float, Dict[str, np.ndarray]] = {}
         self.key_thickness: Dict[float, float] = {}
         self.key_time_real: Dict[float, float] = {}
         self._precompute_key_frames()
-        
-        # Tier 3: LRU cache
         self.lru_cache: OrderedDict[float, TemporalCacheEntry] = OrderedDict()
-        
-        # Animation streaming
         self.animation_temp_dir: Optional[str] = None
         self.animation_frame_paths: List[str] = []
-        
+
     def _compute_thickness_curve(self):
         res = self.interpolator.interpolate_fields(
             self.sources, self.target_params, target_shape=(256, 256),
@@ -242,11 +263,10 @@ class TemporalFieldManager:
         self.weights = res['weights']
         self.avg_tau0 = res.get('avg_tau0', 1e-4)
         self.avg_t_max_nd = res.get('avg_t_max_nd', 1.0)
-        
+
     def _precompute_key_frames(self):
         st.info(f"Pre-computing {self.n_key_frames} key frames...")
         progress_bar = st.progress(0)
-        
         for i, t in enumerate(self.key_times):
             res = self.interpolator.interpolate_fields(
                 self.sources, self.target_params, target_shape=(256, 256),
@@ -257,38 +277,33 @@ class TemporalFieldManager:
                 self.key_thickness[t] = res['derived']['thickness_nm']
                 self.key_time_real[t] = res.get('time_real_s', 0.0)
             progress_bar.progress((i + 1) / self.n_key_frames)
-        
         progress_bar.empty()
         st.success(f"Key frames ready. Memory: ~{self._estimate_key_frame_memory():.1f} MB")
-        
+
     def _estimate_key_frame_memory(self) -> float:
         if not self.key_frames:
             return 0.0
         sample_frame = next(iter(self.key_frames.values()))
         bytes_per_frame = sum(arr.nbytes for arr in sample_frame.values())
         return (bytes_per_frame * len(self.key_frames)) / (1024 * 1024)
-        
+
     def get_fields(self, time_norm: float, use_interpolation: bool = True) -> Dict[str, np.ndarray]:
         t_key = round(time_norm, 4)
         time_real = time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
-        
-        # 1. Check LRU cache
+
         if t_key in self.lru_cache:
             entry = self.lru_cache.pop(t_key)
             self.lru_cache[t_key] = entry
             return entry.fields
-        
-        # 2. Check exact key frame
+
         if t_key in self.key_frames:
             fields = self.key_frames[t_key]
             self._add_to_lru(t_key, fields, self.key_thickness.get(t_key, 0.0), time_real)
             return fields
-        
-        # 3. Interpolate between nearest key frames
+
         if use_interpolation and self.key_frames:
             key_times_arr = np.array(list(self.key_frames.keys()))
             idx = np.searchsorted(key_times_arr, t_key)
-            
             if idx == 0:
                 fields = self.key_frames[key_times_arr[0]]
                 self._add_to_lru(t_key, fields, self.key_thickness[key_times_arr[0]], time_real)
@@ -297,22 +312,19 @@ class TemporalFieldManager:
                 fields = self.key_frames[key_times_arr[-1]]
                 self._add_to_lru(t_key, fields, self.key_thickness[key_times_arr[-1]], time_real)
                 return fields
-            
+
             t0, t1 = key_times_arr[idx-1], key_times_arr[idx]
             alpha = (t_key - t0) / (t1 - t0) if (t1 - t0) > 0 else 0.0
-            
             f0, f1 = self.key_frames[t0], self.key_frames[t1]
             th0, th1 = self.key_thickness[t0], self.key_thickness[t1]
-            
+
             interp_fields = {}
             for key in f0:
                 interp_fields[key] = (1 - alpha) * f0[key] + alpha * f1[key]
             interp_thickness = (1 - alpha) * th0 + alpha * th1
-            
             self._add_to_lru(t_key, interp_fields, interp_thickness, time_real)
             return interp_fields
-        
-        # 4. Fallback: compute fresh
+
         res = self.interpolator.interpolate_fields(
             self.sources, self.target_params, target_shape=(256, 256),
             n_time_points=100, time_norm=time_norm
@@ -320,87 +332,73 @@ class TemporalFieldManager:
         if res:
             self._add_to_lru(t_key, res['fields'], res['derived']['thickness_nm'], time_real)
             return res['fields']
-        
+
         nearest_t = min(self.key_frames.keys(), key=lambda x: abs(x - t_key))
         return self.key_frames[nearest_t]
-        
+
     def _add_to_lru(self, time_norm: float, fields: Dict[str, np.ndarray], thickness_nm: float, time_real_s: float):
         if time_norm in self.lru_cache:
             del self.lru_cache[time_norm]
-        
         while len(self.lru_cache) >= self.lru_size:
             oldest_key = next(iter(self.lru_cache))
             del self.lru_cache[oldest_key]
-        
         self.lru_cache[time_norm] = TemporalCacheEntry(
             time_norm=time_norm,
             time_real_s=time_real_s,
             fields=fields,
             thickness_nm=thickness_nm
         )
-        
+
     def get_thickness_at_time(self, time_norm: float) -> float:
         if self.thickness_time is None:
             return 0.0
-        
         t_arr = np.array(self.thickness_time['t_norm'])
         th_arr = np.array(self.thickness_time['th_nm'])
-        
         if time_norm <= t_arr[0]:
             return th_arr[0]
         if time_norm >= t_arr[-1]:
             return th_arr[-1]
         return np.interp(time_norm, t_arr, th_arr)
-    
+
     def get_time_real(self, time_norm: float) -> float:
         return time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
-        
+
     def prepare_animation_streaming(self, n_frames: int = 50) -> List[str]:
         import tempfile
         self.animation_temp_dir = tempfile.mkdtemp(dir=TEMP_ANIMATION_DIR)
         self.animation_frame_paths = []
-        
         times = np.linspace(0, 1, n_frames)
-        
         st.info(f"Pre-rendering {n_frames} animation frames to disk...")
         progress = st.progress(0)
-        
         for i, t in enumerate(times):
             fields = self.get_fields(t, use_interpolation=True)
             time_real = self.get_time_real(t)
             frame_path = os.path.join(self.animation_temp_dir, f"frame_{i:04d}.npz")
             np.savez_compressed(frame_path,
-                              phi=fields['phi'],
-                              c=fields['c'],
-                              psi=fields['psi'],
-                              time_norm=t,
-                              time_real_s=time_real)
+                phi=fields['phi'], c=fields['c'], psi=fields['psi'],
+                time_norm=t, time_real_s=time_real)
             self.animation_frame_paths.append(frame_path)
             progress.progress((i + 1) / n_frames)
-        
         progress.empty()
         return self.animation_frame_paths
-        
+
     def get_animation_frame(self, frame_idx: int) -> Optional[Dict[str, np.ndarray]]:
         if not self.animation_frame_paths or frame_idx >= len(self.animation_frame_paths):
             return None
-        
         data = np.load(self.animation_frame_paths[frame_idx])
         return {
-            'phi': data['phi'],
-            'c': data['c'],
-            'psi': data['psi'],
+            'phi': data['phi'], 'c': data['c'], 'psi': data['psi'],
             'time_norm': float(data['time_norm']),
             'time_real_s': float(data['time_real_s'])
         }
-        
+
     def cleanup_animation(self):
         if self.animation_temp_dir and os.path.exists(self.animation_temp_dir):
             import shutil
             shutil.rmtree(self.animation_temp_dir)
-            self.animation_temp_dir = None
-            self.animation_frame_paths = []
-            
+        self.animation_temp_dir = None
+        self.animation_frame_paths = []
+
     def get_memory_stats(self) -> Dict[str, float]:
         lru_memory = sum(entry.get_size_mb() for entry in self.lru_cache.values())
         key_memory = self._estimate_key_frame_memory()
@@ -413,7 +411,7 @@ class TemporalFieldManager:
         }
 
 # =============================================
-# ROBUST SOLUTION LOADER (with filename fallback)
+# ROBUST SOLUTION LOADER
 # =============================================
 class EnhancedSolutionLoader:
     """Loads PKL files from numerical_solutions, parsing filenames as fallback."""
@@ -449,7 +447,6 @@ class EnhancedSolutionLoader:
         return file_info
 
     def parse_filename(self, filename: str) -> Dict[str, any]:
-        """Extract parameters from filenames."""
         params = {}
         mode_match = re.search(r'_(2D|3D)_', filename)
         if mode_match:
@@ -474,9 +471,9 @@ class EnhancedSolutionLoader:
             params['use_edl'] = False
         elif 'EDL' in filename:
             params['use_edl'] = True
-            edl_match = re.search(r'EDL([0-9.]+)', filename)
-            if edl_match:
-                params['lambda0_edl'] = float(edl_match.group(1))
+        edl_match = re.search(r'EDL([0-9.]+)', filename)
+        if edl_match:
+            params['lambda0_edl'] = float(edl_match.group(1))
         k_match = re.search(r'_k([0-9.]+)_', filename)
         if k_match:
             params['k0_nd'] = float(k_match.group(1))
@@ -650,11 +647,11 @@ class PositionalEncoding(nn.Module):
         return x + pe.unsqueeze(0)
 
 # =============================================
-# ENHANCED CORE‑SHELL INTERPOLATOR
+# ENHANCED CORE‑SHELL INTERPOLATOR WITH HIERARCHICAL GATED ATTENTION
 # =============================================
 class CoreShellInterpolator:
     def __init__(self, d_model=64, nhead=8, num_layers=3,
-                 param_sigma=None, temperature=1.0):
+                 param_sigma=None, temperature=1.0, gating_mode="Hierarchical: L0 → fc → rs → c_bulk"):
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
@@ -662,6 +659,7 @@ class CoreShellInterpolator:
             param_sigma = [0.15, 0.15, 0.15, 0.15]
         self.param_sigma = param_sigma
         self.temperature = temperature
+        self.gating_mode = gating_mode
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -677,8 +675,119 @@ class CoreShellInterpolator:
     def set_parameter_sigma(self, param_sigma):
         self.param_sigma = param_sigma
 
+    def set_gating_mode(self, gating_mode):
+        self.gating_mode = gating_mode
+
+    def compute_composite_gates(self, source_params: List[Dict], target_params: Dict) -> List[float]:
+        """
+        Compute composite gate factors based on hierarchical gating modes.
+        Returns a list of multiplicative factors (one per source).
+        """
+        target_L0 = target_params.get('L0_nm', 20.0)
+        target_fc = target_params.get('fc', 0.18)
+        target_rs = target_params.get('rs', 0.2)
+        target_c_bulk = target_params.get('c_bulk', 0.5)
+
+        gates = []
+        for src in source_params:
+            src_L0 = src.get('L0_nm', 20.0)
+            src_fc = src.get('fc', 0.18)
+            src_rs = src.get('rs', 0.2)
+            src_c_bulk = src.get('c_bulk', 0.5)
+
+            delta_L0 = abs(target_L0 - src_L0)
+            delta_fc = abs(target_fc - src_fc)
+            delta_rs = abs(target_rs - src_rs)
+            delta_c_bulk = abs(target_c_bulk - src_c_bulk)
+
+            if self.gating_mode == "No Gating":
+                gate = 1.0
+
+            elif self.gating_mode == "Joint Multiplicative":
+                gate = 1.0
+                # L0 gate
+                if delta_L0 < 5:
+                    gate *= 0.95
+                elif delta_L0 < 10:
+                    gate *= 0.60
+                elif delta_L0 < 15:
+                    gate *= 0.40
+                elif delta_L0 < 25:
+                    gate *= 0.20
+                else:
+                    gate *= 0.05
+                # fc gate
+                if delta_fc < 0.05:
+                    gate *= 0.95
+                else:
+                    gate *= 0.60
+                # rs gate
+                if delta_rs < 0.05:
+                    gate *= 0.95
+                else:
+                    gate *= 0.60
+                # c_bulk gate (log‑sensitive)
+                if delta_c_bulk < 0.05:
+                    gate *= 0.95
+                else:
+                    gate *= 0.60
+
+            elif self.gating_mode == "Hierarchical: L0 → fc → rs → c_bulk":
+                gate = 1.0
+                # Root L0 gate
+                if delta_L0 < 5:
+                    gate *= 0.95
+                elif delta_L0 < 10:
+                    gate *= 0.60
+                elif delta_L0 < 15:
+                    gate *= 0.40
+                elif delta_L0 < 25:
+                    gate *= 0.20
+                else:
+                    gate *= 0.05
+
+                # Only apply sub‑gates if L0 mismatch is not too severe
+                if gate > 0.5:
+                    if delta_fc < 0.05:
+                        gate *= 0.95
+                    else:
+                        gate *= 0.60
+                    if delta_rs < 0.05:
+                        gate *= 0.95
+                    else:
+                        gate *= 0.60
+                    if delta_c_bulk < 0.05:
+                        gate *= 0.95
+                    else:
+                        gate *= 0.60
+
+            elif self.gating_mode == "Hierarchical-Parallel: L0 → (fc, rs, c_bulk)":
+                gate = 1.0
+                # Root L0 gate
+                if delta_L0 < 5:
+                    gate *= 0.95
+                elif delta_L0 < 10:
+                    gate *= 0.60
+                elif delta_L0 < 15:
+                    gate *= 0.40
+                elif delta_L0 < 25:
+                    gate *= 0.20
+                else:
+                    gate *= 0.05
+
+                # Parallel sub‑gates, independent
+                if gate > 0.5:
+                    fc_gate = 0.95 if delta_fc < 0.05 else 0.60
+                    rs_gate = 0.95 if delta_rs < 0.05 else 0.60
+                    c_gate = 0.95 if delta_c_bulk < 0.05 else 0.60
+                    gate *= fc_gate * rs_gate * c_gate
+
+            gates.append(max(gate, 0.01))  # floor at 0.01 to avoid zero weights
+
+        return gates
+
     def compute_parameter_kernel(self, source_params: List[Dict], target_params: Dict):
-        """Domain‑specific kernel with weighted Euclidean distance."""
+        """Domain‑specific kernel with weighted Euclidean distance and hierarchical gates."""
         phys_weights = {'fc': 2.0, 'rs': 1.0, 'c_bulk': 3.0, 'L0_nm': 0.5}
 
         def norm_val(params, name):
@@ -709,36 +818,16 @@ class CoreShellInterpolator:
         cat_factor = []
         for src in source_params:
             factor = 1.0
-            if src.get('bc_type') != target_params.get('bc_type'):
-                factor *= 1e-6
-            if src.get('use_edl') != target_params.get('use_edl'):
-                factor *= 1e-6
-            if src.get('mode') != target_params.get('mode'):
-                factor *= 1e-6
+            if src.get('bc_type') != target_params.get('bc_type'): factor *= 1e-6
+            if src.get('use_edl') != target_params.get('use_edl'): factor *= 1e-6
+            if src.get('mode') != target_params.get('mode'): factor *= 1e-6
             cat_factor.append(factor)
 
-        # === GATED L0 WEIGHTING ===
-        # Compute absolute L0 difference in nm and apply piecewise gate factors
-        target_L0 = target_params.get('L0_nm', 20.0)
-        gate_factors = []
-        for src in source_params:
-            src_L0 = src.get('L0_nm', 20.0)
-            delta_L0 = abs(target_L0 - src_L0)
-            # User‑specified thresholds (percentages as multipliers)
-            if delta_L0 < 5:
-                gate = 0.95
-            elif delta_L0 < 10:
-                gate = 0.60
-            elif delta_L0 < 15:
-                gate = 0.40  # intermediate range, can be adjusted
-            elif delta_L0 < 25:
-                gate = 0.20
-            else:
-                gate = 0.05
-            gate_factors.append(gate)
+        # Compute hierarchical composite gates
+        composite_gates = self.compute_composite_gates(source_params, target_params)
 
-        # Combine: base weights * categorical factor * L0 gate
-        final_weights = np.array(base_weights) * np.array(cat_factor) * np.array(gate_factors)
+        # Combine all factors
+        final_weights = np.array(base_weights) * np.array(cat_factor) * np.array(composite_gates)
         return final_weights
 
     def encode_parameters(self, params_list: List[Dict]) -> torch.Tensor:
@@ -762,15 +851,12 @@ class CoreShellInterpolator:
         history = source.get('history', [])
         if not history:
             return {'phi': np.zeros(target_shape), 'c': np.zeros(target_shape), 'psi': np.zeros(target_shape)}
-
         t_max = 1.0
         if source.get('thickness_history'):
             t_max = source['thickness_history'][-1]['t_nd']
         else:
             t_max = history[-1]['t_nd']
-
         t_target = time_norm * t_max
-
         if len(history) == 1:
             snap = history[0]
             phi = self._ensure_2d(snap['phi'])
@@ -870,7 +956,7 @@ class CoreShellInterpolator:
                     't_max': 1.0
                 })
                 source_t_max_nd.append(1.0)
-            
+
             source_tau0.append(params['tau0_s'])
 
         if not source_params:
@@ -999,57 +1085,51 @@ class CoreShellInterpolator:
         return arr
 
 # =============================================
-# ENHANCED HEATMAP VISUALIZER WITH TEMPORAL SUPPORT AND DISCRETE MATERIAL COLORMAP
+# ENHANCED HEATMAP VISUALIZER WITH EXACT PHASE-FIELD MATERIAL COLORS
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
         self.colormaps = COLORMAP_OPTIONS
-        # Custom colormap matching original simulation:
-        # Electrolyte (0) -> red #e41a1c
-        # Ag (1)          -> orange #ff7f00
-        # Cu (2)          -> gray #999999
-        self.material_colors = ['#e41a1c', '#ff7f00', '#999999']
 
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
+
+    def _is_material_proxy(self, field_data, colorbar_label, title):
+        unique_vals = np.unique(field_data)
+        is_discrete = np.all(np.isin(unique_vals, [0, 1, 2])) and len(unique_vals) <= 3
+        has_material_keyword = any(kw in colorbar_label.lower() or kw in title.lower()
+                                  for kw in ['material', 'proxy', 'phase', 'electrolyte', 'ag', 'cu'])
+        return is_discrete and has_material_keyword
 
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
                               L0_nm=20.0, figsize=(10,8), colorbar_label="",
                               vmin=None, vmax=None, target_params=None, time_real_s=None):
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         extent = self._get_extent(L0_nm)
-        
-        # --- Discrete handling for material proxy ---
-        is_material_map = "Material" in colorbar_label or "Material" in title
-        
-        if is_material_map:
-            # Discrete colormap using custom colors
-            mat_cmap = ListedColormap(self.material_colors)
-            # Place colour boundaries between integer values
-            norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], mat_cmap.N)
-            im = ax.imshow(field_data, cmap=mat_cmap, norm=norm,
-                           extent=extent, aspect='equal', origin='lower')
+
+        is_material = self._is_material_proxy(field_data, colorbar_label, title)
+
+        if is_material:
+            im = ax.imshow(field_data, cmap=MATERIAL_COLORMAP_MATPLOTLIB, norm=MATERIAL_BOUNDARY_NORM,
+                          extent=extent, aspect='equal', origin='lower')
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, ticks=[0, 1, 2])
-            cbar.ax.set_yticklabels(['Electrolyte', 'Ag', 'Cu'])
+            cbar.ax.set_yticklabels(['Electrolyte', 'Ag', 'Cu'], fontsize=12)
+            cbar.set_label('Material Phase', fontsize=14, fontweight='bold')
         else:
             im = ax.imshow(field_data, cmap=cmap_name, vmin=vmin, vmax=vmax,
-                           extent=extent, aspect='equal', origin='lower')
+                          extent=extent, aspect='equal', origin='lower')
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             if colorbar_label:
                 cbar.set_label(colorbar_label, fontsize=14, fontweight='bold')
-        
+
         ax.set_xlabel('X (nm)', fontsize=14, fontweight='bold')
         ax.set_ylabel('Y (nm)', fontsize=14, fontweight='bold')
-        
         title_str = title
         if target_params:
-            fc = target_params.get('fc', 0)
-            rs = target_params.get('rs', 0)
-            cb = target_params.get('c_bulk', 0)
+            fc = target_params.get('fc', 0); rs = target_params.get('rs', 0); cb = target_params.get('c_bulk', 0)
             title_str += f"\nfc={fc:.3f}, rs={rs:.3f}, c_bulk={cb:.2f}, L0={L0_nm} nm"
         if time_real_s is not None:
             title_str += f"\nt = {time_real_s:.3e} s"
-            
         ax.set_title(title_str, fontsize=16, fontweight='bold')
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -1061,24 +1141,17 @@ class HeatMapVisualizer:
         ny, nx = field_data.shape
         x = np.linspace(0, L0_nm, nx)
         y = np.linspace(0, L0_nm, ny)
-        
-        # --- Discrete handling for material proxy ---
-        is_material_map = "Material" in title
-        
-        if is_material_map:
-            # Plotly discrete colorscale using custom colors
-            colorscale = [
-                [0.0, self.material_colors[0]], [0.33, self.material_colors[0]],
-                [0.34, self.material_colors[1]], [0.66, self.material_colors[1]],
-                [0.67, self.material_colors[2]], [1.0, self.material_colors[2]]
-            ]
+
+        is_material = self._is_material_proxy(field_data, "", title)
+
+        if is_material:
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
-                      for j in range(nx)] for i in range(ny)]
+                     for j in range(nx)] for i in range(ny)]
             fig = go.Figure(data=go.Heatmap(
-                z=field_data, x=x, y=y, colorscale=colorscale,
+                z=field_data, x=x, y=y, colorscale=MATERIAL_COLORSCALE_PLOTLY,
                 hoverinfo='text', text=hover,
                 colorbar=dict(
-                    title=dict(text="Material", font=dict(size=14)),
+                    title=dict(text="Material Phase", font=dict(size=14)),
                     tickvals=[0, 1, 2],
                     ticktext=['Electrolyte', 'Ag', 'Cu']
                 ),
@@ -1086,22 +1159,20 @@ class HeatMapVisualizer:
             ))
         else:
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Value={field_data[i,j]:.4f}"
-                      for j in range(nx)] for i in range(ny)]
+                     for j in range(nx)] for i in range(ny)]
             fig = go.Figure(data=go.Heatmap(
                 z=field_data, x=x, y=y, colorscale=cmap_name,
                 hoverinfo='text', text=hover,
                 colorbar=dict(title=dict(text="Value", font=dict(size=14)))
             ))
-        
+
         title_str = title
         if target_params:
-            fc = target_params.get('fc', 0)
-            rs = target_params.get('rs', 0)
-            cb = target_params.get('c_bulk', 0)
+            fc = target_params.get('fc', 0); rs = target_params.get('rs', 0); cb = target_params.get('c_bulk', 0)
             title_str += f"<br>fc={fc:.3f}, rs={rs:.3f}, c_bulk={cb:.2f}, L0={L0_nm} nm"
         if time_real_s is not None:
             title_str += f"<br>t = {time_real_s:.3e} s"
-            
+
         fig.update_layout(
             title=dict(text=title_str, font=dict(size=20), x=0.5),
             xaxis=dict(title="X (nm)", scaleanchor="y", scaleratio=1),
@@ -1122,9 +1193,7 @@ class HeatMapVisualizer:
             t_plot = np.array(thickness_time['t_norm'])
             ax.set_xlabel("Normalized Time")
         th_nm = np.array(thickness_time['th_nm'])
-        
         ax.plot(t_plot, th_nm, 'b-', linewidth=3, label='Interpolated')
-        
         if show_growth_rate and len(t_plot) > 1:
             growth_rate = np.gradient(th_nm, t_plot)
             ax2 = ax.twinx()
@@ -1132,12 +1201,10 @@ class HeatMapVisualizer:
             ax2.set_ylabel('Growth Rate (nm/s)', fontsize=12, color='green')
             ax2.tick_params(axis='y', labelcolor='green')
             ax2.grid(False)
-
         if source_curves is not None and weights is not None:
             for i, (src_t, src_th) in enumerate(source_curves):
                 alpha = min(weights[i] * 5, 0.8)
                 ax.plot(src_t, src_th, '--', linewidth=1, alpha=alpha, label=f'Source {i+1} (w={weights[i]:.3f})')
-
         if current_time_norm is not None:
             if 't_real_s' in thickness_time:
                 current_th = np.interp(current_time_norm, np.array(thickness_time['t_norm']), th_nm)
@@ -1147,7 +1214,6 @@ class HeatMapVisualizer:
                 current_th = np.interp(current_time_norm, np.array(thickness_time['t_norm']), th_nm)
             ax.axvline(current_t_plot, color='r', linestyle='--', linewidth=2, alpha=0.7)
             ax.plot(current_t_plot, current_th, 'ro', markersize=8, label=f'Current: t={current_t_plot:.2e}, h={current_th:.2f} nm')
-
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
         ax.legend(loc='best')
@@ -1158,21 +1224,17 @@ class HeatMapVisualizer:
                                          cmap_name='viridis', L0_nm=20.0, n_cols=3):
         n_frames = len(fields_list)
         n_rows = (n_frames + n_cols - 1) // n_cols
-        
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows), dpi=200)
         if n_frames == 1:
             axes = np.array([axes])
         axes = axes.flatten()
-        
         extent = self._get_extent(L0_nm)
-        
-        # Determine if this is a material proxy field
+
         is_material = "material" in field_key.lower()
-        
+
         if is_material:
-            # For material, use custom discrete colormap
-            cmap = ListedColormap(self.material_colors)
-            norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], cmap.N)
+            cmap = MATERIAL_COLORMAP_MATPLOTLIB
+            norm = MATERIAL_BOUNDARY_NORM
             vmin, vmax = 0, 2
         else:
             cmap = cmap_name
@@ -1180,22 +1242,18 @@ class HeatMapVisualizer:
             all_values = [f[field_key] for f in fields_list]
             vmin = min(np.min(v) for v in all_values)
             vmax = max(np.max(v) for v in all_values)
-        
+
         for i, (fields, t) in enumerate(zip(fields_list, times_list)):
             ax = axes[i]
             if norm is not None:
-                im = ax.imshow(fields[field_key], cmap=cmap, norm=norm,
-                               extent=extent, aspect='equal', origin='lower')
+                im = ax.imshow(fields[field_key], cmap=cmap, norm=norm, extent=extent, aspect='equal', origin='lower')
             else:
-                im = ax.imshow(fields[field_key], cmap=cmap, vmin=vmin, vmax=vmax,
-                               extent=extent, aspect='equal', origin='lower')
+                im = ax.imshow(fields[field_key], cmap=cmap, vmin=vmin, vmax=vmax, extent=extent, aspect='equal', origin='lower')
             ax.set_title(f't = {t:.3e} s', fontsize=12)
             ax.set_xlabel('X (nm)')
             ax.set_ylabel('Y (nm)')
-            
         for j in range(i+1, len(axes)):
             axes[j].axis('off')
-            
         cbar = plt.colorbar(im, ax=axes, fraction=0.046, pad=0.04)
         if is_material:
             cbar.set_ticks([0, 1, 2])
@@ -1246,10 +1304,7 @@ class ResultsManager:
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             p = export_data['result']['target_params']
-            fc = p.get('fc', 0)
-            rs = p.get('rs', 0)
-            cb = p.get('c_bulk', 0)
-            t = export_data['result'].get('time_real_s', 0)
+            fc = p.get('fc', 0); rs = p.get('rs', 0); cb = p.get('c_bulk', 0); t = export_data['result'].get('time_real_s', 0)
             filename = f"temporal_interp_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_t{t:.3e}s_{ts}.json"
         json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
         return json_str, filename
@@ -1258,17 +1313,13 @@ class ResultsManager:
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             p = interpolation_result['target_params']
-            fc = p.get('fc', 0)
-            rs = p.get('rs', 0)
-            cb = p.get('c_bulk', 0)
-            t = interpolation_result.get('time_real_s', 0)
+            fc = p.get('fc', 0); rs = p.get('rs', 0); cb = p.get('c_bulk', 0); t = interpolation_result.get('time_real_s', 0)
             filename = f"fields_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_t{t:.3e}s_{ts}.csv"
         shape = interpolation_result['shape']
         L0 = interpolation_result['target_params'].get('L0_nm', 20.0)
-        x = np.linspace(0, L0, shape[1])
-        y = np.linspace(0, L0, shape[0])
+        x = np.linspace(0, L0, shape[1]); y = np.linspace(0, L0, shape[0])
         X, Y = np.meshgrid(x, y)
-        data = {'x_nm': X.flatten(), 'y_nm': Y.flatten(), 
+        data = {'x_nm': X.flatten(), 'y_nm': Y.flatten(),
                 'time_norm': interpolation_result.get('time_norm', 0),
                 'time_real_s': interpolation_result.get('time_real_s', 0)}
         for fname, arr in interpolation_result['fields'].items():
@@ -1306,10 +1357,24 @@ def main():
     border-radius: 0.6rem; margin: 1.2rem 0; font-size: 1.1rem; }
     .memory-stats { background-color: #FEF3C7; border-left: 5px solid #F59E0B; padding: 1.0rem;
     border-radius: 0.4rem; margin: 0.8rem 0; font-size: 0.9rem; }
+    .color-legend { display: flex; gap: 1rem; margin: 0.5rem 0; }
+    .color-item { display: flex; align-items: center; gap: 0.3rem; font-size: 0.9rem; }
+    .color-box { width: 20px; height: 20px; border: 1px solid #333; }
     </style>
     """, unsafe_allow_html=True)
 
     st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition: Full Temporal Interpolation</h1>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div style="background:#f8f9fa; padding:0.8rem; border-radius:0.4rem; margin:1rem 0;">
+    <strong>Material Proxy Colors (max(φ,ψ)+ψ):</strong>
+    <div class="color-legend">
+        <div class="color-item"><div class="color-box" style="background:rgb(228,26,28)"></div>Electrolyte (φ≤0.5, ψ≤0.5)</div>
+        <div class="color-item"><div class="color-box" style="background:rgb(255,127,0)"></div>Ag shell (φ>0.5, ψ≤0.5)</div>
+        <div class="color-item"><div class="color-box" style="background:rgb(153,153,153)"></div>Cu core (ψ>0.5)</div>
+    </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Initialize session state
     if 'solutions' not in st.session_state:
@@ -1370,6 +1435,18 @@ def main():
         sigma_c = st.slider("Kernel σ (c_bulk)", 0.05, 0.3, 0.15, 0.01)
         sigma_L = st.slider("Kernel σ (L0_nm)", 0.05, 0.3, 0.15, 0.01)
         temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
+
+        # NEW: Gating mode selection
+        gating_mode = st.selectbox(
+            "Composite Gating Mode",
+            ["Hierarchical: L0 → fc → rs → c_bulk",
+             "Hierarchical-Parallel: L0 → (fc, rs, c_bulk)",
+             "Joint Multiplicative",
+             "No Gating"],
+            index=0,
+            help="Hierarchical modes apply L0 gate first, then sub‑gates only if L0 is close. Joint multiplies all gates independently."
+        )
+
         n_key_frames = st.slider("Key frames for temporal interpolation", 5, 20, 10, 1,
                                 help="More frames = smoother animation but more memory")
         lru_cache_size = st.slider("Interactive cache size", 1, 5, 3, 1,
@@ -1383,7 +1460,7 @@ def main():
             'tau0_s': tau0_target
         }
         target_hash = hashlib.md5(json.dumps(target, sort_keys=True).encode()).hexdigest()[:16]
-        
+
         # Initialize temporal manager
         if target_hash != st.session_state.last_target_hash:
             if st.button("🧠 Initialize Temporal Interpolation", type="primary", use_container_width=True):
@@ -1393,7 +1470,8 @@ def main():
                     with st.spinner("Setting up temporal interpolation..."):
                         st.session_state.interpolator.set_parameter_sigma([sigma_fc, sigma_rs, sigma_c, sigma_L])
                         st.session_state.interpolator.temperature = temperature
-                        
+                        st.session_state.interpolator.set_gating_mode(gating_mode)
+
                         st.session_state.temporal_manager = TemporalFieldManager(
                             st.session_state.interpolator,
                             st.session_state.solutions,
@@ -1421,18 +1499,18 @@ def main():
     # Main area
     if st.session_state.temporal_manager:
         mgr = st.session_state.temporal_manager
-        
+
         st.markdown('<h2 class="section-header">⏱️ Temporal Control</h2>', unsafe_allow_html=True)
-        
+
         col_time1, col_time2, col_time3 = st.columns([3, 1, 1])
         with col_time1:
-            current_time_norm = st.slider("Normalized Time (0=start, 1=end)", 
-                                    0.0, 1.0, 
+            current_time_norm = st.slider("Normalized Time (0=start, 1=end)",
+                                    0.0, 1.0,
                                     value=st.session_state.current_time,
                                     step=0.001,
                                     format="%.3f")
             st.session_state.current_time = current_time_norm
-        
+
         with col_time2:
             if st.button("⏮️ Start", use_container_width=True):
                 st.session_state.current_time = 0.0
@@ -1441,53 +1519,57 @@ def main():
             if st.button("⏭️ End", use_container_width=True):
                 st.session_state.current_time = 1.0
                 st.rerun()
-        
+
         current_time_real = mgr.get_time_real(current_time_norm)
         current_thickness = mgr.get_thickness_at_time(current_time_norm)
-        
+
         col_info1, col_info2, col_info3 = st.columns(3)
         with col_info1:
             st.metric("Current Thickness", f"{current_thickness:.3f} nm")
         with col_info2:
-            # Dynamics speed ω removed as requested
+            # REMOVED: Dynamics speed ω - THERMODYNAMICALLY INCONSISTENT
             st.empty()
         with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
 
-        tabs = st.tabs(["📊 Field Visualization", "📈 Thickness Evolution", 
+        tabs = st.tabs(["📊 Field Visualization", "📈 Thickness Evolution",
                        "🎬 Animation", "🧪 Derived Quantities", "⚖️ Weights", "💾 Export"])
 
         with tabs[0]:
             st.markdown('<h2 class="section-header">📊 Field Visualization</h2>', unsafe_allow_html=True)
-            
+
             fields = mgr.get_fields(current_time_norm, use_interpolation=True)
-            
-            field_choice = st.selectbox("Select field", 
-                                       ['c (concentration)', 'phi (shell)', 'psi (core)'],
+
+            field_choice = st.selectbox("Select field",
+                                       ['c (concentration)', 'phi (shell)', 'psi (core)', 'material proxy'],
                                        key='field_choice')
-            field_map = {'c (concentration)': 'c', 'phi (shell)': 'phi', 'psi (core)': 'psi'}
+            field_map = {'c (concentration)': 'c', 'phi (shell)': 'phi', 'psi (core)': 'psi', 'material proxy': 'material'}
             field_key = field_map[field_choice]
-            field_data = fields[field_key]
+
+            if field_key == 'material':
+                field_data = DepositionPhysics.material_proxy(fields['phi'], fields['psi'])
+            else:
+                field_data = fields[field_key]
 
             cmap_cat = st.selectbox("Colormap category", list(COLORMAP_OPTIONS.keys()), index=0)
             cmap = st.selectbox("Colormap", COLORMAP_OPTIONS[cmap_cat], index=0)
 
             fig = st.session_state.visualizer.create_field_heatmap(
-                field_data, 
+                field_data,
                 title=f"Interpolated {field_choice}",
-                cmap_name=cmap, 
-                L0_nm=L0_nm, 
+                cmap_name=cmap,
+                L0_nm=L0_nm,
                 target_params=target,
                 time_real_s=current_time_real,
-                colorbar_label=field_choice.split()[0]
+                colorbar_label="Material" if field_key == 'material' else field_choice.split()[0]
             )
             st.pyplot(fig)
 
             if st.checkbox("Show interactive heatmap"):
                 fig_inter = st.session_state.visualizer.create_interactive_heatmap(
-                    field_data, 
+                    field_data,
                     title=f"Interactive {field_choice}",
-                    cmap_name=cmap, 
+                    cmap_name=cmap,
                     L0_nm=L0_nm,
                     target_params=target,
                     time_real_s=current_time_real
@@ -1498,23 +1580,25 @@ def main():
                 n_compare = st.slider("Number of time points", 3, 9, 5)
                 times_compare_norm = np.linspace(0, 1, n_compare)
                 times_compare_real = [mgr.get_time_real(t) for t in times_compare_norm]
-                
+
                 fields_list = []
                 for t in times_compare_norm:
                     f = mgr.get_fields(t, use_interpolation=True)
+                    if field_key == 'material':
+                        f['material'] = DepositionPhysics.material_proxy(f['phi'], f['psi'])
                     fields_list.append(f)
-                
+
                 fig_grid = st.session_state.visualizer.create_temporal_comparison_plot(
-                    fields_list, times_compare_real, field_key=field_key,
+                    fields_list, times_compare_real, field_key='material' if field_key == 'material' else field_key,
                     cmap_name=cmap, L0_nm=L0_nm
                 )
                 st.pyplot(fig_grid)
 
         with tabs[1]:
             st.markdown('<h2 class="section-header">📈 Thickness Evolution</h2>', unsafe_allow_html=True)
-            
+
             thickness_time = mgr.thickness_time
-            
+
             show_growth = st.checkbox("Show growth rate", value=False)
             fig_th = st.session_state.visualizer.create_thickness_plot(
                 thickness_time,
@@ -1524,11 +1608,11 @@ def main():
                 show_growth_rate=show_growth
             )
             st.pyplot(fig_th)
-            
+
             st.markdown("#### Thickness Statistics")
             th_arr = np.array(thickness_time['th_nm'])
             t_arr = np.array(thickness_time['t_real_s']) if 't_real_s' in thickness_time else np.array(thickness_time['t_norm'])
-            
+
             stats_cols = st.columns(4)
             with stats_cols[0]:
                 st.metric("Final Thickness", f"{th_arr[-1]:.3f} nm")
@@ -1543,43 +1627,45 @@ def main():
 
         with tabs[2]:
             st.markdown('<h2 class="section-header">🎬 Animation</h2>', unsafe_allow_html=True)
-            
-            anim_method = st.radio("Animation method", 
+
+            anim_method = st.radio("Animation method",
                                   ["Real-time interpolation", "Pre-rendered (smooth)"],
                                   help="Real-time: compute on fly, lower memory. Pre-rendered: smoother but uses disk.")
-            
+
             if anim_method == "Real-time interpolation":
                 fps = st.slider("FPS", 1, 30, 10)
                 n_frames = st.slider("Frames", 10, 100, 30)
-                
+
                 if st.button("▶️ Play Animation", use_container_width=True):
                     placeholder = st.empty()
                     times = np.linspace(0, 1, n_frames)
-                    
+
                     for t_norm in times:
                         fields = mgr.get_fields(t_norm, use_interpolation=True)
                         t_real = mgr.get_time_real(t_norm)
+                        field_data = DepositionPhysics.material_proxy(fields['phi'], fields['psi']) if field_key == 'material' else fields[field_key]
                         fig = st.session_state.visualizer.create_field_heatmap(
-                            fields[field_key],
+                            field_data,
                             title=f"t = {t_real:.3e} s",
                             cmap_name=cmap,
                             L0_nm=L0_nm,
                             target_params=target,
-                            time_real_s=t_real
+                            time_real_s=t_real,
+                            colorbar_label="Material" if field_key == 'material' else field_choice.split()[0]
                         )
                         placeholder.pyplot(fig)
                         time.sleep(1/fps)
-                    
+
                     st.success("Animation complete")
-                    
+
             else:  # Pre-rendered
                 n_frames = st.slider("Pre-render frames", 20, 100, 50)
-                
+
                 if st.button("🎥 Pre-render Animation", use_container_width=True):
                     with st.spinner(f"Rendering {n_frames} frames to disk..."):
                         frame_paths = mgr.prepare_animation_streaming(n_frames)
                     st.success(f"Pre-rendered {len(frame_paths)} frames")
-                
+
                 if mgr.animation_frame_paths:
                     fps = st.slider("Playback FPS", 1, 30, 15)
                     if st.button("▶️ Play Pre-rendered", use_container_width=True):
@@ -1588,32 +1674,33 @@ def main():
                             data = np.load(frame_path)
                             fields = {'phi': data['phi'], 'c': data['c'], 'psi': data['psi']}
                             t_real = float(data['time_real_s'])
-                            
+                            field_data = DepositionPhysics.material_proxy(fields['phi'], fields['psi']) if field_key == 'material' else fields[field_key]
                             fig = st.session_state.visualizer.create_field_heatmap(
-                                fields[field_key],
+                                field_data,
                                 title=f"t = {t_real:.3e} s [Pre-rendered]",
                                 cmap_name=cmap,
                                 L0_nm=L0_nm,
                                 target_params=target,
-                                time_real_s=t_real
+                                time_real_s=t_real,
+                                colorbar_label="Material" if field_key == 'material' else field_choice.split()[0]
                             )
                             placeholder.pyplot(fig)
                             time.sleep(1/fps)
-                        
+
                         st.success("Playback complete")
-                        
+
                     if st.button("🗑️ Clean Pre-rendered", use_container_width=True):
                         mgr.cleanup_animation()
                         st.success("Cleaned up")
 
         with tabs[3]:
             st.markdown('<h2 class="section-header">🧪 Derived Quantities</h2>', unsafe_allow_html=True)
-            
+
             res = st.session_state.interpolator.interpolate_fields(
                 st.session_state.solutions, target, target_shape=(256,256),
                 n_time_points=100, time_norm=current_time_norm
             )
-            
+
             if res:
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -1639,6 +1726,7 @@ def main():
                 col_viz1, col_viz2 = st.columns(2)
                 with col_viz1:
                     st.subheader("Material Proxy")
+                    st.markdown("*Threshold logic: Electrolyte=red (φ≤0.5,ψ≤0.5) | Ag=orange (φ>0.5,ψ≤0.5) | Cu=gray (ψ>0.5)*")
                     fig_mat = st.session_state.visualizer.create_field_heatmap(
                         res['derived']['material'], "Material Proxy",
                         cmap_name='Set1', L0_nm=L0_nm, target_params=target,
@@ -1646,7 +1734,7 @@ def main():
                         time_real_s=current_time_real
                     )
                     st.pyplot(fig_mat)
-                    
+
                 with col_viz2:
                     st.subheader("Potential Proxy")
                     fig_pot = st.session_state.visualizer.create_field_heatmap(
@@ -1659,7 +1747,7 @@ def main():
 
         with tabs[4]:
             st.markdown('<h2 class="section-header">⚖️ Weights & Uncertainty</h2>', unsafe_allow_html=True)
-            
+
             weights = mgr.weights
             df_weights = pd.DataFrame({
                 'Source': range(len(weights['combined'])),
@@ -1668,11 +1756,11 @@ def main():
                 'Attention': weights['attention']
             })
             st.dataframe(df_weights.style.format("{:.4f}"))
-            
+
             entropy = weights.get('entropy', 0.0)
             st.metric("Weight Entropy (Uncertainty)", f"{entropy:.4f}",
                      help="Higher = more uncertain (sources contribute equally)")
-            
+
             fig_w, ax = plt.subplots(figsize=(10,5))
             x = np.arange(len(weights['combined']))
             width = 0.25
@@ -1687,7 +1775,7 @@ def main():
 
         with tabs[5]:
             st.markdown('<h2 class="section-header">💾 Export Data</h2>', unsafe_allow_html=True)
-            
+
             col_exp1, col_exp2 = st.columns(2)
             with col_exp1:
                 if st.button("📊 Export Current State (JSON)", use_container_width=True):
@@ -1701,7 +1789,7 @@ def main():
                         )
                         json_str, fname = st.session_state.results_manager.export_to_json(export_data)
                         st.download_button("⬇️ Download JSON", json_str, fname, "application/json")
-                        
+
             with col_exp2:
                 if st.button("📈 Export Current State (CSV)", use_container_width=True):
                     res = st.session_state.interpolator.interpolate_fields(
@@ -1711,12 +1799,12 @@ def main():
                     if res:
                         csv_str, fname = st.session_state.results_manager.export_to_csv(res)
                         st.download_button("⬇️ Download CSV", csv_str, fname, "text/csv")
-            
+
             st.markdown("#### Full Temporal Export")
             if st.button("📦 Export All Key Frames (ZIP)", use_container_width=True):
                 import zipfile
                 import io
-                
+
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     for t_norm in mgr.key_times:
@@ -1730,9 +1818,9 @@ def main():
                             )
                             json_str, _ = st.session_state.results_manager.export_to_json(export_data)
                             zip_file.writestr(f"frame_t{t_norm:.4f}.json", json_str)
-                
-                st.download_button("⬇️ Download ZIP", 
-                                 zip_buffer.getvalue(), 
+
+                st.download_button("⬇️ Download ZIP",
+                                 zip_buffer.getvalue(),
                                  f"temporal_sequence_{target_hash}.zip",
                                  "application/zip")
 
@@ -1742,7 +1830,7 @@ def main():
         1. Load solutions using the sidebar
         2. Set target parameters
         3. Click **"Initialize Temporal Interpolation"**
-        
+
         The system will pre-compute key frames for smooth temporal exploration while keeping memory usage low (~15-20 MB).
         """)
 
