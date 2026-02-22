@@ -91,7 +91,9 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi6-streamlit-red)](https://electroless-deposition-fields-interpolation6.streamlit.app/) (interpolation functions with spatiotemporal information,  temporal results starts to work, normalized time frame, study of this code is needed)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi7-streamlit-red)](https://electroless-deposition-fields-interpolation7.streamlit.app/) (interpolation functions with spatiotemporal information,  normalized time fram converted to time in the unit of s, the simulations of different diffusion lengths are not distingusihed)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi7-streamlit-red)](https://electroless-deposition-fields-interpolation7.streamlit.app/) (interpolation functions with spatiotemporal information,  normalized time frame converted to time in the unit of s, the simulations of different diffusion lengths are not distingusihed)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi8-streamlit-red)](https://electroless-deposition-fields-interpolation8.streamlit.app/) (interpolation functions with spatiotemporal information,  normalized time frame converted to time in the unit of s, the simulations of different diffusion lengths are distinguished for gating provided in delta_L0)
 
 
 Statistical Analytics:
