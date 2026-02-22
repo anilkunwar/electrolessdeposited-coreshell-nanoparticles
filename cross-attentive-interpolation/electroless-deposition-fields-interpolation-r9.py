@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -1590,4 +1589,4 @@ The system will pre-compute key frames for smooth temporal exploration while kee
 """)
 if __name__ == "__main__":
 main()
-```
+
