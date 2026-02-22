@@ -10,7 +10,7 @@ FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL‑TIME UNITS
 - Real-time temporal interpolation between key frames
 - **Real physical time (seconds) from source PKL τ₀**
 - **Gated attention based on absolute L0 difference** (prioritises sources with similar physical scale)
-- **Discrete colourbar for material proxy** (electrolyte / Ag / Cu) using Set1 colours
+- **Discrete colourbar for material proxy** (electrolyte / Ag / Cu) using Set1 colours (red/blue/green)
 """
 import streamlit as st
 import numpy as np
@@ -1004,7 +1004,7 @@ class CoreShellInterpolator:
 class HeatMapVisualizer:
     def __init__(self):
         self.colormaps = COLORMAP_OPTIONS
-        # Set1 first three colours: red, blue, green
+        # Set1 first three colours: red (#e41a1c), blue (#377eb8), green (#4daf4a)
         self.material_colors = ['#e41a1c', '#377eb8', '#4daf4a']
 
     def _get_extent(self, L0_nm):
