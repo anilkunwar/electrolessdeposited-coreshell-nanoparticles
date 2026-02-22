@@ -16,7 +16,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, ListedColormap, BoundaryNorm
 from matplotlib.animation import FuncAnimation
 import plotly.graph_objects as go
 import plotly.express as px
@@ -112,23 +112,6 @@ class DepositionParameters:
             return 10**log_val
         else:
             return norm_value * (high - low) + low
-
-    @staticmethod
-    def compute_dynamics_speed(params: Dict[str, float]) -> float:
-        """
-        Compute relative dynamics speed factor.
-        Higher c_bulk, smaller L0, larger fc = faster dynamics.
-        """
-        c_bulk = params.get('c_bulk', 0.5)
-        L0 = params.get('L0_nm', 60.0)
-        fc = params.get('fc', 0.18)
-        
-        # Reference values
-        c_ref, L_ref, fc_ref = 0.5, 60.0, 0.18
-        
-        # Speed factor (omega > 1 means faster than reference)
-        omega = (c_bulk / c_ref) * (L_ref / L0) * (fc / fc_ref)
-        return omega
 
 # =============================================
 # DEPOSITION PHYSICS (derived quantities)
@@ -1016,7 +999,7 @@ class CoreShellInterpolator:
         return arr
 
 # =============================================
-# ENHANCED HEATMAP VISUALIZER WITH TEMPORAL SUPPORT
+# ENHANCED HEATMAP VISUALIZER WITH TEMPORAL SUPPORT AND DISCRETE MATERIAL COLORMAP
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
@@ -1030,15 +1013,23 @@ class HeatMapVisualizer:
                               vmin=None, vmax=None, target_params=None, time_real_s=None):
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         extent = self._get_extent(L0_nm)
-        im = ax.imshow(field_data, cmap=cmap_name, vmin=vmin, vmax=vmax,
-                       extent=extent, aspect='equal', origin='lower')
-        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         
-        # === DISCRETE COLORBAR FOR MATERIAL PROXY ===
-        if "Material Proxy" in title or colorbar_label == "Material":
-            cbar.set_ticks([0, 1, 2])
-            cbar.set_ticklabels(['electrolyte', 'Ag', 'Cu'])
+        # --- Discrete handling for material proxy ---
+        is_material_map = "Material" in colorbar_label or "Material" in title
+        
+        if is_material_map:
+            # Discrete colormap: 0=Electrolyte (blue), 1=Ag (silver), 2=Cu (orange)
+            mat_cmap = ListedColormap(['#1f77b4', '#c0c0c0', '#ff7f0e'])
+            # Place colour boundaries between integer values
+            norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], mat_cmap.N)
+            im = ax.imshow(field_data, cmap=mat_cmap, norm=norm,
+                           extent=extent, aspect='equal', origin='lower')
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, ticks=[0, 1, 2])
+            cbar.ax.set_yticklabels(['Electrolyte', 'Ag', 'Cu'])
         else:
+            im = ax.imshow(field_data, cmap=cmap_name, vmin=vmin, vmax=vmax,
+                           extent=extent, aspect='equal', origin='lower')
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             if colorbar_label:
                 cbar.set_label(colorbar_label, fontsize=14, fontweight='bold')
         
@@ -1065,21 +1056,36 @@ class HeatMapVisualizer:
         ny, nx = field_data.shape
         x = np.linspace(0, L0_nm, nx)
         y = np.linspace(0, L0_nm, ny)
-        hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Value={field_data[i,j]:.4f}"
-                  for j in range(nx)] for i in range(ny)]
-        fig = go.Figure(data=go.Heatmap(
-            z=field_data, x=x, y=y, colorscale=cmap_name,
-            hoverinfo='text', text=hover,
-            colorbar=dict(title=dict(text="Value", font=dict(size=14)))
-        ))
         
-        # === DISCRETE COLORBAR FOR MATERIAL PROXY ===
-        if "Material Proxy" in title:
-            fig.update_traces(colorbar=dict(
-                title=dict(text="Material", font=dict(size=14)),
-                ticks='outside',
-                tickvals=[0, 1, 2],
-                ticktext=['electrolyte', 'Ag', 'Cu']
+        # --- Discrete handling for material proxy ---
+        is_material_map = "Material" in title
+        
+        if is_material_map:
+            # Plotly discrete colorscale: blue, silver, orange
+            colorscale = [
+                [0.0, '#1f77b4'], [0.33, '#1f77b4'],   # Electrolyte
+                [0.34, '#c0c0c0'], [0.66, '#c0c0c0'],  # Ag
+                [0.67, '#ff7f0e'], [1.0, '#ff7f0e']    # Cu
+            ]
+            hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
+                      for j in range(nx)] for i in range(ny)]
+            fig = go.Figure(data=go.Heatmap(
+                z=field_data, x=x, y=y, colorscale=colorscale,
+                hoverinfo='text', text=hover,
+                colorbar=dict(
+                    title=dict(text="Material", font=dict(size=14)),
+                    tickvals=[0, 1, 2],
+                    ticktext=['Electrolyte', 'Ag', 'Cu']
+                ),
+                zmin=0, zmax=2
+            ))
+        else:
+            hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Value={field_data[i,j]:.4f}"
+                      for j in range(nx)] for i in range(ny)]
+            fig = go.Figure(data=go.Heatmap(
+                z=field_data, x=x, y=y, colorscale=cmap_name,
+                hoverinfo='text', text=hover,
+                colorbar=dict(title=dict(text="Value", font=dict(size=14)))
             ))
         
         title_str = title
@@ -1155,14 +1161,29 @@ class HeatMapVisualizer:
         
         extent = self._get_extent(L0_nm)
         
-        all_values = [f[field_key] for f in fields_list]
-        vmin = min(np.min(v) for v in all_values)
-        vmax = max(np.max(v) for v in all_values)
+        # Determine if this is a material proxy field
+        is_material = "material" in field_key.lower()
+        
+        if is_material:
+            # For material, use discrete colormap
+            cmap = ListedColormap(['#1f77b4', '#c0c0c0', '#ff7f0e'])
+            norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], cmap.N)
+            vmin, vmax = 0, 2
+        else:
+            cmap = cmap_name
+            norm = None
+            all_values = [f[field_key] for f in fields_list]
+            vmin = min(np.min(v) for v in all_values)
+            vmax = max(np.max(v) for v in all_values)
         
         for i, (fields, t) in enumerate(zip(fields_list, times_list)):
             ax = axes[i]
-            im = ax.imshow(fields[field_key], cmap=cmap_name, vmin=vmin, vmax=vmax,
-                          extent=extent, aspect='equal', origin='lower')
+            if norm is not None:
+                im = ax.imshow(fields[field_key], cmap=cmap, norm=norm,
+                               extent=extent, aspect='equal', origin='lower')
+            else:
+                im = ax.imshow(fields[field_key], cmap=cmap, vmin=vmin, vmax=vmax,
+                               extent=extent, aspect='equal', origin='lower')
             ax.set_title(f't = {t:.3e} s', fontsize=12)
             ax.set_xlabel('X (nm)')
             ax.set_ylabel('Y (nm)')
@@ -1170,7 +1191,12 @@ class HeatMapVisualizer:
         for j in range(i+1, len(axes)):
             axes[j].axis('off')
             
-        plt.colorbar(im, ax=axes, fraction=0.046, pad=0.04, label=field_key)
+        cbar = plt.colorbar(im, ax=axes, fraction=0.046, pad=0.04)
+        if is_material:
+            cbar.set_ticks([0, 1, 2])
+            cbar.set_ticklabels(['Electrolyte', 'Ag', 'Cu'])
+        else:
+            cbar.set_label(field_key)
         plt.suptitle(f'Temporal Evolution: {field_key}', fontsize=16, fontweight='bold')
         plt.tight_layout()
         return fig
@@ -1418,9 +1444,8 @@ def main():
         with col_info1:
             st.metric("Current Thickness", f"{current_thickness:.3f} nm")
         with col_info2:
-            omega = DepositionParameters.compute_dynamics_speed(target)
-            st.metric("Dynamics Speed ω", f"{omega:.2f}", 
-                     help="ω > 1: faster than reference, ω < 1: slower than reference")
+            # Dynamics speed ω has been removed as requested
+            st.empty()
         with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
 
