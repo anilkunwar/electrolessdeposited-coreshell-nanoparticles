@@ -10,7 +10,7 @@ FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL‑TIME UNITS
 - Real-time temporal interpolation between key frames
 - **Real physical time (seconds) from source PKL τ₀**
 - **Gated attention based on absolute L0 difference** (prioritises sources with similar physical scale)
-- **Discrete colourbar for material proxy** (electrolyte / Ag / Cu) using Set1 colours (red/blue/green)
+- **Discrete colourbar for material proxy** (electrolyte / Ag / Cu) using custom colours from original simulation
 """
 import streamlit as st
 import numpy as np
@@ -1004,8 +1004,11 @@ class CoreShellInterpolator:
 class HeatMapVisualizer:
     def __init__(self):
         self.colormaps = COLORMAP_OPTIONS
-        # Set1 first three colours: red (#e41a1c), blue (#377eb8), green (#4daf4a)
-        self.material_colors = ['#e41a1c', '#377eb8', '#4daf4a']
+        # Custom colormap matching original simulation:
+        # Electrolyte (0) -> red #e41a1c
+        # Ag (1)          -> orange #ff7f00
+        # Cu (2)          -> gray #999999
+        self.material_colors = ['#e41a1c', '#ff7f00', '#999999']
 
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
@@ -1020,7 +1023,7 @@ class HeatMapVisualizer:
         is_material_map = "Material" in colorbar_label or "Material" in title
         
         if is_material_map:
-            # Discrete colormap: 0=Electrolyte (red), 1=Ag (blue), 2=Cu (green)
+            # Discrete colormap using custom colors
             mat_cmap = ListedColormap(self.material_colors)
             # Place colour boundaries between integer values
             norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], mat_cmap.N)
@@ -1063,7 +1066,7 @@ class HeatMapVisualizer:
         is_material_map = "Material" in title
         
         if is_material_map:
-            # Plotly discrete colorscale: red, blue, green
+            # Plotly discrete colorscale using custom colors
             colorscale = [
                 [0.0, self.material_colors[0]], [0.33, self.material_colors[0]],
                 [0.34, self.material_colors[1]], [0.66, self.material_colors[1]],
@@ -1167,7 +1170,7 @@ class HeatMapVisualizer:
         is_material = "material" in field_key.lower()
         
         if is_material:
-            # For material, use discrete colormap
+            # For material, use custom discrete colormap
             cmap = ListedColormap(self.material_colors)
             norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], cmap.N)
             vmin, vmax = 0, 2
