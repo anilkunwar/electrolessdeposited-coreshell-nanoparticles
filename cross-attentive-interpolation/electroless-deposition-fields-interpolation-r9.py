@@ -10,11 +10,13 @@ FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL-TIME UNITS
 - Real-time temporal interpolation between key frames
 - **Real physical time (seconds) from source PKL τ₀**
 - **Gated attention based on absolute L0 difference** (prioritises sources with similar physical scale)
-- **DISCRETE MATERIAL COLORBAR with EXACT PHASE-FIELD COLORS**:
+- **Discrete material colorbar with EXACT phase-field colors**:
   * Electrolyte (red):    RGBA(0.894, 0.102, 0.110, 1.0) → proxy=0: phi≤0.5 AND psi≤0.5
   * Ag shell (orange):    RGBA(1.000, 0.498, 0.000, 1.0) → proxy=1: phi>0.5 AND psi≤0.5
   * Cu core (gray):       RGBA(0.600, 0.600, 0.600, 1.0) → proxy=2: psi>0.5
-  * Uses matplotlib ListedColormap + BoundaryNorm for crisp discrete visualization
+- **THERMODYNAMICALLY CONSISTENT TIME SCALING**: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY
+  * Domain size L0 affects spatial resolution, NOT temporal dynamics speed
+  * No artificial ω speedup factor that violates phase-field kinetics
 """
 import streamlit as st
 import numpy as np
@@ -150,15 +152,14 @@ class DepositionParameters:
         else:
             return norm_value * (high - low) + low
     
-    @staticmethod
-    def compute_dynamics_speed(params: Dict[str, float]) -> float:
-        """Compute relative dynamics speed factor."""
-        c_bulk = params.get('c_bulk', 0.5)
-        L0 = params.get('L0_nm', 60.0)
-        fc = params.get('fc', 0.18)
-        c_ref, L_ref, fc_ref = 0.5, 60.0, 0.18
-        omega = (c_bulk / c_ref) * (L_ref / L0) * (fc / fc_ref)
-        return omega
+    # =========================================================
+    # REMOVED: compute_dynamics_speed - THERMODYNAMICALLY INCONSISTENT
+    # =========================================================
+    # The normalized time evolution in phase-field models is universal.
+    # Domain size L0 affects spatial resolution, NOT temporal dynamics speed.
+    # The physical time scale τ₀ already captures all kinetic information.
+    # Adding an artificial ω factor violates thermodynamic consistency.
+    # =========================================================
 
 # =============================================
 # DEPOSITION PHYSICS (derived quantities)
@@ -252,7 +253,12 @@ class TemporalCacheEntry:
         return total_bytes / (1024 * 1024)
 
 class TemporalFieldManager:
-    """Three-tier temporal management system."""
+    """
+    Three-tier temporal management system.
+    
+    KEY PRINCIPLE: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY.
+    Domain size L0 affects spatial resolution, NOT temporal dynamics speed.
+    """
     
     def __init__(self, interpolator, sources: List[Dict], target_params: Dict,
                  n_key_frames: int = 10, lru_size: int = 3):
@@ -282,6 +288,7 @@ class TemporalFieldManager:
         )
         self.thickness_time = res['derived']['thickness_time']
         self.weights = res['weights']
+        # Use source-average τ₀ directly - NO omega correction
         self.avg_tau0 = res.get('avg_tau0', 1e-4)
         self.avg_t_max_nd = res.get('avg_t_max_nd', 1.0)
     
@@ -310,6 +317,7 @@ class TemporalFieldManager:
     
     def get_fields(self, time_norm: float, use_interpolation: bool = True) -> Dict[str, np.ndarray]:
         t_key = round(time_norm, 4)
+        # Real time: ONLY via physical tau0 and t_max_nd - NO OMEGA
         time_real = time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
         
         if t_key in self.lru_cache:
@@ -382,6 +390,7 @@ class TemporalFieldManager:
         return np.interp(time_norm, t_arr, th_arr)
     
     def get_time_real(self, time_norm: float) -> float:
+        # Real time: ONLY via physical tau0 and t_max_nd - NO OMEGA FACTOR
         return time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
     
     def prepare_animation_streaming(self, n_frames: int = 50) -> List[str]:
@@ -803,6 +812,7 @@ class CoreShellInterpolator:
             else:
                 source_thickness.append({'t_norm': np.array([0.0, 1.0]), 'th_nm': np.array([0.0, 0.0]), 't_max': 1.0})
                 source_t_max_nd.append(1.0)
+            # Get the ACTUAL physical time scale from the source simulation - NO OMEGA MULTIPLICATION
             source_tau0.append(params['tau0_s'])
         
         if not source_params:
@@ -844,14 +854,17 @@ class CoreShellInterpolator:
             else:
                 th_interp = np.full_like(common_t_norm, thick['th_nm'][0] if len(thick['th_nm']) > 0 else 0.0)
             thickness_curves.append(th_interp)
+        # Weighted combination - NO OMEGA SCALING
         thickness_interp = np.zeros_like(common_t_norm)
         for i, curve in enumerate(thickness_curves):
             thickness_interp += final_weights[i] * curve
         
+        # Weighted average of physical time scales only - NO OMEGA
         avg_tau0 = np.average(source_tau0, weights=final_weights)
         avg_t_max_nd = np.average(source_t_max_nd, weights=final_weights)
         if target_params.get('tau0_s') is not None:
             avg_tau0 = target_params['tau0_s']
+        # Real time: ONLY via physical tau0 and t_max_nd - NO OMEGA FACTOR
         common_t_real = common_t_norm * avg_t_max_nd * avg_tau0
         t_real = time_norm * avg_t_max_nd * avg_tau0 if time_norm is not None else avg_t_max_nd * avg_tau0
         
@@ -913,10 +926,8 @@ class HeatMapVisualizer:
     
     def _is_material_proxy(self, field_data, colorbar_label, title):
         """Detect if this is a material proxy field requiring discrete coloring."""
-        # Check if values are discrete integers 0, 1, or 2
         unique_vals = np.unique(field_data)
         is_discrete = np.all(np.isin(unique_vals, [0, 1, 2])) and len(unique_vals) <= 3
-        # Also check labels/titles for material keywords
         has_material_keyword = any(kw in colorbar_label.lower() or kw in title.lower() 
                                   for kw in ['material', 'proxy', 'phase', 'electrolyte', 'ag', 'cu'])
         return is_discrete and has_material_keyword
@@ -927,11 +938,9 @@ class HeatMapVisualizer:
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         extent = self._get_extent(L0_nm)
         
-        # Check if this is material proxy requiring discrete coloring
         is_material = self._is_material_proxy(field_data, colorbar_label, title)
         
         if is_material:
-            # Use EXACT phase-field colors with discrete colormap
             im = ax.imshow(field_data, cmap=MATERIAL_COLORMAP_MATPLOTLIB, norm=MATERIAL_BOUNDARY_NORM,
                           extent=extent, aspect='equal', origin='lower')
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, ticks=[0, 1, 2])
@@ -964,11 +973,9 @@ class HeatMapVisualizer:
         x = np.linspace(0, L0_nm, nx)
         y = np.linspace(0, L0_nm, ny)
         
-        # Check if this is material proxy
         is_material = self._is_material_proxy(field_data, "", title)
         
         if is_material:
-            # Use EXACT phase-field colors for Plotly
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
                      for j in range(nx)] for i in range(ny)]
             fig = go.Figure(data=go.Heatmap(
@@ -1054,8 +1061,7 @@ class HeatMapVisualizer:
         axes = axes.flatten()
         extent = self._get_extent(L0_nm)
         
-        # Determine if this is material proxy
-        is_material = "material" in field_key.lower() or any("material" in f.get(field_key, np.array([])).__class__.__name__.lower() for f in fields_list[:1])
+        is_material = "material" in field_key.lower()
         
         if is_material:
             cmap = MATERIAL_COLORMAP_MATPLOTLIB
@@ -1316,8 +1322,9 @@ def main():
         with col_info1:
             st.metric("Current Thickness", f"{current_thickness:.3f} nm")
         with col_info2:
-            omega = DepositionParameters.compute_dynamics_speed(target)
-            st.metric("Dynamics Speed ω", f"{omega:.2f}", help="ω > 1: faster than reference, ω < 1: slower than reference")
+            # REMOVED: Dynamics Speed ω - THERMODYNAMICALLY INCONSISTENT
+            # Domain size L0 affects spatial resolution, NOT temporal dynamics speed
+            st.empty()
         with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
         
