@@ -1,6 +1,3 @@
-Here is the fully expanded code without redaction, implementing the **L0-based gated attention masks** for realistic source selection and the **discrete material colorbar** for improved interpretability.
-
-```python
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -1273,4 +1270,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
