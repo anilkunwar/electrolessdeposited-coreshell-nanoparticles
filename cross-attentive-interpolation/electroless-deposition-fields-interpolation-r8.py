@@ -10,7 +10,7 @@ FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL‑TIME UNITS
 - Real-time temporal interpolation between key frames
 - **Real physical time (seconds) from source PKL τ₀**
 - **Gated attention based on absolute L0 difference** (prioritises sources with similar physical scale)
-- **Discrete colourbar for material proxy** (electrolyte / Ag / Cu)
+- **Discrete colourbar for material proxy** (electrolyte / Ag / Cu) using Set1 colours
 """
 import streamlit as st
 import numpy as np
@@ -1004,6 +1004,8 @@ class CoreShellInterpolator:
 class HeatMapVisualizer:
     def __init__(self):
         self.colormaps = COLORMAP_OPTIONS
+        # Set1 first three colours: red, blue, green
+        self.material_colors = ['#e41a1c', '#377eb8', '#4daf4a']
 
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
@@ -1018,8 +1020,8 @@ class HeatMapVisualizer:
         is_material_map = "Material" in colorbar_label or "Material" in title
         
         if is_material_map:
-            # Discrete colormap: 0=Electrolyte (blue), 1=Ag (silver), 2=Cu (orange)
-            mat_cmap = ListedColormap(['#1f77b4', '#c0c0c0', '#ff7f0e'])
+            # Discrete colormap: 0=Electrolyte (red), 1=Ag (blue), 2=Cu (green)
+            mat_cmap = ListedColormap(self.material_colors)
             # Place colour boundaries between integer values
             norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], mat_cmap.N)
             im = ax.imshow(field_data, cmap=mat_cmap, norm=norm,
@@ -1061,11 +1063,11 @@ class HeatMapVisualizer:
         is_material_map = "Material" in title
         
         if is_material_map:
-            # Plotly discrete colorscale: blue, silver, orange
+            # Plotly discrete colorscale: red, blue, green
             colorscale = [
-                [0.0, '#1f77b4'], [0.33, '#1f77b4'],   # Electrolyte
-                [0.34, '#c0c0c0'], [0.66, '#c0c0c0'],  # Ag
-                [0.67, '#ff7f0e'], [1.0, '#ff7f0e']    # Cu
+                [0.0, self.material_colors[0]], [0.33, self.material_colors[0]],
+                [0.34, self.material_colors[1]], [0.66, self.material_colors[1]],
+                [0.67, self.material_colors[2]], [1.0, self.material_colors[2]]
             ]
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
                       for j in range(nx)] for i in range(ny)]
@@ -1166,7 +1168,7 @@ class HeatMapVisualizer:
         
         if is_material:
             # For material, use discrete colormap
-            cmap = ListedColormap(['#1f77b4', '#c0c0c0', '#ff7f0e'])
+            cmap = ListedColormap(self.material_colors)
             norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5], cmap.N)
             vmin, vmax = 0, 2
         else:
@@ -1444,7 +1446,7 @@ def main():
         with col_info1:
             st.metric("Current Thickness", f"{current_thickness:.3f} nm")
         with col_info2:
-            # Dynamics speed ω has been removed as requested
+            # Dynamics speed ω removed as requested
             st.empty()
         with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
