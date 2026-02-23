@@ -1447,7 +1447,7 @@ def main():
             help="Hierarchical modes apply L0 gate first, then sub‑gates only if L0 is close. Joint multiplies all gates independently."
         )
 
-        n_key_frames = st.slider("Key frames for temporal interpolation", 5, 20, 10, 1,
+        n_key_frames = st.slider("Key frames for temporal interpolation", 1, 20, 5, 1,
                                 help="More frames = smoother animation but more memory")
         lru_cache_size = st.slider("Interactive cache size", 1, 5, 3, 1,
                                   help="Frames to keep in memory for slider responsiveness")
