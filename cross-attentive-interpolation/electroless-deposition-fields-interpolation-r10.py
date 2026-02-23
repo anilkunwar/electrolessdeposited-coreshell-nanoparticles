@@ -362,7 +362,7 @@ class CoreShellInterpolator:
             param_sigma = [0.15, 0.15, 0.15, 0.15, 0.15, 0.15]   # extended for dimensionless groups
         self.param_sigma = param_sigma
         self.temperature = temperature
-        self.gating_mode = gating_mode   # not used directly now
+        self.gating_mode = gating_mode
 
         # Transformer remains for refinement (small capacity)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -376,6 +376,16 @@ class CoreShellInterpolator:
         # Input projection now includes dimensionless groups + categorical flags
         self.input_proj = nn.Linear(16, d_model)   # 16 features
         self.pos_encoder = PositionalEncoding(d_model)
+
+    # ----- Added missing methods -----
+    def set_parameter_sigma(self, sigma_list):
+        """Set the parameter sigma values for the kernel."""
+        self.param_sigma = sigma_list
+
+    def set_gating_mode(self, mode):
+        """Set the gating mode."""
+        self.gating_mode = mode
+    # --------------------------------
 
     def encode_parameters_physics(self, params_list: List[Dict], t_real: float = None) -> torch.Tensor:
         """
@@ -1317,7 +1327,7 @@ class ResultsManager:
 
 
 # =============================================
-# MAIN STREAMLIT APP (unchanged except for the initialisation of interpolator)
+# MAIN STREAMLIT APP (unchanged)
 # =============================================
 def main():
     st.set_page_config(page_title="Core‑Shell Deposition: Full Temporal Interpolation",
@@ -1444,7 +1454,7 @@ def main():
                         # Set kernel sigmas (only used in transformer features now, physics kernel uses fixed sigma)
                         st.session_state.interpolator.set_parameter_sigma([sigma_fc, sigma_rs, sigma_c, sigma_L])
                         st.session_state.interpolator.temperature = temperature
-                        st.session_state.interpolator.gating_mode = gating_mode
+                        st.session_state.interpolator.set_gating_mode(gating_mode)
 
                         st.session_state.temporal_manager = TemporalFieldManager(
                             st.session_state.interpolator,
