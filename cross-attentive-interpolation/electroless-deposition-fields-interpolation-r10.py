@@ -377,7 +377,6 @@ class CoreShellInterpolator:
         self.input_proj = nn.Linear(16, d_model)   # 16 features
         self.pos_encoder = PositionalEncoding(d_model)
 
-    # ----- Added missing methods -----
     def set_parameter_sigma(self, sigma_list):
         """Set the parameter sigma values for the kernel."""
         self.param_sigma = sigma_list
@@ -385,7 +384,6 @@ class CoreShellInterpolator:
     def set_gating_mode(self, mode):
         """Set the gating mode."""
         self.gating_mode = mode
-    # --------------------------------
 
     def encode_parameters_physics(self, params_list: List[Dict], t_real: float = None) -> torch.Tensor:
         """
@@ -521,6 +519,13 @@ class CoreShellInterpolator:
             st.error("No valid source fields after warping.")
             return None
 
+        # ---- FIX: Compute t_max_vals unconditionally (before it's used later) ----
+        t_max_vals = []
+        for src_params, t_arr in zip(source_params_list, source_t_real_arrays):
+            if t_arr[-1] > 0:
+                t_max_vals.append(t_arr[-1])
+        # -------------------------------------------------------------------------
+
         # Normalise physics weights (softmax with temperature)
         w_phys_arr = np.array(source_weights_phys)
         w_phys_soft = np.exp(w_phys_arr / self.temperature)
@@ -545,11 +550,6 @@ class CoreShellInterpolator:
 
         # Determine target real time if time_norm is given
         if time_norm is not None:
-            # Compute weighted average of source total times
-            t_max_vals = []
-            for src_params, t_arr in zip(source_params_list, source_t_real_arrays):
-                if t_arr[-1] > 0:
-                    t_max_vals.append(t_arr[-1])
             if t_max_vals:
                 avg_t_max = np.average(t_max_vals, weights=final_weights)
                 t_target_real = time_norm * avg_t_max
