@@ -3,7 +3,8 @@
 """
 PHYSICS-AWARE Ag@Cu CORE-SHELL INTERPOLATOR (Production Version)
 Loaded from numerical_solutions/ • Radial morphing • Dimensionless physics kernel
-Uses enhanced loader – warns instead of crashing if no files are found.
+FULL TEMPORAL SUPPORT + HYBRID WEIGHTING (Physics Kernel + Attention)
+Follows the theoretical procedure for physics‑aware interpolation.
 """
 
 import streamlit as st
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import matplotlib.pyplot as plt
 from scipy.ndimage import zoom
+from scipy.interpolate import CubicSpline
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
@@ -21,11 +23,13 @@ from datetime import datetime
 import re
 import json
 import warnings
+from typing import List, Dict, Any, Optional, Tuple   # <--- ADDED missing imports
+
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Ag@Cu Physics Interpolator", layout="wide")
 st.title("🧪 Ag@Cu Core-Shell Physics-Aware Interpolator")
-st.markdown("**Loaded from `numerical_solutions/` • Radial morphing + dimensionless kernel**")
+st.markdown("**Loaded from `numerical_solutions/` • Radial morphing • Full temporal support**")
 
 # ========================= CONFIG =========================
 SOLUTION_DIR = "numerical_solutions"
@@ -42,7 +46,7 @@ class EnhancedSolutionLoader:
     def _ensure_directory(self):
         os.makedirs(self.solutions_dir, exist_ok=True)
     
-    def scan_solutions(self) -> List[Dict[str, Any]]:
+    def scan_solutions(self) -> List[Dict[str, Any]]:   # <--- Now type hints are defined
         all_files = []
         for ext in ['*.pkl', '*.pickle']:
             import glob
@@ -318,33 +322,82 @@ solutions = load_all_pkl()
 
 if not solutions:
     st.sidebar.warning("No simulation files found. Please place .pkl files in numerical_solutions/")
-    # The app will continue, but the "Compute Interpolation" button will do nothing
 else:
     st.sidebar.success(f"Loaded **{len(solutions)}** solutions from `numerical_solutions/`")
 
-# ========================= PHYSICS KERNEL =========================
-def compute_physics_kernel(src, tgt):
-    """Dimensionless physics distance kernel"""
-    # Fourier number (time scaling)
-    Fo_s = 0.05 * src["params"]["tau0_s"] * src["snapshots"][-1][0] / (src["params"]["L0_nm"] ** 2)
-    Fo_t = 0.05 * tgt["tau0_s"] * tgt["t_nd"] / (tgt["L0_nm"] ** 2)
-    
-    # Curvature number
-    kappa_star_s = 0.02 * 0.2 / (src["params"]["L0_nm"] * 0.4 * src["params"]["c_bulk"])
-    kappa_star_t = 0.02 * 0.2 / (tgt["L0_nm"] * 0.4 * tgt["c_bulk"])
-    
-    D2 = (
-        ((Fo_s - Fo_t) / 0.25)**2 +
-        ((kappa_star_s - kappa_star_t) / 0.6)**2 +
-        ((src["params"]["fc"] - tgt["fc"]) / 0.08)**2 +
-        ((src["params"]["rs"] - tgt["rs"]) / 0.12)**2 +
-        (np.log10(max(src["params"]["c_bulk"], 1e-8) / max(tgt["c_bulk"], 1e-8)) / 0.5)**2
-    )
-    return np.exp(-0.5 * D2)
+# ==================== THEORETICAL FRAMEWORK IMPLEMENTATION ====================
+# Steps from the theoretical procedure:
+# 0. Preprocessing (offline) – done in loader
+# 1. Target encoding (dimensionless feature vector)
+# 2. Physics-informed kernel
+# 3. Radial geometry morphing
+# 4. Temporal interpolation on real time axis
+# 5. Hybrid weighting (physics kernel + attention)
+# 6. Post-processing enforcement
 
-# ========================= RADIAL MORPHING =========================
+# ---------- Step 1: Target Encoding ----------
+def encode_parameters(params: Dict, t_real: Optional[float] = None) -> np.ndarray:
+    """
+    Encode parameters into a dimensionless feature vector.
+    If t_real is given, compute time‑dependent dimensionless groups.
+    """
+    L0 = params.get('L0_nm', 20.0) * 1e-9          # m
+    D = params.get('D_nd', 0.05)                    # non‑dimensional diffusion
+    gamma = params.get('gamma_nd', 0.02)
+    M = params.get('M_nd', 0.2)
+    k0 = params.get('k0_nd', 0.4)
+    c_bulk = params.get('c_bulk', 1.0)
+    fc = params.get('fc', 0.18)
+    tau0 = params.get('tau0_s', 1e-4)
+    
+    # Normalised parameters (to [0,1])
+    fc_norm = (fc - 0.05) / 0.40
+    rs_norm = (params.get('rs', 0.2) - 0.01) / 0.59
+    L0_norm = (params.get('L0_nm', 20.0) - 10.0) / 90.0   # L0 range 10-100 nm
+    log_c = np.log10(c_bulk + 1e-8)
+    
+    # Fourier number (dimensionless time)
+    if t_real is not None:
+        t_nd = t_real / tau0
+        Fo = D * t_nd / (L0**2)
+    else:
+        # Use total simulation time from source if available
+        t_max_nd = params.get('t_max_nd', 1.0)
+        Fo = D * t_max_nd / (L0**2)
+    
+    # Dimensionless curvature strength
+    kappa_star = gamma * M / (L0 * k0 * c_bulk)
+    
+    # Damköhler number (reaction vs diffusion)
+    Da = k0 * c_bulk * L0**2 / D
+    
+    # Normalise Fo, kappa, Da roughly to [0,1] using typical ranges
+    Fo_norm = np.clip(Fo / 10.0, 0, 1)
+    kappa_norm = np.clip(kappa_star / 5.0, 0, 1)
+    Da_norm = np.clip(Da / 100.0, 0, 1)
+    
+    # Categorical flags
+    edl_flag = 1.0 if params.get('use_edl', False) else 0.0
+    mode_flag = 1.0 if params.get('mode', '2D (planar)') != '2D (planar)' else 0.0
+    
+    return np.array([fc_norm, rs_norm, L0_norm, log_c,
+                     Fo_norm, kappa_norm, Da_norm,
+                     edl_flag, mode_flag])
+
+# ---------- Step 2: Physics Kernel ----------
+def physics_kernel(src_params: Dict, tgt_params: Dict, t_real_src: Optional[float] = None,
+                   t_real_tgt: Optional[float] = None, sigma: float = 0.3) -> float:
+    """Gaussian kernel on dimensionless groups."""
+    src_vec = encode_parameters(src_params, t_real_src)
+    tgt_vec = encode_parameters(tgt_params, t_real_tgt)
+    # Weighted squared differences (tune weights)
+    weights = np.array([1.2, 1.2, 1.0, 1.5, 1.0, 0.8, 0.8, 0.5, 0.5])
+    d2 = np.sum(weights * (src_vec - tgt_vec)**2)
+    return np.exp(-0.5 * d2 / sigma**2)
+
+# ---------- Step 3: Radial Morphing (unchanged, but used in loop) ----------
 def radial_morph_2d(phi_src, psi_src, fc_src, rs_src, L0_src, fc_tgt, rs_tgt, L0_tgt, shape=(256, 256)):
-    """Radial geometry-preserving morph"""
+    """Radial geometry-preserving morph (original function)."""
     h, w = phi_src.shape if len(phi_src.shape) == 2 else (phi_src.shape[1], phi_src.shape[2])
     y, x = np.mgrid[0:h, 0:w]
     cx, cy = w // 2, h // 2
@@ -371,58 +424,188 @@ def radial_morph_2d(phi_src, psi_src, fc_src, rs_src, L0_src, fc_tgt, rs_tgt, L0
     
     return phi_warped, psi_warped
 
-# ========================= INTERPOLATOR =========================
+# ---------- Simple Attention Mechanism (for hybrid weighting) ----------
+class SimpleAttention(nn.Module):
+    """Dot‑product attention on encoded parameter vectors."""
+    def __init__(self, d_model=9):
+        super().__init__()
+        self.query_proj = nn.Linear(d_model, d_model)
+        self.key_proj = nn.Linear(d_model, d_model)
+    
+    def forward(self, target_vec, source_vecs):
+        # target_vec: (d_model,), source_vecs: (n_sources, d_model)
+        q = self.query_proj(target_vec.unsqueeze(0))   # (1, d_model)
+        k = self.key_proj(source_vecs)                  # (n_sources, d_model)
+        attn_scores = torch.matmul(q, k.T) / np.sqrt(k.size(-1))
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        return attn_weights.squeeze(0)
+
+# ---------- Step 4+5: Temporal Interpolation + Hybrid Weighting ----------
+def interpolate_fields(sources: List[Dict], target_params: Dict, target_shape=(256,256)):
+    """
+    Full interpolation following theoretical steps.
+    Returns blended fields at target time (given by target_params['t_nd']).
+    """
+    # Convert target normalized time to real time using target tau0
+    t_tgt_norm = target_params.get('t_nd', 0.75)
+    tau0_tgt = target_params.get('tau0_s', 1e-4)
+    t_tgt_real = t_tgt_norm * tau0_tgt
+    
+    # Prepare storage
+    source_fields_morphed = []   # list of (phi, psi, c) after morphing + temporal interpolation
+    physics_weights = []
+    source_params_list = []
+    source_time_real_arrays = []
+    
+    # Pre-allocate for attention
+    target_vec = torch.FloatTensor(encode_parameters(target_params, t_tgt_real))
+    source_vecs = []
+    
+    for src in sources:
+        src_params = src['params'].copy()
+        src_params.setdefault('tau0_s', 1e-4)
+        
+        # ---- Step 1: Encode source parameters (for attention) ----
+        # Use source's total real time if we need to encode time-dependent groups
+        # For simplicity, we use None (characteristic values) for source encoding
+        src_vec = torch.FloatTensor(encode_parameters(src_params, t_real=None))
+        source_vecs.append(src_vec)
+        
+        # ---- Step 2: Physics kernel weight (using characteristic groups) ----
+        w_phys = physics_kernel(src_params, target_params, sigma=0.3)
+        physics_weights.append(w_phys)
+        
+        # ---- Step 3: Radial morphing of source fields ----
+        # We'll apply morphing to each snapshot later; here we just store the original snapshots
+        # Actually, we need to morph each snapshot after temporal interpolation?
+        # Better: For each source, we have a list of snapshots with their own real times.
+        # We will temporally interpolate to t_tgt_real, then morph.
+        history = src['snapshots']   # list of dicts with 't_nd', 'phi', 'c', 'psi'
+        if not history:
+            continue
+        
+        # Build real time axis for this source
+        t_src_real = np.array([snap['t_nd'] * src_params['tau0_s'] for snap in history])
+        # Build arrays of fields (list of 2D arrays)
+        phi_list = [snap['phi'] for snap in history]
+        psi_list = [snap['psi'] for snap in history]
+        c_list   = [snap['c'] for snap in history]
+        
+        # Interpolate each field in time at t_tgt_real (if within range)
+        if t_tgt_real <= t_src_real[0]:
+            phi_t = phi_list[0]
+            psi_t = psi_list[0]
+            c_t   = c_list[0]
+        elif t_tgt_real >= t_src_real[-1]:
+            phi_t = phi_list[-1]
+            psi_t = psi_list[-1]
+            c_t   = c_list[-1]
+        else:
+            # Use cubic spline for smoothness
+            phi_spline = CubicSpline(t_src_real, np.array(phi_list), axis=0, bc_type='natural')
+            psi_spline = CubicSpline(t_src_real, np.array(psi_list), axis=0, bc_type='natural')
+            c_spline   = CubicSpline(t_src_real, np.array(c_list), axis=0, bc_type='natural')
+            phi_t = phi_spline(t_tgt_real)
+            psi_t = psi_spline(t_tgt_real)
+            c_t   = c_spline(t_tgt_real)
+        
+        # ---- Step 3 (cont.): Apply radial morphing to the temporally interpolated fields ----
+        phi_m, psi_m = radial_morph_2d(
+            phi_t, psi_t,
+            src_params['fc'], src_params['rs'], src_params['L0_nm'],
+            target_params['fc'], target_params['rs'], target_params['L0_nm'],
+            shape=target_shape
+        )
+        # For concentration, we also need to morph c. Use same mapping.
+        # For simplicity, reuse radial_morph_2d but adapt: we can warp c similarly.
+        # Since radial_morph_2d only returns phi and psi, we need a separate function or extend it.
+        # For now, we'll use a simplified approach: warp c using the same radial scaling.
+        # Create a quick function or just reuse the logic.
+        # Let's define a helper inside.
+        def warp_field(field, src_fc, src_L0, tgt_fc, tgt_L0, shape):
+            # Simplified: use same radial scaling as in radial_morph_2d
+            h, w = field.shape
+            y, x = np.mgrid[0:h, 0:w]
+            cx, cy = w//2, h//2
+            dist_src = np.sqrt((x-cx)**2 + (y-cy)**2) * (src_L0 / w)
+            scale = tgt_L0 / src_L0
+            dist_warped = dist_src * scale
+            # For c, we just need to map each target pixel to source pixel
+            # Use nearest neighbour for speed; could use griddata.
+            # Create coordinate arrays for target
+            y_t, x_t = np.mgrid[0:shape[0], 0:shape[1]]
+            # Convert to physical distance from center in target domain
+            r_tgt = np.sqrt((x_t - shape[1]//2)**2 + (y_t - shape[0]//2)**2) * (tgt_L0 / shape[1])
+            # Scale back to source distance
+            r_src = r_tgt / scale
+            # Convert back to source pixel indices
+            x_src = cx + (r_src * np.cos(np.arctan2(y_t - shape[0]//2, x_t - shape[1]//2))) * (w / src_L0)
+            y_src = cy + (r_src * np.sin(np.arctan2(y_t - shape[0]//2, x_t - shape[1]//2))) * (h / src_L0)
+            # Clip
+            x_src = np.clip(x_src, 0, w-1).astype(int)
+            y_src = np.clip(y_src, 0, h-1).astype(int)
+            return field[y_src, x_src]
+        
+        c_m = warp_field(c_t, src_params['fc'], src_params['L0_nm'],
+                         target_params['fc'], target_params['L0_nm'], target_shape)
+        
+        source_fields_morphed.append((phi_m, psi_m, c_m))
+        source_params_list.append(src_params)
+        source_time_real_arrays.append(t_src_real)
+    
+    if not source_fields_morphed:
+        return None
+    
+    # ---- Step 5: Hybrid weighting ----
+    physics_weights = np.array(physics_weights)
+    physics_weights /= physics_weights.sum() + 1e-12
+    
+    # Attention weights
+    attention = SimpleAttention(d_model=9)
+    with torch.no_grad():
+        source_vecs_tensor = torch.stack(source_vecs)   # (n_sources, 9)
+        attn_weights = attention(target_vec, source_vecs_tensor).numpy()
+    
+    # Combine: alpha = 0.7 (physics dominates)
+    alpha = 0.7
+    final_weights = alpha * physics_weights + (1 - alpha) * attn_weights
+    final_weights /= final_weights.sum() + 1e-12
+    
+    # Blend fields
+    phi_final = np.zeros(target_shape, dtype=float)
+    psi_final = np.zeros(target_shape, dtype=float)
+    c_final   = np.zeros(target_shape, dtype=float)
+    
+    for w, (phi, psi, c) in zip(final_weights, source_fields_morphed):
+        phi_final += w * phi
+        psi_final += w * psi
+        c_final   += w * c
+    
+    # ---- Step 6: Post-processing ----
+    # Clip
+    phi_final = np.clip(phi_final, 0, 1)
+    psi_final = np.clip(psi_final, 0, 1)
+    c_final   = np.clip(c_final, 0, target_params['c_bulk'])
+    # Enforce material consistency: if psi > 0.5, phi must be 0
+    mask_cu = psi_final > 0.5
+    phi_final[mask_cu] = 0.0
+    # Also ensure psi <= 1 (already clipped)
+    
+    return {
+        'phi': phi_final,
+        'psi': psi_final,
+        'c': c_final,
+        'weights': final_weights.tolist(),
+        'target': target_params,
+        'time_real_s': t_tgt_real
+    }
+
+# ========================= INTERPOLATOR (wrapper) =========================
 class CoreShellPhysicsInterpolator:
     def interpolate(self, sources, target):
         if not sources:
             return None
-            
-        weights = []
-        morphed = []
-        
-        for src in sources:
-            w = compute_physics_kernel(src, target)
-            weights.append(w)
-            
-            # Take last snapshot (or interpolate temporally if needed)
-            last_snap = src["snapshots"][-1]
-            # last_snap can be tuple or dict; handle both
-            if isinstance(last_snap, (list, tuple)):
-                phi_src = last_snap[1]
-                psi_src = last_snap[3]
-            else:
-                phi_src = last_snap.get("phi", last_snap)
-                psi_src = last_snap.get("psi", last_snap)
-            
-            phi_m, psi_m = radial_morph_2d(
-                phi_src, psi_src,
-                src["params"]["fc"], src["params"]["rs"], src["params"]["L0_nm"],
-                target["fc"], target["rs"], target["L0_nm"]
-            )
-            morphed.append((phi_m, psi_m))
-        
-        weights = np.array(weights)
-        weights /= weights.sum() + 1e-12
-        
-        # Blend
-        phi_final = np.zeros_like(morphed[0][0])
-        psi_final = np.zeros_like(morphed[0][1])
-        
-        for w, (p, s) in zip(weights, morphed):
-            phi_final += w * p
-            psi_final += w * s
-        
-        phi_final = np.clip(phi_final, 0, 1)
-        psi_final = np.clip(psi_final, 0, 1)
-        c_final = target["c_bulk"] * (1 - phi_final) * (1 - psi_final)
-        
-        return {
-            "phi": phi_final,
-            "psi": psi_final,
-            "c": c_final,
-            "weights": weights.tolist(),
-            "target": target
-        }
+        return interpolate_fields(sources, target)
 
 interpolator = CoreShellPhysicsInterpolator()
 
@@ -451,7 +634,7 @@ with st.sidebar:
                 "c_bulk": c_bulk, "tau0_s": tau0_s,
                 "t_nd": t_nd, "use_edl": use_edl
             }
-            with st.spinner("Radial morphing + physics kernel interpolation..."):
+            with st.spinner("Full temporal + hybrid weighting interpolation..."):
                 result = interpolator.interpolate(solutions, target)
                 if result:
                     st.session_state.last_result = result
@@ -463,6 +646,7 @@ if "last_result" in st.session_state:
     tgt = res["target"]
     
     st.header(f"Interpolated Solution — L₀ = {tgt['L0_nm']:.0f} nm | fc = {tgt['fc']:.3f} | rs = {tgt['rs']:.3f}")
+    st.caption(f"Real time: {res['time_real_s']:.3e} s")
     
     tab1, tab2, tab3 = st.tabs(["📊 Fields", "📈 Thickness & Stats", "⚖️ Source Weights"])
     
@@ -512,13 +696,13 @@ if "last_result" in st.session_state:
         )
     
     with tab3:
-        st.subheader("Source Contribution Weights")
+        st.subheader("Source Contribution Weights (Hybrid: Physics + Attention)")
         w = np.array(res["weights"])
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.bar(range(len(w)), w)
         ax.set_xlabel("Source Index")
         ax.set_ylabel("Weight")
-        ax.set_title("Physics Kernel + Attention Weights")
+        ax.set_title("Final Blending Weights")
         st.pyplot(fig)
         st.write("Higher bars = more influence from that source")
 
@@ -528,4 +712,4 @@ else:
     else:
         st.warning("⚠️ No simulation files found. Please place your `.pkl` files in the `numerical_solutions/` directory and refresh the page.")
 
-st.caption("Modified & Expanded for `numerical_solutions/` directory • Physics kernel + radial morphing • Enhanced loader")
+st.caption("Enhanced with full temporal support, hybrid weighting, and post‑processing following the theoretical procedure.")
