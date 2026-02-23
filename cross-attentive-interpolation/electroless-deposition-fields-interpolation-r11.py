@@ -17,6 +17,7 @@ FULL TEMPORAL SUPPORT + PHYSICS‑EMBEDDED KERNEL + RADIAL MORPHING
 * Ag shell (orange):    RGBA(1.000, 0.498, 0.000, 1.0) → proxy=1: phi>0.5 AND psi≤0.5
 * Cu core (gray):       RGBA(0.600, 0.600, 0.600, 1.0) → proxy=2: psi>0.5
 - **THERMODYNAMICALLY CONSISTENT TIME SCALING**: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY
+- **NUMBA JIT OPTIMIZED** for performance-critical functions
 """
 import streamlit as st
 import numpy as np
@@ -49,6 +50,21 @@ from functools import lru_cache
 import hashlib
 import shutil
 warnings.filterwarnings('ignore')
+
+# =============================================
+# NUMBA JIT COMPILATION FOR PERFORMANCE
+# =============================================
+try:
+    from numba import jit, prange
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    # Fallback decorator that does nothing
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    prange = range
 
 # =============================================
 # GLOBAL STYLING CONFIGURATION
@@ -208,7 +224,158 @@ class DepositionPhysics:
         return dth / dt if dt > 0 else 0.0
 
 # =============================================
-# NEW: Dimensionless groups & physics kernel
+# NUMBA-OPTIMIZED PHYSICS KERNEL FUNCTIONS
+# =============================================
+@jit(nopython=True, cache=True)
+def compute_dimensionless_groups_jit(L0_m, D_nd, gamma_nd, M_nd, k0_nd, c_bulk, fc, tau0_s, t_max_nd):
+    """JIT-compiled version of dimensionless groups computation."""
+    r_core = fc * L0_m
+    
+    # Fourier number (dimensionless time)
+    Fo = D_nd * t_max_nd / (L0_m**2)
+    
+    # Dimensionless curvature strength
+    kappa_star = gamma_nd * M_nd / (L0_m * k0_nd * c_bulk)
+    
+    # Damköhler number (reaction vs diffusion)
+    Da = k0_nd * c_bulk * L0_m**2 / D_nd
+    
+    # Normalised core radius
+    r_star = r_core
+    
+    # Logarithmic c_bulk for kernel
+    log_c = np.log(c_bulk + 1e-12)
+    
+    return Fo, kappa_star, Da, r_star, log_c, L0_m, tau0_s
+
+@jit(nopython=True, cache=True)
+def physics_kernel_jit(src_Fo, src_kappa, src_Da, src_r_star, src_log_c,
+                       tgt_Fo, tgt_kappa, tgt_Da, tgt_r_star, tgt_log_c, tgt_L0, sigma):
+    """JIT-compiled physics kernel computation."""
+    # Weighted squared differences
+    w_Fo = 1.0
+    w_kappa = 0.5
+    w_Da = 0.5
+    w_r = 2.0
+    w_logc = 1.0
+    
+    d2 = (w_Fo * (src_Fo - tgt_Fo)**2 +
+          w_kappa * (src_kappa - tgt_kappa)**2 +
+          w_Da * (src_Da - tgt_Da)**2 +
+          w_r * ((src_r_star - tgt_r_star) / tgt_L0)**2 +
+          w_logc * (src_log_c - tgt_log_c)**2)
+    
+    return np.exp(-0.5 * d2 / sigma**2)
+
+@jit(nopython=True, cache=True, parallel=True)
+def radial_morph_jit(src_phi, src_psi, src_c, src_fc, tgt_fc, shape_out):
+    """JIT-compiled radial morphing with parallel execution."""
+    ny, nx = shape_out
+    src_ny, src_nx = src_phi.shape
+    
+    # Output arrays
+    warped_phi = np.zeros((ny, nx))
+    warped_psi = np.zeros((ny, nx))
+    warped_c = np.zeros((ny, nx))
+    
+    # Scale factor
+    scale = tgt_fc / (src_fc + 1e-8)
+    
+    # Precompute source grid
+    src_x = np.linspace(0, 1, src_nx)
+    src_y = np.linspace(0, 1, src_ny)
+    
+    for i in prange(ny):
+        for j in range(nx):
+            # Target coordinates
+            x_tgt = j / (nx - 1)
+            y_tgt = i / (ny - 1)
+            
+            # Distance from center
+            dist = np.sqrt((x_tgt - 0.5)**2 + (y_tgt - 0.5)**2)
+            
+            # Source coordinates via radial scaling
+            r_src = dist / scale
+            r_src = np.clip(r_src, 0, 1)
+            angle = np.arctan2(y_tgt - 0.5, x_tgt - 0.5)
+            
+            x_src = 0.5 + r_src * np.cos(angle)
+            y_src = 0.5 + r_src * np.sin(angle)
+            x_src = np.clip(x_src, 0, 1)
+            y_src = np.clip(y_src, 0, 1)
+            
+            # Bilinear interpolation
+            src_x_idx = x_src * (src_nx - 1)
+            src_y_idx = y_src * (src_ny - 1)
+            
+            x0 = int(np.floor(src_x_idx))
+            x1 = min(x0 + 1, src_nx - 1)
+            y0 = int(np.floor(src_y_idx))
+            y1 = min(y0 + 1, src_ny - 1)
+            
+            dx = src_x_idx - x0
+            dy = src_y_idx - y0
+            
+            # Interpolate each field
+            warped_phi[i, j] = (1-dx)*(1-dy)*src_phi[y0, x0] + dx*(1-dy)*src_phi[y0, x1] + \
+                              (1-dx)*dy*src_phi[y1, x0] + dx*dy*src_phi[y1, x1]
+            warped_psi[i, j] = (1-dx)*(1-dy)*src_psi[y0, x0] + dx*(1-dy)*src_psi[y0, x1] + \
+                              (1-dx)*dy*src_psi[y1, x0] + dx*dy*src_psi[y1, x1]
+            warped_c[i, j] = (1-dx)*(1-dy)*src_c[y0, x0] + dx*(1-dy)*src_c[y0, x1] + \
+                            (1-dx)*dy*src_c[y1, x0] + dx*dy*src_c[y1, x1]
+    
+    return warped_phi, warped_psi, warped_c
+
+@jit(nopython=True, cache=True)
+def compute_material_proxy_jit(phi, psi):
+    """JIT-compiled material proxy computation."""
+    ny, nx = phi.shape
+    material = np.zeros((ny, nx), dtype=np.float64)
+    
+    for i in range(ny):
+        for j in range(nx):
+            if psi[i, j] > 0.5:
+                material[i, j] = 2.0
+            elif phi[i, j] > 0.5:
+                material[i, j] = 1.0
+            else:
+                material[i, j] = 0.0
+    
+    return material
+
+@jit(nopython=True, cache=True)
+def interpolate_thickness_jit(common_t_real, thickness_curves_t, thickness_curves_th, weights, n_curves):
+    """JIT-compiled thickness interpolation."""
+    n_points = len(common_t_real)
+    thickness_interp = np.zeros(n_points)
+    
+    for i in range(n_points):
+        t = common_t_real[i]
+        for c in range(n_curves):
+            t_arr = thickness_curves_t[c]
+            th_arr = thickness_curves_th[c]
+            n_t = len(t_arr)
+            
+            # Find interpolation indices
+            if t <= t_arr[0]:
+                th_val = th_arr[0]
+            elif t >= t_arr[-1]:
+                th_val = th_arr[-1]
+            else:
+                for k in range(n_t - 1):
+                    if t_arr[k] <= t <= t_arr[k+1]:
+                        alpha = (t - t_arr[k]) / (t_arr[k+1] - t_arr[k] + 1e-12)
+                        th_val = (1 - alpha) * th_arr[k] + alpha * th_arr[k+1]
+                        break
+                else:
+                    th_val = th_arr[-1]
+            
+            thickness_interp[i] += weights[c] * th_val
+    
+    return thickness_interp
+
+# =============================================
+# ORIGINAL PYTHON FUNCTIONS (fallback if numba not available)
 # =============================================
 def compute_dimensionless_groups(params: Dict, t_real: float = None) -> Dict:
     """
@@ -289,6 +456,18 @@ def radial_morph(source_fields: Dict[str, np.ndarray],
     Uses a radial mapping based on distance from the centre (0.5,0.5).
     Assumes square domain [0,1] in non‑dimensional coordinates.
     """
+    # Try JIT version if available
+    if NUMBA_AVAILABLE:
+        try:
+            warped_phi, warped_psi, warped_c = radial_morph_jit(
+                source_fields['phi'], source_fields['psi'], source_fields['c'],
+                src_fc, tgt_fc, shape_out
+            )
+            return {'phi': warped_phi, 'psi': warped_psi, 'c': warped_c}
+        except:
+            pass
+    
+    # Fallback to scipy griddata
     ny, nx = shape_out
     x = np.linspace(0, 1, nx)
     y = np.linspace(0, 1, ny)
@@ -444,6 +623,7 @@ class CoreShellInterpolator:
                           time_norm: Optional[float] = None):
         """
         Main interpolation routine – now with physics kernel + radial morphing.
+        FIXED: t_max_vals is now initialized before conditional blocks to prevent UnboundLocalError
         """
         if not sources:
             return None
@@ -457,6 +637,9 @@ class CoreShellInterpolator:
         source_params_list = []
         source_t_real_arrays = []   # for temporal interpolation
         thickness_curves = []
+        
+        # FIX: Initialize t_max_vals before conditional blocks to prevent UnboundLocalError
+        t_max_vals = []
         
         # First pass: compute physics kernel weights and perform radial morphing
         for src in sources:
@@ -513,6 +696,9 @@ class CoreShellInterpolator:
             if 'history' in src and len(src['history']) > 1:
                 t_real_vals = [snap['t_nd'] * src_params['tau0_s'] for snap in src['history']]
                 source_t_real_arrays.append(t_real_vals)
+                # FIX: Also collect t_max_vals here for later use
+                if t_real_vals[-1] > 0:
+                    t_max_vals.append(t_real_vals[-1])
             else:
                 source_t_real_arrays.append([0.0])
             
@@ -554,11 +740,7 @@ class CoreShellInterpolator:
         # Determine target real time if time_norm is given
         if time_norm is not None:
             # Compute weighted average of source total times
-            t_max_vals = []
-            for src_params, t_arr in zip(source_params_list, source_t_real_arrays):
-                if t_arr[-1] > 0:
-                    t_max_vals.append(t_arr[-1])
-            
+            # FIX: t_max_vals is already populated above, no need to repopulate
             if t_max_vals:
                 avg_t_max = np.average(t_max_vals, weights=final_weights)
                 t_target_real = time_norm * avg_t_max
@@ -598,16 +780,50 @@ class CoreShellInterpolator:
         else:
             common_t_real = common_t_norm * target_params.get('tau0_s', 1e-4)
         
-        thickness_interp = np.zeros_like(common_t_norm)
-        for i, (t_th, th_nm) in enumerate(thickness_curves):
-            th_on_grid = np.interp(common_t_real, t_th, th_nm, left=th_nm[0], right=th_nm[-1])
-            thickness_interp += final_weights[i] * th_on_grid
+        # Use JIT-optimized thickness interpolation if available
+        if NUMBA_AVAILABLE and len(thickness_curves) > 0:
+            try:
+                # Prepare arrays for JIT function
+                max_curves = len(thickness_curves)
+                max_points = max(len(tc[0]) for tc in thickness_curves)
+                
+                thickness_curves_t = np.zeros((max_curves, max_points))
+                thickness_curves_th = np.zeros((max_curves, max_points))
+                
+                for i, (t_th, th_nm) in enumerate(thickness_curves):
+                    thickness_curves_t[i, :len(t_th)] = t_th
+                    thickness_curves_th[i, :len(th_nm)] = th_nm
+                
+                thickness_interp = interpolate_thickness_jit(
+                    common_t_real, thickness_curves_t, thickness_curves_th,
+                    final_weights, len(thickness_curves)
+                )
+            except:
+                # Fallback to numpy interpolation
+                thickness_interp = np.zeros_like(common_t_norm)
+                for i, (t_th, th_nm) in enumerate(thickness_curves):
+                    th_on_grid = np.interp(common_t_real, t_th, th_nm, left=th_nm[0], right=th_nm[-1])
+                    thickness_interp += final_weights[i] * th_on_grid
+        else:
+            thickness_interp = np.zeros_like(common_t_norm)
+            for i, (t_th, th_nm) in enumerate(thickness_curves):
+                th_on_grid = np.interp(common_t_real, t_th, th_nm, left=th_nm[0], right=th_nm[-1])
+                thickness_interp += final_weights[i] * th_on_grid
         
         # Compute derived quantities
         fc_target = target_params.get('fc', 0.18)
         L0 = target_params.get('L0_nm', 20.0) * 1e-9
         dx_nd = 1.0 / (target_shape[0] - 1)
-        material = DepositionPhysics.material_proxy(interp_fields['phi'], interp_fields['psi'])
+        
+        # Use JIT material proxy if available
+        if NUMBA_AVAILABLE:
+            try:
+                material = compute_material_proxy_jit(interp_fields['phi'], interp_fields['psi'])
+            except:
+                material = DepositionPhysics.material_proxy(interp_fields['phi'], interp_fields['psi'])
+        else:
+            material = DepositionPhysics.material_proxy(interp_fields['phi'], interp_fields['psi'])
+        
         alpha = target_params.get('alpha_nd', 2.0)
         potential = DepositionPhysics.potential_proxy(interp_fields['c'], alpha)
         thickness_nm = DepositionPhysics.shell_thickness(interp_fields['phi'],
@@ -651,7 +867,7 @@ class CoreShellInterpolator:
             'time_norm': time_norm if time_norm is not None else 1.0,
             'time_real_s': t_target_real if t_target_real is not None else 0.0,
             'avg_tau0': float(np.average([p.get('tau0_s',1e-4) for p in source_params_list], weights=final_weights)),
-            'avg_t_max_nd': float(avg_t_max / target_params.get('tau0_s',1e-4) if 'avg_t_max' in locals() else 1.0)
+            'avg_t_max_nd': float(avg_t_max / target_params.get('tau0_s',1e-4) if t_max_vals else 1.0)
         }
         
         return result
@@ -1376,6 +1592,12 @@ class ResultsManager:
 def main():
     st.set_page_config(page_title="Core‑Shell Deposition: Full Temporal Interpolation",
                       layout="wide", page_icon="🧪", initial_sidebar_state="expanded")
+    
+    # Display Numba optimization status
+    if NUMBA_AVAILABLE:
+        st.sidebar.success("✅ Numba JIT optimization enabled")
+    else:
+        st.sidebar.warning("⚠️ Numba not available - install with: pip install numba")
     
     st.markdown("""
     <style>
