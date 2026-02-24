@@ -15,6 +15,7 @@ msgpack
 dill
 joblib
 scikit-learn
+scikit-image
 pandas
 xgboost
 s3fs
