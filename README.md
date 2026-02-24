@@ -102,7 +102,10 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi11-streamlit-red)](https://electroless-deposition-fields-interpolation11.streamlit.app/) (temporal modeling implementation to capture the physics of spatiotemporal modeling, slow interpolation)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi12-streamlit-red)](https://electroless-deposition-fields-interpolation12.streamlit.app/) (different method than r10 and r11)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi12-streamlit-red)](https://electroless-deposition-fields-interpolation12.streamlit.app/) (r8 with ground truth comparison, domain length change is not learned in comparisons)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi13-streamlit-red)](https://electroless-deposition-fields-interpolation13.streamlit.app/) (ground truth comparison is based upon pkl file, domain length change is adjusted but user query in the dashboard is ignored for ground truth comparison)
+
 
 
 Statistical Analytics:
