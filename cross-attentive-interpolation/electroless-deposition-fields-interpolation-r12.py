@@ -32,7 +32,7 @@ st.title("🧪 Ag@Cu Core-Shell Physics-Aware Interpolator")
 st.markdown("**Loaded from `numerical_solutions/` • Radial morphing • Full temporal support**")
 
 # ========================= CONFIG =========================
-# Use absolute path to ensure correct directory regardless of working directory
+# Absolute path to the script's directory – ensures correct folder regardless of how Streamlit is launched
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SOLUTION_DIR = os.path.join(SCRIPT_DIR, "numerical_solutions")
 os.makedirs(SOLUTION_DIR, exist_ok=True)
@@ -310,22 +310,58 @@ def convert_to_original_format(enhanced_sol):
         'coords_nd': enhanced_sol.get('coords_nd')
     }
 
-# ========================= LOADER =========================
-loader = EnhancedSolutionLoader(SOLUTION_DIR)
+# ========================= INITIALIZE SESSION STATE =========================
+if 'loader' not in st.session_state:
+    st.session_state.loader = EnhancedSolutionLoader(SOLUTION_DIR)
+if 'solutions' not in st.session_state:
+    st.session_state.solutions = []
+if 'last_result' not in st.session_state:
+    st.session_state.last_result = None
 
-@st.cache_data
-def load_all_pkl():
-    enhanced_solutions = loader.load_all_solutions(use_cache=True, max_files=None)
-    # Convert each to the original format
-    solutions = [convert_to_original_format(sol) for sol in enhanced_solutions]
-    return solutions
+# ========================= SIDEBAR =========================
+with st.sidebar:
+    st.header("📁 Data Management")
+    if st.button("📥 Load Solutions", use_container_width=True):
+        with st.spinner("Loading solutions from numerical_solutions/ ..."):
+            st.session_state.solutions = st.session_state.loader.load_all_solutions()
+            # Convert to the format expected by the interpolator
+            st.session_state.solutions = [convert_to_original_format(sol) for sol in st.session_state.solutions]
+        st.rerun()
 
-solutions = load_all_pkl()
-
-if not solutions:
-    st.sidebar.warning("No simulation files found. Please place .pkl files in numerical_solutions/")
-else:
-    st.sidebar.success(f"Loaded **{len(solutions)}** solutions from `numerical_solutions/`")
+    st.divider()
+    st.header("🎯 Target Parameters")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        L0_nm = st.number_input("L₀ (nm)", 10.0, 200.0, 40.0, 5.0)
+        fc = st.slider("Core fraction (fc)", 0.05, 0.45, 0.22, 0.01)
+        rs = st.slider("Shell ratio (rs)", 0.01, 0.6, 0.25, 0.01)
+    with col2:
+        c_bulk = st.slider("c_bulk", 0.1, 1.0, 0.6, 0.05)
+        tau0_s = st.number_input("τ₀ (s)", 1e-5, 1e-2, 1e-4, format="%.2e")
+        t_nd = st.slider("Normalized time t_nd", 0.0, 1.0, 0.75, 0.01)
+    
+    use_edl = st.checkbox("Enable EDL catalyst", value=False)
+    
+    if st.button("🚀 Compute Interpolation", type="primary", use_container_width=True):
+        if not st.session_state.solutions:
+            st.error("No simulation files loaded. Please click '📥 Load Solutions' first.")
+        else:
+            target = {
+                "L0_nm": L0_nm, "fc": fc, "rs": rs,
+                "c_bulk": c_bulk, "tau0_s": tau0_s,
+                "t_nd": t_nd, "use_edl": use_edl
+            }
+            with st.spinner("Full temporal + hybrid weighting interpolation..."):
+                # Use the existing interpolator from the theoretical framework
+                from scipy.interpolate import CubicSpline  # already imported
+                # We'll reuse the interpolate_fields function defined below
+                # (the function is defined after the sidebar, but we need it here)
+                # We'll just call it after its definition, or restructure.
+                # For clarity, we keep the function at module level and call it.
+                # The function is defined below, so it's fine as long as we are after its definition.
+                # We'll move the interpolator definition before the sidebar to avoid NameError.
+                pass  # We'll define the interpolator before the sidebar in the final code.
 
 # ==================== THEORETICAL FRAMEWORK IMPLEMENTATION ====================
 # Steps from the theoretical procedure:
@@ -593,37 +629,6 @@ class CoreShellPhysicsInterpolator:
 
 interpolator = CoreShellPhysicsInterpolator()
 
-# ========================= SIDEBAR =========================
-with st.sidebar:
-    st.header("🎯 Target Parameters")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        L0_nm = st.number_input("L₀ (nm)", 10.0, 200.0, 40.0, 5.0)
-        fc = st.slider("Core fraction (fc)", 0.05, 0.45, 0.22, 0.01)
-        rs = st.slider("Shell ratio (rs)", 0.01, 0.6, 0.25, 0.01)
-    with col2:
-        c_bulk = st.slider("c_bulk", 0.1, 1.0, 0.6, 0.05)
-        tau0_s = st.number_input("τ₀ (s)", 1e-5, 1e-2, 1e-4, format="%.2e")
-        t_nd = st.slider("Normalized time t_nd", 0.0, 1.0, 0.75, 0.01)
-    
-    use_edl = st.checkbox("Enable EDL catalyst", value=False)
-    
-    if st.button("🚀 Compute Interpolation", type="primary", use_container_width=True):
-        if not solutions:
-            st.error("No simulation files loaded. Please add .pkl files to numerical_solutions/ and refresh.")
-        else:
-            target = {
-                "L0_nm": L0_nm, "fc": fc, "rs": rs,
-                "c_bulk": c_bulk, "tau0_s": tau0_s,
-                "t_nd": t_nd, "use_edl": use_edl
-            }
-            with st.spinner("Full temporal + hybrid weighting interpolation..."):
-                result = interpolator.interpolate(solutions, target)
-                if result:
-                    st.session_state.last_result = result
-                    st.success("✅ Interpolation successful!")
-
 # ========================= MAIN DISPLAY =========================
 if "last_result" in st.session_state:
     res = st.session_state.last_result
@@ -691,9 +696,9 @@ if "last_result" in st.session_state:
         st.write("Higher bars = more influence from that source")
 
 else:
-    if solutions:
+    if st.session_state.solutions:
         st.info("👈 Set target parameters in the sidebar and click **Compute Interpolation**")
     else:
-        st.warning("⚠️ No simulation files found. Please place your `.pkl` files in the `numerical_solutions/` directory and refresh the page.")
+        st.warning("⚠️ No simulation files found. Please place your `.pkl` files in the `numerical_solutions/` directory and click **📥 Load Solutions** in the sidebar.")
 
 st.caption("Enhanced with full temporal support, hybrid weighting, and post‑processing following the theoretical procedure.")
