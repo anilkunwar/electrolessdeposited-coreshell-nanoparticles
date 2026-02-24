@@ -111,6 +111,8 @@ Transformer Inspired Attention Codes:
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi15-streamlit-red)](https://electroless-deposition-fields-interpolation15.streamlit.app/) (r8 with ground truth comparison, domain length change is referenced to pkl's size)
 
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi16-streamlit-red)](https://electroless-deposition-fields-interpolation16.streamlit.app/) (Concept of Hard Gating, Works for Varying L0 values)
+
 
 Statistical Analytics:
 
