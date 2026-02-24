@@ -106,6 +106,10 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi13-streamlit-red)](https://electroless-deposition-fields-interpolation13.streamlit.app/) (ground truth comparison is based upon pkl file, domain length change is adjusted but user query in the dashboard is ignored for ground truth comparison)
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi14-streamlit-red)](https://electroless-deposition-fields-interpolation14.streamlit.app/) (r8 with ground truth comparison, domain length change is not learned in comparisons)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi15-streamlit-red)](https://electroless-deposition-fields-interpolation15.streamlit.app/) (r8 with ground truth comparison, domain length change is referenced to pkl's size)
+
 
 
 Statistical Analytics:
