@@ -117,6 +117,10 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi18-streamlit-red)](https://electroless-deposition-fields-interpolation18.streamlit.app/) (Concept of Hard Gating for L0 match and Soft Gating for L0 mismatch but rs,fcand cbulk proximity, Works for Varying L0 values, focuses primarily on L0)
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi19-streamlit-red)](https://electroless-deposition-fields-interpolation19.streamlit.app/) (L0 the largest weight and c_bulk, fc and rs the relative weighting for hybrid gated attention)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi20-streamlit-red)](https://electroless-deposition-fields-interpolation20.streamlit.app/) (L0 the largest weight and c_bulk, fc and rs the relative weighting for hybrid gated attention)
+
 
 Statistical Analytics:
 
