@@ -113,7 +113,9 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi16-streamlit-red)](https://electroless-deposition-fields-interpolation16.streamlit.app/) (Concept of Hard Gating and No Soft Gating, Works for Varying L0 values)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi17-streamlit-red)](https://electroless-deposition-fields-interpolation17.streamlit.app/) (Concept of Hard Gating for L0 match and Soft Gating for L0 mismatch but rs,fcand cbulk proximity, Works for Varying L0 values)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi17-streamlit-red)](https://electroless-deposition-fields-interpolation17.streamlit.app/) (Concept of Hard Gating for L0 match and Soft Gating for L0 mismatch but rs,fcand cbulk proximity, Works for Varying L0 values, focuses primarily on L0)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi18-streamlit-red)](https://electroless-deposition-fields-interpolation18.streamlit.app/) (Concept of Hard Gating for L0 match and Soft Gating for L0 mismatch but rs,fcand cbulk proximity, Works for Varying L0 values, focuses primarily on L0)
 
 
 Statistical Analytics:
