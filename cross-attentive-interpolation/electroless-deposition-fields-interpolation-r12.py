@@ -23,7 +23,7 @@ from datetime import datetime
 import re
 import json
 import warnings
-from typing import List, Dict, Any, Optional, Tuple   # <--- ADDED missing imports
+from typing import List, Dict, Any, Optional, Tuple
 
 warnings.filterwarnings('ignore')
 
@@ -32,10 +32,12 @@ st.title("🧪 Ag@Cu Core-Shell Physics-Aware Interpolator")
 st.markdown("**Loaded from `numerical_solutions/` • Radial morphing • Full temporal support**")
 
 # ========================= CONFIG =========================
-SOLUTION_DIR = "numerical_solutions"
+# Use absolute path to ensure correct directory regardless of working directory
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SOLUTION_DIR = os.path.join(SCRIPT_DIR, "numerical_solutions")
 os.makedirs(SOLUTION_DIR, exist_ok=True)
 
-# ========================= ENHANCED LOADER (copied from second script) =========================
+# ========================= ENHANCED LOADER =========================
 class EnhancedSolutionLoader:
     """Loads PKL files from numerical_solutions, parsing filenames as fallback."""
     def __init__(self, solutions_dir: str = SOLUTION_DIR):
@@ -46,7 +48,7 @@ class EnhancedSolutionLoader:
     def _ensure_directory(self):
         os.makedirs(self.solutions_dir, exist_ok=True)
     
-    def scan_solutions(self) -> List[Dict[str, Any]]:   # <--- Now type hints are defined
+    def scan_solutions(self) -> List[Dict[str, Any]]:
         all_files = []
         for ext in ['*.pkl', '*.pickle']:
             import glob
@@ -395,7 +397,7 @@ def physics_kernel(src_params: Dict, tgt_params: Dict, t_real_src: Optional[floa
     d2 = np.sum(weights * (src_vec - tgt_vec)**2)
     return np.exp(-0.5 * d2 / sigma**2)
 
-# ---------- Step 3: Radial Morphing (unchanged, but used in loop) ----------
+# ---------- Step 3: Radial Morphing ----------
 def radial_morph_2d(phi_src, psi_src, fc_src, rs_src, L0_src, fc_tgt, rs_tgt, L0_tgt, shape=(256, 256)):
     """Radial geometry-preserving morph (original function)."""
     h, w = phi_src.shape if len(phi_src.shape) == 2 else (phi_src.shape[1], phi_src.shape[2])
@@ -424,7 +426,7 @@ def radial_morph_2d(phi_src, psi_src, fc_src, rs_src, L0_src, fc_tgt, rs_tgt, L0
     
     return phi_warped, psi_warped
 
-# ---------- Simple Attention Mechanism (for hybrid weighting) ----------
+# ---------- Simple Attention Mechanism ----------
 class SimpleAttention(nn.Module):
     """Dot‑product attention on encoded parameter vectors."""
     def __init__(self, d_model=9):
@@ -466,8 +468,6 @@ def interpolate_fields(sources: List[Dict], target_params: Dict, target_shape=(2
         src_params.setdefault('tau0_s', 1e-4)
         
         # ---- Step 1: Encode source parameters (for attention) ----
-        # Use source's total real time if we need to encode time-dependent groups
-        # For simplicity, we use None (characteristic values) for source encoding
         src_vec = torch.FloatTensor(encode_parameters(src_params, t_real=None))
         source_vecs.append(src_vec)
         
@@ -476,10 +476,6 @@ def interpolate_fields(sources: List[Dict], target_params: Dict, target_shape=(2
         physics_weights.append(w_phys)
         
         # ---- Step 3: Radial morphing of source fields ----
-        # We'll apply morphing to each snapshot later; here we just store the original snapshots
-        # Actually, we need to morph each snapshot after temporal interpolation?
-        # Better: For each source, we have a list of snapshots with their own real times.
-        # We will temporally interpolate to t_tgt_real, then morph.
         history = src['snapshots']   # list of dicts with 't_nd', 'phi', 'c', 'psi'
         if not history:
             continue
@@ -509,39 +505,27 @@ def interpolate_fields(sources: List[Dict], target_params: Dict, target_shape=(2
             psi_t = psi_spline(t_tgt_real)
             c_t   = c_spline(t_tgt_real)
         
-        # ---- Step 3 (cont.): Apply radial morphing to the temporally interpolated fields ----
+        # ---- Apply radial morphing to the temporally interpolated fields ----
         phi_m, psi_m = radial_morph_2d(
             phi_t, psi_t,
             src_params['fc'], src_params['rs'], src_params['L0_nm'],
             target_params['fc'], target_params['rs'], target_params['L0_nm'],
             shape=target_shape
         )
-        # For concentration, we also need to morph c. Use same mapping.
-        # For simplicity, reuse radial_morph_2d but adapt: we can warp c similarly.
-        # Since radial_morph_2d only returns phi and psi, we need a separate function or extend it.
-        # For now, we'll use a simplified approach: warp c using the same radial scaling.
-        # Create a quick function or just reuse the logic.
-        # Let's define a helper inside.
+        
+        # Warp concentration field using the same radial scaling
         def warp_field(field, src_fc, src_L0, tgt_fc, tgt_L0, shape):
-            # Simplified: use same radial scaling as in radial_morph_2d
             h, w = field.shape
             y, x = np.mgrid[0:h, 0:w]
             cx, cy = w//2, h//2
             dist_src = np.sqrt((x-cx)**2 + (y-cy)**2) * (src_L0 / w)
             scale = tgt_L0 / src_L0
-            dist_warped = dist_src * scale
-            # For c, we just need to map each target pixel to source pixel
-            # Use nearest neighbour for speed; could use griddata.
-            # Create coordinate arrays for target
+            # For c, map each target pixel to source pixel using nearest neighbour
             y_t, x_t = np.mgrid[0:shape[0], 0:shape[1]]
-            # Convert to physical distance from center in target domain
             r_tgt = np.sqrt((x_t - shape[1]//2)**2 + (y_t - shape[0]//2)**2) * (tgt_L0 / shape[1])
-            # Scale back to source distance
             r_src = r_tgt / scale
-            # Convert back to source pixel indices
             x_src = cx + (r_src * np.cos(np.arctan2(y_t - shape[0]//2, x_t - shape[1]//2))) * (w / src_L0)
             y_src = cy + (r_src * np.sin(np.arctan2(y_t - shape[0]//2, x_t - shape[1]//2))) * (h / src_L0)
-            # Clip
             x_src = np.clip(x_src, 0, w-1).astype(int)
             y_src = np.clip(y_src, 0, h-1).astype(int)
             return field[y_src, x_src]
