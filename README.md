@@ -97,10 +97,10 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi9-streamlit-red)](https://electroless-deposition-fields-interpolation9.streamlit.app/) (# similar to r8 model but more concise)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi10-streamlit-red)](https://electroless-deposition-fields-interpolation10.streamlit.app/) (temporal modeling implementation to capture the physics of spatiotemporal modeling)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi10-streamlit-red)](https://electroless-deposition-fields-interpolation10.streamlit.app/) (temporal modeling implementation to capture the physics of spatiotemporal modeling, slow interpolation)
 
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi11-streamlit-red)](https://electroless-deposition-fields-interpolation11.streamlit.app/) (temporal modeling implementation to capture the physics of spatiotemporal modeling)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi11-streamlit-red)](https://electroless-deposition-fields-interpolation11.streamlit.app/) (temporal modeling implementation to capture the physics of spatiotemporal modeling, slow interpolation)
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi12-streamlit-red)](https://electroless-deposition-fields-interpolation12.streamlit.app/) (different method than r10 and r11)
 
