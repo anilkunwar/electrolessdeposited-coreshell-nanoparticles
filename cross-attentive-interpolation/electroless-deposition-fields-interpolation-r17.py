@@ -10,7 +10,10 @@ ENHANCEMENTS IN THIS VERSION:
 3. Radial Profile Comparison - L0-invariant metric for core-shell systems
 4. Weight Diagnostics - Warn users when interpolation is unreliable
 5. Nearest Neighbor Fallback - Honest results when no compatible sources exist
-6. Shape-Aware Soft Refinement (new) - Adds constructive minor weights based on radial profile similarity
+6. Shape-Aware Soft Refinement - Adds constructive minor weights based on radial profile similarity
+7. Optional Categorical Filtering - Can be disabled when all sources share the same categorical settings
+8. Continuous L0 Preference - Gaussian weighting with user‑settable sigma
+9. True Hierarchical Gating - Apply sub‑gates only when L0 proximity is above threshold
 """
 import streamlit as st
 import numpy as np
@@ -256,14 +259,17 @@ class TemporalFieldManager:
     """
     
     def __init__(self, interpolator, sources: List[Dict], target_params: Dict,
-                 n_key_frames: int = 10, lru_size: int = 3):
+                 n_key_frames: int = 10, lru_size: int = 3,
+                 enforce_categorical: bool = False):   # <-- NEW: optional categorical enforcement
         self.interpolator = interpolator
         self.target_params = target_params
         self.n_key_frames = n_key_frames
         self.lru_size = lru_size
         
         # ✅ ENHANCEMENT 1: Apply Hierarchical Hard Masking BEFORE caching
-        self.sources, self.filter_stats = interpolator.filter_sources_hierarchy(sources, target_params)
+        self.sources, self.filter_stats = interpolator.filter_sources_hierarchy(
+            sources, target_params, enforce_categorical=enforce_categorical   # <-- PASS FLAG
+        )
         self._use_fallback = False
         
         # Display filtering stats to user
@@ -696,7 +702,9 @@ class CoreShellInterpolator:
     def __init__(self, d_model=64, nhead=8, num_layers=3,
                  param_sigma=None, temperature=1.0, 
                  gating_mode="Hierarchical: L0 → fc → rs → c_bulk",
-                 lambda_shape=0.5, sigma_shape=0.15):
+                 lambda_shape=0.5, sigma_shape=0.15,
+                 # NEW parameters for hierarchical soft gating
+                 L0_sigma=8.0, hierarchy_threshold=0.2):
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
@@ -707,6 +715,9 @@ class CoreShellInterpolator:
         self.gating_mode = gating_mode
         self.lambda_shape = lambda_shape      # weight for shape boost (λ)
         self.sigma_shape = sigma_shape        # decay constant for radial MSE
+        # NEW attributes
+        self.L0_sigma = L0_sigma              # Gaussian sigma for L0 proximity
+        self.hierarchy_threshold = hierarchy_threshold  # threshold for applying beta/gamma
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -729,64 +740,70 @@ class CoreShellInterpolator:
         self.lambda_shape = lambda_shape
         self.sigma_shape = sigma_shape
     
-    # ✅ ENHANCEMENT 1: Hierarchical Hard Masking Method
-    def filter_sources_hierarchy(self, sources: List[Dict], target_params: Dict) -> Tuple[List[Dict], Dict]:
+    # NEW setters
+    def set_L0_sigma(self, L0_sigma):
+        self.L0_sigma = L0_sigma
+    
+    def set_hierarchy_threshold(self, threshold):
+        self.hierarchy_threshold = threshold
+    
+    # ✅ ENHANCEMENT 1: Hierarchical Hard Masking Method (now with optional categorical enforcement)
+    def filter_sources_hierarchy(self, sources: List[Dict], target_params: Dict,
+                                  enforce_categorical: bool = False) -> Tuple[List[Dict], Dict]:
         """
-        Hierarchical Hard Masking:
-        1. Hard Exclude: Categorical mismatch or L0 delta > 50nm
-        2. Keep: L0 delta <= 50nm
-        3. Preference is handled later by kernel weights (L0 delta < 5nm gets higher weight)
-        
-        Returns:
-            valid_sources: List of sources that pass all hard masks
-            stats: Dictionary with exclusion counts for diagnostics
+        Hierarchical Hard Masking with optional categorical enforcement.
+        1. If enforce_categorical is True, require exact match on mode, bc_type, use_edl.
+        2. L0 hard cutoff at 200 nm (generous, only to exclude extreme outliers).
         """
         valid_sources = []
         excluded_reasons = {'categorical': 0, 'L0_hard': 0, 'kept': 0}
         
         target_L0 = target_params.get('L0_nm', 20.0)
-        target_mode = target_params.get('mode', '2D (planar)')
-        target_bc = target_params.get('bc_type', 'Neu')
-        target_edl = target_params.get('use_edl', False)
+        
+        if enforce_categorical:
+            target_mode = target_params.get('mode', '2D (planar)')
+            target_bc = target_params.get('bc_type', 'Neu')
+            target_edl = target_params.get('use_edl', False)
         
         for src in sources:
             params = src.get('params', {})
             
-            # --- TIER 1: HARD CATEGORICAL MASK (Must Match Exactly) ---
-            if params.get('mode') != target_mode:
-                excluded_reasons['categorical'] += 1
-                continue
-            if params.get('bc_type') != target_bc:
-                excluded_reasons['categorical'] += 1
-                continue
-            if params.get('use_edl') != target_edl:
-                excluded_reasons['categorical'] += 1
-                continue
+            # --- TIER 1: Optional Categorical Hard Mask ---
+            if enforce_categorical:
+                if (params.get('mode') != target_mode or
+                    params.get('bc_type') != target_bc or
+                    params.get('use_edl') != target_edl):
+                    excluded_reasons['categorical'] += 1
+                    continue
             
-            # --- TIER 2: HARD NUMERIC MASK (L0 Domain Size) ---
+            # --- TIER 2: Generous Numeric Hard Mask (L0) ---
             src_L0 = params.get('L0_nm', 20.0)
             delta_L0 = abs(target_L0 - src_L0)
-            
-            if delta_L0 > 50.0:  # Hard cutoff: Physics too different
+            if delta_L0 > 200.0:  # only exclude extremely different domains
                 excluded_reasons['L0_hard'] += 1
                 continue
             
-            # --- TIER 3: KEEP (Kernel will handle preference for <5nm) ---
+            # --- TIER 3: KEEP ---
             valid_sources.append(src)
             excluded_reasons['kept'] += 1
         
         # --- FALLBACK: If all sources excluded, relax constraints ---
         if not valid_sources:
-            st.warning("⚠️ No sources passed hard masks. Relaxing L0 constraint to ±100nm...")
+            st.warning("⚠️ No sources passed hard masks. Relaxing L0 constraint to ±1000nm (categorical still enforced if requested)...")
+            # Keep categorical requirement if enforce_categorical still True, otherwise skip
             for src in sources:
                 params = src.get('params', {})
-                # Only check categories, allow any L0
-                if (params.get('mode') == target_mode and 
-                    params.get('bc_type') == target_bc and 
-                    params.get('use_edl') == target_edl):
+                if enforce_categorical:
+                    if (params.get('mode') == target_mode and
+                        params.get('bc_type') == target_bc and
+                        params.get('use_edl') == target_edl):
+                        # Allow any L0
+                        valid_sources.append(src)
+                else:
+                    # No categorical check, allow any source
                     valid_sources.append(src)
             
-            # If still empty, take absolute nearest neighbor (Nearest Neighbor Fallback)
+            # If still empty, use absolute nearest neighbor (Nearest Neighbor Fallback)
             if not valid_sources and sources:
                 st.error("❌ No compatible sources found. Using nearest neighbor fallback.")
                 distances = []
@@ -803,6 +820,8 @@ class CoreShellInterpolator:
         """
         Compute composite gate factors based on hierarchical gating modes.
         Returns a list of multiplicative factors (one per source).
+        (This method is kept for legacy reasons; the new hierarchical soft gating
+         is implemented inside interpolate_fields using alpha, beta, gamma.)
         """
         target_L0 = target_params.get('L0_nm', 20.0)
         target_fc = target_params.get('fc', 0.18)
@@ -902,17 +921,16 @@ class CoreShellInterpolator:
         
         return gates
     
-    # ========== NEW METHODS FOR SHAPE-AWARE SOFT REFINEMENT ==========
+    # ========== METHODS FOR SHAPE-AWARE SOFT REFINEMENT ==========
     def compute_alpha(self, source_params: List[Dict], target_L0: float) -> np.ndarray:
         """
-        L0-proximity factor (Gaussian with fixed sigma = 8.0 nm)
+        L0-proximity factor (Gaussian with sigma = self.L0_sigma)
         """
-        sigma_L0 = 8.0  # nm
         alphas = []
         for src in source_params:
             src_L0 = src.get('L0_nm', 20.0)
             delta = abs(target_L0 - src_L0)
-            alpha = np.exp(-0.5 * (delta / sigma_L0) ** 2)
+            alpha = np.exp(-0.5 * (delta / self.L0_sigma) ** 2)
             alphas.append(alpha)
         return np.array(alphas)
     
@@ -1065,8 +1083,10 @@ class CoreShellInterpolator:
         if not sources:
             return None
         
-        # ✅ ENHANCEMENT 1: Apply hard filtering
-        filtered_sources, _ = self.filter_sources_hierarchy(sources, target_params)
+        # ✅ ENHANCEMENT 1: Apply hard filtering (categorical enforcement is handled earlier in TemporalFieldManager,
+        # but we call the same method here with enforce_categorical=False because it was already applied)
+        # We'll use enforce_categorical=False because it was already decided at manager level.
+        filtered_sources, _ = self.filter_sources_hierarchy(sources, target_params, enforce_categorical=False)
         active_sources = filtered_sources if filtered_sources else sources
         
         source_params = []
@@ -1134,8 +1154,11 @@ class CoreShellInterpolator:
         beta_norm = beta / (np.sum(beta) + 1e-12)
         gamma = self.compute_gamma(source_fields, source_params, target_params, t_req, beta_norm)
         
-        # Combine into a single physics-based weight factor
-        refinement_factor = alpha * beta * (1.0 + self.lambda_shape * gamma)
+        # ✅ TRUE HIERARCHICAL GATING: Apply beta and gamma only if alpha > threshold
+        beta_hier = np.where(alpha > self.hierarchy_threshold, beta, 1.0)
+        gamma_hier = np.where(alpha > self.hierarchy_threshold, gamma, 1.0)
+        
+        refinement_factor = alpha * beta_hier * (1.0 + self.lambda_shape * gamma_hier)
         # ==================================================================
         
         source_features = self.encode_parameters(source_params)
@@ -1263,7 +1286,9 @@ class CoreShellInterpolator:
                 'combined': final_weights.tolist(),
                 'alpha': alpha.tolist(),
                 'beta': beta.tolist(),
+                'beta_hier': beta_hier.tolist(),
                 'gamma': gamma.tolist(),
+                'gamma_hier': gamma_hier.tolist(),
                 'refinement_factor': refinement_factor.tolist(),
                 'attention': attn_scores.squeeze().detach().cpu().numpy().tolist(),
                 'entropy': float(entropy),
@@ -1795,7 +1820,7 @@ def main():
         c_bulk = st.slider("c_bulk (C_Ag / C_Cu)", 0.1, 1.0, 0.5, 0.05)
         L0_nm = st.number_input("Domain length L0 (nm)", 10.0, 100.0, 60.0, 5.0)
         bc_type = st.selectbox("BC type", ["Neu", "Dir"], index=0)
-        use_edl = st.checkbox("Use EDL catalyst", value=False)
+        use_edl = st.checkbox("Use EDL catalyst", value=True)   # Changed default to True per user comment
         mode = st.selectbox("Mode", ["2D (planar)", "3D (spherical)"], index=0)
         growth_model = st.selectbox("Growth model", ["Model A", "Model B"], index=0)
         alpha_nd = st.slider("α (coupling)", 0.0, 10.0, 2.0, 0.1)
@@ -1828,6 +1853,17 @@ def main():
         sigma_shape = st.slider("σ_shape (radial similarity)", 0.05, 0.5, 0.15, 0.01,
                                 help="Decay constant for the exponential of radial MSE.")
         
+        # NEW: Continuous L0 sigma and hierarchy threshold
+        st.markdown("#### 🎯 L0 Preference & Hierarchy")
+        L0_sigma = st.slider("σ_L0 (nm)", 2.0, 20.0, 8.0, 0.5,
+                              help="Gaussian width for L0 proximity (smaller = sharper preference).")
+        hierarchy_threshold = st.slider("L0 hierarchy threshold", 0.0, 0.5, 0.2, 0.01,
+                                         help="Minimum α value to activate β and γ.")
+        
+        # NEW: Optional categorical filtering checkbox
+        enforce_categorical = st.checkbox("Enforce exact match on mode/BC/EDL", value=False,
+                                          help="If unchecked, categorical parameters are ignored in hard filtering.")
+        
         n_key_frames = st.slider("Key frames for temporal interpolation", 1, 20, 5, 1,
                                 help="More frames = smoother animation but more memory")
         lru_cache_size = st.slider("Interactive cache size", 1, 5, 3, 1,
@@ -1855,12 +1891,15 @@ def main():
                         st.session_state.interpolator.temperature = temperature
                         st.session_state.interpolator.set_gating_mode(gating_mode)
                         st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
+                        st.session_state.interpolator.set_L0_sigma(L0_sigma)
+                        st.session_state.interpolator.set_hierarchy_threshold(hierarchy_threshold)
                         st.session_state.temporal_manager = TemporalFieldManager(
                             st.session_state.interpolator,
                             st.session_state.solutions,
                             target,
                             n_key_frames=n_key_frames,
-                            lru_size=lru_cache_size
+                            lru_size=lru_cache_size,
+                            enforce_categorical=enforce_categorical   # <-- PASS TO MANAGER
                         )
                         st.session_state.last_target_hash = target_hash
                         st.session_state.current_time = 1.0
@@ -2145,7 +2184,9 @@ def main():
                     'Source': range(len(weights['alpha'])),
                     'α (L0)': weights['alpha'],
                     'β (params)': weights['beta'],
+                    'β_hier': weights['beta_hier'],
                     'γ (shape)': weights['gamma'],
+                    'γ_hier': weights['gamma_hier'],
                     'refinement_factor': weights['refinement_factor']
                 })
                 st.dataframe(df_refine.style.format("{:.4f}"))
@@ -2294,7 +2335,8 @@ def main():
                         if interp_res:
                             gt_mgr = TemporalFieldManager(st.session_state.interpolator, 
                                                          [gt_sol], gt_params,
-                                                         n_key_frames=5, lru_size=1)
+                                                         n_key_frames=5, lru_size=1,
+                                                         enforce_categorical=enforce_categorical)
                             gt_fields = gt_mgr.get_fields(st.session_state.current_time)
                             
                             target_shape = interp_res['shape']
