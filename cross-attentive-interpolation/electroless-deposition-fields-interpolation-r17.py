@@ -5,15 +5,12 @@ Transformer-Inspired Interpolation for Electroless Ag Shell Deposition on Cu Cor
 FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL-TIME UNITS
 
 ENHANCEMENTS IN THIS VERSION:
-1. Two-Stage Hierarchical Gating with Physics-Guided Shape Refinement
-   - Stage 1: Hard Gating (Safety & Validity Filter)
-   - Stage 2: Soft Refinement (Accuracy & Balance Booster)
-2. Shape-Aware Boost via Radial Profile Similarity
-3. L0-Proximity Factor (Gaussian within hard window)
-4. Parameter Closeness Factor (fc, rs, c_bulk weighted)
-5. Physical Coordinate Alignment for Ground Truth Comparison
-6. Radial Profile Comparison for L0-Invariant Metrics
-7. Weight Diagnostics and Nearest Neighbor Fallback
+1. Hierarchical Hard Masking - Filter sources before interpolation
+2. Physical Coordinate Alignment - Fair comparison across different L0 domains
+3. Radial Profile Comparison - L0-invariant metric for core-shell systems
+4. Weight Diagnostics - Warn users when interpolation is unreliable
+5. Nearest Neighbor Fallback - Honest results when no compatible sources exist
+6. Shape-Aware Soft Refinement (new) - Adds constructive minor weights based on radial profile similarity
 """
 import streamlit as st
 import numpy as np
@@ -232,30 +229,6 @@ class DepositionPhysics:
         ])
         
         return r_centers, profile
-    
-    @staticmethod
-    def radial_profile_distance(profile1, profile2, method='mse'):
-        """
-        Compute distance between two radial profiles.
-        """
-        # Ensure same length
-        min_len = min(len(profile1), len(profile2))
-        p1 = profile1[:min_len]
-        p2 = profile2[:min_len]
-        
-        if method == 'mse':
-            return np.mean((p1 - p2) ** 2)
-        elif method == 'mae':
-            return np.mean(np.abs(p1 - p2))
-        elif method == 'cosine':
-            dot = np.dot(p1, p2)
-            norm1 = np.linalg.norm(p1)
-            norm2 = np.linalg.norm(p2)
-            if norm1 * norm2 == 0:
-                return 0.0
-            return 1.0 - (dot / (norm1 * norm2))
-        else:
-            return np.mean((p1 - p2) ** 2)
 
 # =============================================
 # MEMORY-EFFICIENT TEMPORAL CACHE SYSTEM
@@ -277,7 +250,7 @@ class TemporalCacheEntry:
 
 class TemporalFieldManager:
     """
-    Three-tier temporal management system with two-stage hierarchical gating.
+    Three-tier temporal management system with hierarchical source filtering.
     KEY PRINCIPLE: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY.
     Domain size L0 affects spatial resolution, NOT temporal dynamics speed.
     """
@@ -289,7 +262,7 @@ class TemporalFieldManager:
         self.n_key_frames = n_key_frames
         self.lru_size = lru_size
         
-        # ✅ ENHANCEMENT 1: Apply Two-Stage Hierarchical Gating BEFORE caching
+        # ✅ ENHANCEMENT 1: Apply Hierarchical Hard Masking BEFORE caching
         self.sources, self.filter_stats = interpolator.filter_sources_hierarchy(sources, target_params)
         self._use_fallback = False
         
@@ -717,12 +690,13 @@ class PositionalEncoding(nn.Module):
         return x + pe.unsqueeze(0)
 
 # =============================================
-# ENHANCED CORE‑SHELL INTERPOLATOR WITH TWO-STAGE HIERARCHICAL GATING
+# ENHANCED CORE‑SHELL INTERPOLATOR WITH HIERARCHICAL GATED ATTENTION + SHAPE-AWARE REFINEMENT
 # =============================================
 class CoreShellInterpolator:
     def __init__(self, d_model=64, nhead=8, num_layers=3,
                  param_sigma=None, temperature=1.0, 
-                 gating_mode="Two-Stage Hierarchical + Shape Boost"):
+                 gating_mode="Hierarchical: L0 → fc → rs → c_bulk",
+                 lambda_shape=0.5, sigma_shape=0.15):
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
@@ -731,12 +705,8 @@ class CoreShellInterpolator:
         self.param_sigma = param_sigma
         self.temperature = temperature
         self.gating_mode = gating_mode
-        
-        # ✅ ENHANCEMENT: Two-Stage Gating Hyperparameters
-        self.sigma_L0 = 8.0  # nm, for L0-proximity Gaussian
-        self.sigma_shape = 0.15  # for radial profile distance
-        self.lambda_shape = 0.5  # shape boost multiplier (0.4-0.6 recommended)
-        self.param_weights = {'fc': 2.0, 'rs': 1.5, 'c_bulk': 3.0}  # parameter closeness weights
+        self.lambda_shape = lambda_shape      # weight for shape boost (λ)
+        self.sigma_shape = sigma_shape        # decay constant for radial MSE
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -755,21 +725,17 @@ class CoreShellInterpolator:
     def set_gating_mode(self, gating_mode):
         self.gating_mode = gating_mode
     
-    def set_shape_boost_params(self, sigma_L0=None, sigma_shape=None, lambda_shape=None):
-        """Configure the shape-aware boost hyperparameters."""
-        if sigma_L0 is not None:
-            self.sigma_L0 = sigma_L0
-        if sigma_shape is not None:
-            self.sigma_shape = sigma_shape
-        if lambda_shape is not None:
-            self.lambda_shape = lambda_shape
+    def set_shape_params(self, lambda_shape, sigma_shape):
+        self.lambda_shape = lambda_shape
+        self.sigma_shape = sigma_shape
     
-    # ✅ ENHANCEMENT 1: Hierarchical Hard Masking Method (Stage 1)
+    # ✅ ENHANCEMENT 1: Hierarchical Hard Masking Method
     def filter_sources_hierarchy(self, sources: List[Dict], target_params: Dict) -> Tuple[List[Dict], Dict]:
         """
-        Stage 1: Hard Gating - Safety & Validity Filter
+        Hierarchical Hard Masking:
         1. Hard Exclude: Categorical mismatch or L0 delta > 50nm
-        2. Keep: L0 delta <= 50nm for Stage 2 refinement
+        2. Keep: L0 delta <= 50nm
+        3. Preference is handled later by kernel weights (L0 delta < 5nm gets higher weight)
         
         Returns:
             valid_sources: List of sources that pass all hard masks
@@ -805,7 +771,7 @@ class CoreShellInterpolator:
                 excluded_reasons['L0_hard'] += 1
                 continue
             
-            # --- TIER 3: KEEP (Stage 2 will handle preference) ---
+            # --- TIER 3: KEEP (Kernel will handle preference for <5nm) ---
             valid_sources.append(src)
             excluded_reasons['kept'] += 1
         
@@ -833,144 +799,11 @@ class CoreShellInterpolator:
         
         return valid_sources, excluded_reasons
     
-    # ✅ ENHANCEMENT 2: Stage 2 Soft Refinement with Shape-Aware Boost
-    def compute_refined_weights(self, sources: List[Dict], target_params: Dict, 
-                               time_norm: float = 1.0) -> np.ndarray:
-        """
-        Stage 2: Soft Refinement - Accuracy & Balance Booster
-        
-        For each surviving source s_i ∈ S_h, compute:
-        w_i^refine = α_i × β_i × (1 + λ × γ_i)
-        
-        Where:
-        - α_i = L0-proximity factor (Gaussian within hard window)
-        - β_i = Parameter closeness factor (fc, rs, c_bulk)
-        - γ_i = Shape-similarity boost (radial profile comparison)
-        - λ = shape boost multiplier
-        
-        Returns:
-            normalized_weights: Sum-to-1 weights for interpolation
-        """
-        if not sources:
-            return np.array([1.0])
-        
-        target_L0 = target_params.get('L0_nm', 20.0)
-        target_fc = target_params.get('fc', 0.18)
-        target_rs = target_params.get('rs', 0.2)
-        target_c_bulk = target_params.get('c_bulk', 0.5)
-        
-        alpha_factors = []  # L0-proximity
-        beta_factors = []   # Parameter closeness
-        gamma_factors = []  # Shape similarity
-        
-        # First pass: compute α and β for all sources
-        for src in sources:
-            params = src.get('params', {})
-            src_L0 = params.get('L0_nm', 20.0)
-            src_fc = params.get('fc', 0.18)
-            src_rs = params.get('rs', 0.2)
-            src_c_bulk = params.get('c_bulk', 0.5)
-            
-            # 1. L0-proximity factor (Gaussian)
-            delta_L0 = abs(target_L0 - src_L0)
-            alpha = np.exp(-0.5 * (delta_L0 / self.sigma_L0)**2)
-            alpha_factors.append(alpha)
-            
-            # 2. Parameter closeness factor (weighted Euclidean in normalized space)
-            def norm_val(p, name):
-                return DepositionParameters.normalize(p.get(name, 0.5), name)
-            
-            delta_fc = norm_val(params, 'fc') - norm_val(target_params, 'fc')
-            delta_rs = norm_val(params, 'rs') - norm_val(target_params, 'rs')
-            delta_c = norm_val(params, 'c_bulk') - norm_val(target_params, 'c_bulk')
-            
-            weighted_sq = (self.param_weights['fc'] * (delta_fc / 0.15)**2 +
-                          self.param_weights['rs'] * (delta_rs / 0.15)**2 +
-                          self.param_weights['c_bulk'] * (delta_c / 0.15)**2)
-            beta = np.exp(-0.5 * weighted_sq)
-            beta_factors.append(beta)
-        
-        # 3. Shape-similarity boost (radial profile comparison)
-        # Reference profile: weighted average of top-2 sources by β
-        beta_arr = np.array(beta_factors)
-        if len(beta_arr) >= 2:
-            top2_idx = np.argsort(beta_arr)[-2:]
-            ref_profiles = []
-            ref_weights = []
-            for idx in top2_idx:
-                src = sources[idx]
-                history = src.get('history', [])
-                if history:
-                    # Get field at closest time to time_norm
-                    t_vals = np.array([s['t_nd'] for s in history])
-                    t_target = time_norm * (t_vals[-1] if len(t_vals) > 0 else 1.0)
-                    idx_t = np.argmin(np.abs(t_vals - t_target))
-                    snap = history[idx_t]
-                    phi = self._ensure_2d(snap['phi'])
-                    src_L0 = src['params'].get('L0_nm', 20.0)
-                    r, prof = DepositionPhysics.compute_radial_profile(phi, src_L0, n_bins=50)
-                    ref_profiles.append(prof)
-                    ref_weights.append(beta_arr[idx])
-            
-            if ref_profiles:
-                # Weighted average reference profile
-                ref_weights_norm = np.array(ref_weights) / np.sum(ref_weights)
-                ref_profile = sum(w * p for w, p in zip(ref_weights_norm, ref_profiles))
-                
-                # Compute γ for each source
-                for src in sources:
-                    history = src.get('history', [])
-                    if history:
-                        t_vals = np.array([s['t_nd'] for s in history])
-                        t_target = time_norm * (t_vals[-1] if len(t_vals) > 0 else 1.0)
-                        idx_t = np.argmin(np.abs(t_vals - t_target))
-                        snap = history[idx_t]
-                        phi = self._ensure_2d(snap['phi'])
-                        src_L0 = src['params'].get('L0_nm', 20.0)
-                        r, prof = DepositionPhysics.compute_radial_profile(phi, src_L0, n_bins=50)
-                        
-                        # Compute radial distance (MSE)
-                        d_radial = DepositionPhysics.radial_profile_distance(prof, ref_profile, method='mse')
-                        gamma = np.exp(-d_radial / self.sigma_shape)
-                        gamma_factors.append(gamma)
-                    else:
-                        gamma_factors.append(0.5)  # Default if no history
-            else:
-                gamma_factors = [0.5] * len(sources)
-        else:
-            gamma_factors = [0.5] * len(sources)
-        
-        # Combine: w_i^refine = α_i × β_i × (1 + λ × γ_i)
-        alpha_arr = np.array(alpha_factors)
-        beta_arr = np.array(beta_factors)
-        gamma_arr = np.array(gamma_factors)
-        
-        w_refine = alpha_arr * beta_arr * (1.0 + self.lambda_shape * gamma_arr)
-        
-        # Normalize to sum to 1
-        w_sum = np.sum(w_refine)
-        if w_sum > 0:
-            normalized_weights = w_refine / w_sum
-        else:
-            normalized_weights = np.ones(len(sources)) / len(sources)
-        
-        return normalized_weights, {
-            'alpha': alpha_factors,
-            'beta': beta_factors,
-            'gamma': gamma_factors,
-            'w_refine': w_refine.tolist()
-        }
-    
     def compute_composite_gates(self, source_params: List[Dict], target_params: Dict) -> List[float]:
         """
-        Legacy method for backward compatibility.
-        Now delegates to compute_refined_weights for Two-Stage mode.
+        Compute composite gate factors based on hierarchical gating modes.
+        Returns a list of multiplicative factors (one per source).
         """
-        if self.gating_mode == "Two-Stage Hierarchical + Shape Boost":
-            # This is now handled in compute_refined_weights
-            return [1.0] * len(source_params)
-        
-        # Keep existing logic for other gating modes
         target_L0 = target_params.get('L0_nm', 20.0)
         target_fc = target_params.get('fc', 0.18)
         target_rs = target_params.get('rs', 0.2)
@@ -992,6 +825,7 @@ class CoreShellInterpolator:
                 gate = 1.0
             elif self.gating_mode == "Joint Multiplicative":
                 gate = 1.0
+                # L0 gate
                 if delta_L0 < 5:
                     gate *= 0.95
                 elif delta_L0 < 10:
@@ -1002,20 +836,24 @@ class CoreShellInterpolator:
                     gate *= 0.20
                 else:
                     gate *= 0.05
+                # fc gate
                 if delta_fc < 0.05:
                     gate *= 0.95
                 else:
                     gate *= 0.60
+                # rs gate
                 if delta_rs < 0.05:
                     gate *= 0.95
                 else:
                     gate *= 0.60
+                # c_bulk gate (log‑sensitive)
                 if delta_c_bulk < 0.05:
                     gate *= 0.95
                 else:
                     gate *= 0.60
             elif self.gating_mode == "Hierarchical: L0 → fc → rs → c_bulk":
                 gate = 1.0
+                # Root L0 gate
                 if delta_L0 < 5:
                     gate *= 0.95
                 elif delta_L0 < 10:
@@ -1026,6 +864,7 @@ class CoreShellInterpolator:
                     gate *= 0.20
                 else:
                     gate *= 0.05
+                # Only apply sub‑gates if L0 mismatch is not too severe
                 if gate > 0.5:
                     if delta_fc < 0.05:
                         gate *= 0.95
@@ -1041,6 +880,7 @@ class CoreShellInterpolator:
                         gate *= 0.60
             elif self.gating_mode == "Hierarchical-Parallel: L0 → (fc, rs, c_bulk)":
                 gate = 1.0
+                # Root L0 gate
                 if delta_L0 < 5:
                     gate *= 0.95
                 elif delta_L0 < 10:
@@ -1051,79 +891,101 @@ class CoreShellInterpolator:
                     gate *= 0.20
                 else:
                     gate *= 0.05
+                # Parallel sub‑gates, independent
                 if gate > 0.5:
                     fc_gate = 0.95 if delta_fc < 0.05 else 0.60
                     rs_gate = 0.95 if delta_rs < 0.05 else 0.60
                     c_gate = 0.95 if delta_c_bulk < 0.05 else 0.60
                     gate *= fc_gate * rs_gate * c_gate
             
-            gates.append(max(gate, 0.01))
+            gates.append(max(gate, 0.01))  # floor at 0.01 to avoid zero weights
         
         return gates
     
-    def compute_parameter_kernel(self, source_params: List[Dict], target_params: Dict,
-                                time_norm: float = 1.0):
+    # ========== NEW METHODS FOR SHAPE-AWARE SOFT REFINEMENT ==========
+    def compute_alpha(self, source_params: List[Dict], target_L0: float) -> np.ndarray:
         """
-        Domain‑specific kernel with Two-Stage Hierarchical Gating.
-        
-        Stage 1: Hard filtering already applied in filter_sources_hierarchy
-        Stage 2: Soft refinement via compute_refined_weights
+        L0-proximity factor (Gaussian with fixed sigma = 8.0 nm)
         """
-        if self.gating_mode == "Two-Stage Hierarchical + Shape Boost":
-            # Use the new two-stage refinement
-            refined_weights, refinement_details = self.compute_refined_weights(
-                source_params, target_params, time_norm
-            )
-            return refined_weights, refinement_details
-        
-        # Legacy path for other gating modes
-        phys_weights = {'fc': 2.0, 'rs': 1.0, 'c_bulk': 3.0, 'L0_nm': 0.5}
-        
-        def norm_val(params, name):
-            val = params.get(name, 0.5)
-            return DepositionParameters.normalize(val, name)
-        
-        target_norm = np.array([
-            norm_val(target_params, 'fc'),
-            norm_val(target_params, 'rs'),
-            norm_val(target_params, 'c_bulk'),
-            norm_val(target_params, 'L0_nm')
-        ])
-        
-        base_weights = []
+        sigma_L0 = 8.0  # nm
+        alphas = []
         for src in source_params:
-            src_norm = np.array([
-                norm_val(src, 'fc'),
-                norm_val(src, 'rs'),
-                norm_val(src, 'c_bulk'),
-                norm_val(src, 'L0_nm')
-            ])
-            diff = src_norm - target_norm
-            weighted_sq = sum(phys_weights[p] * (d / self.param_sigma[i])**2
-                             for i, (p, d) in enumerate(zip(['fc','rs','c_bulk','L0_nm'], diff)))
-            w = np.exp(-0.5 * weighted_sq)
-            base_weights.append(w)
-        
-        cat_factor = []
+            src_L0 = src.get('L0_nm', 20.0)
+            delta = abs(target_L0 - src_L0)
+            alpha = np.exp(-0.5 * (delta / sigma_L0) ** 2)
+            alphas.append(alpha)
+        return np.array(alphas)
+    
+    def compute_beta(self, source_params: List[Dict], target_params: Dict) -> np.ndarray:
+        """
+        Parameter closeness factor for fc, rs, c_bulk only.
+        Uses weighted Gaussian with fixed weights (fc:2.0, rs:1.5, c_bulk:3.0)
+        and the existing kernel sigmas (normalized).
+        """
+        weights = {'fc': 2.0, 'rs': 1.5, 'c_bulk': 3.0}
+        betas = []
         for src in source_params:
-            factor = 1.0
-            if src.get('bc_type') != target_params.get('bc_type'): 
-                factor *= 1e-6
-            if src.get('use_edl') != target_params.get('use_edl'): 
-                factor *= 1e-6
-            if src.get('mode') != target_params.get('mode'): 
-                factor *= 1e-6
-            cat_factor.append(factor)
+            sq_sum = 0.0
+            for i, (pname, w) in enumerate(weights.items()):
+                norm_src = DepositionParameters.normalize(src.get(pname, 0.5), pname)
+                norm_tar = DepositionParameters.normalize(target_params.get(pname, 0.5), pname)
+                diff = norm_src - norm_tar
+                # use the corresponding sigma (order: fc, rs, c_bulk, L0)
+                sigma_idx = ['fc', 'rs', 'c_bulk'].index(pname)
+                sigma = self.param_sigma[sigma_idx]
+                sq_sum += w * (diff / sigma) ** 2
+            beta = np.exp(-0.5 * sq_sum)
+            betas.append(beta)
+        return np.array(betas)
+    
+    def compute_gamma(self, source_fields: List[Dict], source_params: List[Dict],
+                      target_params: Dict, time_norm: float, beta_weights: np.ndarray) -> np.ndarray:
+        """
+        Shape-similarity boost factor.
+        Computes radial profiles for each source, builds a reference profile as weighted average
+        of source profiles using beta_weights, then calculates MSE for each source vs reference.
+        gamma = exp(-MSE / sigma_shape)
+        """
+        n_sources = len(source_fields)
+        if n_sources == 0:
+            return np.array([])
         
-        composite_gates = self.compute_composite_gates(source_params, target_params)
-        final_weights = np.array(base_weights) * np.array(cat_factor) * np.array(composite_gates)
+        # Collect profiles and their radial grids
+        profiles = []
+        radii_list = []
+        L0_list = []
+        for i, src in enumerate(source_params):
+            L0 = src.get('L0_nm', 20.0)
+            L0_list.append(L0)
+            # Use phi field for radial profile (shell phase)
+            field = source_fields[i]['phi']
+            r_centers, profile = DepositionPhysics.compute_radial_profile(field, L0, n_bins=100)
+            profiles.append(profile)
+            radii_list.append(r_centers)
         
-        # Normalize
-        w_sum = np.sum(final_weights)
-        if w_sum > 0:
-            final_weights = final_weights / w_sum
+        # Determine common radial grid (from 0 to max radius among all sources)
+        max_radius = max([r[-1] for r in radii_list])
+        r_common = np.linspace(0, max_radius, 100)
         
-        return final_weights, {}
+        # Interpolate all profiles to common grid
+        profiles_interp = []
+        for i in range(n_sources):
+            prof_interp = np.interp(r_common, radii_list[i], profiles[i], left=0, right=0)
+            profiles_interp.append(prof_interp)
+        profiles_interp = np.array(profiles_interp)  # shape (n_sources, n_bins)
+        
+        # Build reference profile: weighted average using beta_weights (normalized)
+        beta_norm = beta_weights / (np.sum(beta_weights) + 1e-12)
+        ref_profile = np.sum(profiles_interp * beta_norm[:, None], axis=0)
+        
+        # Compute MSE for each source
+        mse = np.mean((profiles_interp - ref_profile) ** 2, axis=1)
+        
+        # Convert to gamma
+        gamma = np.exp(-mse / self.sigma_shape)
+        return gamma
+    
+    # ================================================================
     
     def encode_parameters(self, params_list: List[Dict]) -> torch.Tensor:
         features = []
@@ -1203,8 +1065,8 @@ class CoreShellInterpolator:
         if not sources:
             return None
         
-        # ✅ ENHANCEMENT 1: Apply Stage 1 Hard Filtering
-        filtered_sources, filter_stats = self.filter_sources_hierarchy(sources, target_params)
+        # ✅ ENHANCEMENT 1: Apply hard filtering
+        filtered_sources, _ = self.filter_sources_hierarchy(sources, target_params)
         active_sources = filtered_sources if filtered_sources else sources
         
         source_params = []
@@ -1263,6 +1125,19 @@ class CoreShellInterpolator:
             st.error("No valid source fields.")
             return None
         
+        # ========== NEW: Compute shape-aware refinement factors ==========
+        target_L0 = target_params.get('L0_nm', 20.0)
+        alpha = self.compute_alpha(source_params, target_L0)
+        beta = self.compute_beta(source_params, target_params)
+        
+        # For gamma, we need beta weights (normalized) to build reference profile
+        beta_norm = beta / (np.sum(beta) + 1e-12)
+        gamma = self.compute_gamma(source_fields, source_params, target_params, t_req, beta_norm)
+        
+        # Combine into a single physics-based weight factor
+        refinement_factor = alpha * beta * (1.0 + self.lambda_shape * gamma)
+        # ==================================================================
+        
         source_features = self.encode_parameters(source_params)
         target_features = self.encode_parameters([target_params])
         all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)
@@ -1276,20 +1151,11 @@ class CoreShellInterpolator:
         attn_scores = torch.matmul(target_rep.unsqueeze(1), source_reps.transpose(1,2)).squeeze(1)
         attn_scores = attn_scores / np.sqrt(self.d_model) / self.temperature
         
-        # ✅ ENHANCEMENT 2: Get Two-Stage Refined Weights
-        kernel_weights, refinement_details = self.compute_parameter_kernel(
-            source_params, target_params, time_norm if time_norm is not None else 1.0
-        )
-        kernel_tensor = torch.FloatTensor(kernel_weights).unsqueeze(0)
-        
-        final_scores = attn_scores * kernel_tensor
+        # Multiply attention scores by the physics-based refinement factor
+        final_scores = attn_scores * torch.FloatTensor(refinement_factor).unsqueeze(0)
         final_weights = torch.softmax(final_scores, dim=-1).squeeze().detach().cpu().numpy()
         
-        # For Two-Stage mode, use refined weights directly (not softmax)
-        if self.gating_mode == "Two-Stage Hierarchical + Shape Boost":
-            final_weights = kernel_weights
-        
-        # ----- FIX: Ensure final_weights is always a 1D array of length num_sources -----
+        # ----- Ensure final_weights is always a 1D array of length num_sources -----
         if np.isscalar(final_weights):
             final_weights = np.array([final_weights])
         elif final_weights.ndim == 0:
@@ -1305,7 +1171,7 @@ class CoreShellInterpolator:
                 final_weights = np.pad(final_weights, (0, len(source_fields)-len(final_weights)), 
                                       'constant', constant_values=0)
         
-        # ✅ ENHANCEMENT 4: Weight Diagnostics
+        # ✅ Weight Diagnostics
         eps = 1e-10
         entropy = -np.sum(final_weights * np.log(final_weights + eps))
         max_weight = np.max(final_weights)
@@ -1359,8 +1225,8 @@ class CoreShellInterpolator:
             t_real = avg_t_max_nd * avg_tau0
         
         material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'])
-        alpha = target_params.get('alpha_nd', 2.0)
-        potential = DepositionPhysics.potential_proxy(interp['c'], alpha)
+        alpha_phys = target_params.get('alpha_nd', 2.0)
+        potential = DepositionPhysics.potential_proxy(interp['c'], alpha_phys)
         
         fc = target_params.get('fc', target_params.get('core_radius_frac', 0.18))
         dx = 1.0 / (target_shape[0] - 1)
@@ -1379,20 +1245,6 @@ class CoreShellInterpolator:
                 dth = thickness_interp[idx] - thickness_interp[idx-1]
                 growth_rate = dth / dt_real if dt_real > 0 else 0.0
         
-        # Build weight diagnostics with refinement details
-        weights_dict = {
-            'combined': final_weights.tolist(),
-            'kernel': kernel_weights.tolist(),
-            'attention': attn_scores.squeeze().detach().cpu().numpy().tolist(),
-            'entropy': float(entropy),
-            'max_weight': float(max_weight),
-            'effective_sources': int(effective_sources)
-        }
-        
-        # Add refinement breakdown for Two-Stage mode
-        if refinement_details:
-            weights_dict['refinement'] = refinement_details
-        
         result = {
             'fields': interp,
             'derived': {
@@ -1407,7 +1259,17 @@ class CoreShellInterpolator:
                     'th_nm': thickness_interp.tolist()
                 }
             },
-            'weights': weights_dict,
+            'weights': {
+                'combined': final_weights.tolist(),
+                'alpha': alpha.tolist(),
+                'beta': beta.tolist(),
+                'gamma': gamma.tolist(),
+                'refinement_factor': refinement_factor.tolist(),
+                'attention': attn_scores.squeeze().detach().cpu().numpy().tolist(),
+                'entropy': float(entropy),
+                'max_weight': float(max_weight),
+                'effective_sources': int(effective_sources)
+            },
             'target_params': target_params,
             'shape': target_shape,
             'num_sources': len(source_fields),
@@ -1415,8 +1277,7 @@ class CoreShellInterpolator:
             'time_norm': t_req,
             'time_real_s': t_real,
             'avg_tau0': avg_tau0,
-            'avg_t_max_nd': avg_t_max_nd,
-            'filter_stats': filter_stats
+            'avg_t_max_nd': avg_t_max_nd
         }
         
         return result
@@ -1739,14 +1600,17 @@ def resample_to_physical_grid(field, L0_original, x_ref, y_ref, method='linear')
     x_orig = np.linspace(0, L0_original, W)
     y_orig = np.linspace(0, L0_original, H)
     
+    # Create interpolator (note: RegularGridInterpolator expects (y, x) ordering)
     interpolator = RegularGridInterpolator(
         (y_orig, x_orig), field, 
         method=method, bounds_error=False, fill_value=0.0
     )
     
+    # Create meshgrid for target coordinates
     X_ref, Y_ref = np.meshgrid(x_ref, y_ref, indexing='xy')
     points = np.stack([Y_ref.ravel(), X_ref.ravel()], axis=1)
     
+    # Interpolate
     field_resampled = interpolator(points).reshape(Y_ref.shape)
     
     return field_resampled
@@ -1754,18 +1618,25 @@ def resample_to_physical_grid(field, L0_original, x_ref, y_ref, method='linear')
 def compare_fields_physical(gt_field, gt_L0, interp_field, interp_L0, 
                           target_resolution_nm=0.2, compare_region='overlap'):
     """
-    Compare two fields with different domain sizes using physical-coordinate alignment.
+    ✅ ENHANCEMENT 2: Compare two fields with different domain sizes using 
+    physical-coordinate alignment.
     """
+    # 1. Create common reference grid
     L_ref, x_ref, y_ref, shape_ref = create_common_physical_grid(
         [gt_L0, interp_L0], target_resolution_nm
     )
     
+    # 2. Resample both fields
     gt_resampled = resample_to_physical_grid(gt_field, gt_L0, x_ref, y_ref)
     interp_resampled = resample_to_physical_grid(interp_field, interp_L0, x_ref, y_ref)
     
+    # 3. Optional: Mask to overlapping region only
     if compare_region == 'overlap':
         gt_mask = np.zeros(shape_ref, dtype=bool)
         interp_mask = np.zeros(shape_ref, dtype=bool)
+        
+        gt_H, gt_W = gt_field.shape
+        interp_H, interp_W = interp_field.shape
         
         gt_x_max_idx = int(np.round(gt_L0 / target_resolution_nm))
         gt_y_max_idx = int(np.round(gt_L0 / target_resolution_nm))
@@ -1782,6 +1653,7 @@ def compare_fields_physical(gt_field, gt_L0, interp_field, interp_L0,
     else:
         valid_mask = np.ones(shape_ref, dtype=bool)
     
+    # 4. Compute errors on aligned, masked fields
     gt_valid = gt_resampled[valid_mask]
     interp_valid = interp_resampled[valid_mask]
     
@@ -1789,6 +1661,7 @@ def compare_fields_physical(gt_field, gt_L0, interp_field, interp_L0,
     mae = np.mean(np.abs(gt_valid - interp_valid))
     max_err = np.max(np.abs(gt_valid - interp_valid))
     
+    # SSIM on cropped valid region
     if np.sum(valid_mask) > 1000:
         y_idx, x_idx = np.where(valid_mask)
         y_min, y_max = y_idx.min(), y_idx.max()
@@ -1938,33 +1811,22 @@ def main():
         sigma_L = st.slider("Kernel σ (L0_nm)", 0.05, 0.3, 0.15, 0.01)
         temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
         
-        # ✅ ENHANCEMENT: Two-Stage Gating Mode Selection
         gating_mode = st.selectbox(
-            "Gating Mode",
-            ["Two-Stage Hierarchical + Shape Boost",
-             "Hierarchical: L0 → fc → rs → c_bulk",
+            "Composite Gating Mode",
+            ["Hierarchical: L0 → fc → rs → c_bulk",
              "Hierarchical-Parallel: L0 → (fc, rs, c_bulk)",
              "Joint Multiplicative",
              "No Gating"],
             index=0,
-            help="Two-Stage: Hard filter + soft refinement with shape-aware boost"
+            help="Hierarchical modes apply L0 gate first, then sub‑gates only if L0 is close."
         )
         
-        # Shape boost hyperparameters (only shown for Two-Stage mode)
-        if gating_mode == "Two-Stage Hierarchical + Shape Boost":
-            st.markdown("#### 🔧 Shape Boost Hyperparameters")
-            sigma_L0_boost = st.slider("σ_L0 (nm)", 4.0, 16.0, 8.0, 0.5,
-                                      help="L0-proximity Gaussian width")
-            sigma_shape_boost = st.slider("σ_shape", 0.05, 0.3, 0.15, 0.01,
-                                         help="Radial profile distance sensitivity")
-            lambda_shape_boost = st.slider("λ (shape boost)", 0.2, 0.8, 0.5, 0.05,
-                                          help="Shape similarity multiplier (0.4-0.6 recommended)")
-            
-            st.session_state.interpolator.set_shape_boost_params(
-                sigma_L0=sigma_L0_boost,
-                sigma_shape=sigma_shape_boost,
-                lambda_shape=lambda_shape_boost
-            )
+        # NEW: Shape-aware refinement parameters
+        st.markdown("#### 🌀 Shape-Aware Refinement")
+        lambda_shape = st.slider("λ (shape boost weight)", 0.0, 1.0, 0.5, 0.05,
+                                 help="Controls how much the radial profile similarity adds to the weight.")
+        sigma_shape = st.slider("σ_shape (radial similarity)", 0.05, 0.5, 0.15, 0.01,
+                                help="Decay constant for the exponential of radial MSE.")
         
         n_key_frames = st.slider("Key frames for temporal interpolation", 1, 20, 5, 1,
                                 help="More frames = smoother animation but more memory")
@@ -1992,6 +1854,7 @@ def main():
                             [sigma_fc, sigma_rs, sigma_c, sigma_L])
                         st.session_state.interpolator.temperature = temperature
                         st.session_state.interpolator.set_gating_mode(gating_mode)
+                        st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
                         st.session_state.temporal_manager = TemporalFieldManager(
                             st.session_state.interpolator,
                             st.session_state.solutions,
@@ -2275,35 +2138,24 @@ def main():
                        unsafe_allow_html=True)
             weights = mgr.weights
             
-            # ✅ ENHANCEMENT: Show refinement breakdown for Two-Stage mode
-            if 'refinement' in weights:
-                st.markdown("#### 🔍 Two-Stage Weight Breakdown")
-                ref = weights['refinement']
-                
-                df_ref = pd.DataFrame({
-                    'Source': range(len(ref['alpha'])),
-                    'α (L0-proximity)': ref['alpha'],
-                    'β (Param closeness)': ref['beta'],
-                    'γ (Shape boost)': ref['gamma'],
-                    'Combined': weights['combined']
+            # Display new refinement factors if available
+            if 'alpha' in weights:
+                st.subheader("Shape-Aware Refinement Factors")
+                df_refine = pd.DataFrame({
+                    'Source': range(len(weights['alpha'])),
+                    'α (L0)': weights['alpha'],
+                    'β (params)': weights['beta'],
+                    'γ (shape)': weights['gamma'],
+                    'refinement_factor': weights['refinement_factor']
                 })
-                st.dataframe(df_ref.style.format("{:.4f}"))
-                
-                st.info(f"""
-                **Interpretation:**
-                - **α**: L0-proximity (Gaussian, σ={st.session_state.interpolator.sigma_L0}nm)
-                - **β**: Parameter closeness (fc, rs, c_bulk weighted)
-                - **γ**: Shape similarity (radial profile, λ={st.session_state.interpolator.lambda_shape})
-                - **Final**: α × β × (1 + λ×γ), normalized
-                """)
-            else:
-                df_weights = pd.DataFrame({
-                    'Source': range(len(weights['combined'])),
-                    'Combined': weights['combined'],
-                    'Kernel': weights['kernel'],
-                    'Attention': weights['attention']
-                })
-                st.dataframe(df_weights.style.format("{:.4f}"))
+                st.dataframe(df_refine.style.format("{:.4f}"))
+            
+            df_weights = pd.DataFrame({
+                'Source': range(len(weights['combined'])),
+                'Combined': weights['combined'],
+                'Attention': weights['attention']
+            })
+            st.dataframe(df_weights.style.format("{:.4f}"))
             
             entropy = weights.get('entropy', 0.0)
             max_weight = weights.get('max_weight', 0.0)
@@ -2325,13 +2177,12 @@ def main():
             
             fig_w, ax = plt.subplots(figsize=(10,5))
             x = np.arange(len(weights['combined']))
-            width = 0.25
-            ax.bar(x - width, weights['kernel'], width, label='Kernel (physics)', alpha=0.7)
-            ax.bar(x, weights['attention'], width, label='Attention (learned)', alpha=0.7)
-            ax.bar(x + width, weights['combined'], width, label='Combined', alpha=0.7)
+            width = 0.35
+            ax.bar(x - width/2, weights['attention'], width, label='Attention (learned)', alpha=0.7)
+            ax.bar(x + width/2, weights['combined'], width, label='Combined', alpha=0.7)
             ax.set_xlabel('Source Index')
             ax.set_ylabel('Weight')
-            ax.set_title('Interpolation Weights')
+            ax.set_title('Interpolation Weights (Attention + Physics Refinement)')
             ax.legend()
             st.pyplot(fig_w)
         
