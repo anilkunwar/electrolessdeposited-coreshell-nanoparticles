@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -1043,4 +1042,4 @@ else:
         st.warning("⚠️ No simulation files found. Please place your `.pkl` files in the `numerical_solutions/` directory and click **📥 Load Solutions** in the sidebar.")
 
 st.caption("Enhanced with corrected radial morphing, temporal-first interpolation, self-similar scaling, and 3‑tier cache.")
-```
+
