@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -18,6 +19,7 @@ FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL-TIME UNITS
 - **THERMODYNAMICALLY CONSISTENT TIME SCALING**: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY
   * Domain size L0 affects spatial resolution, NOT temporal dynamics speed
   * No artificial ω speedup factor that violates phase-field kinetics
+- **GROUND TRUTH COMPARISON**: Added dashboard to compare interpolation against loaded PKL files with error metrics.
 """
 import streamlit as st
 import numpy as np
@@ -48,7 +50,8 @@ from scipy.interpolate import interp1d, CubicSpline
 from dataclasses import dataclass, field
 from functools import lru_cache
 import hashlib
-# NEW IMPORTS FOR GROUND TRUTH COMPARISON
+
+# New imports for error metrics
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from skimage.metrics import structural_similarity as ssim
 
@@ -113,6 +116,51 @@ MATERIAL_COLORSCALE_PLOTLY = [
 ]
 
 # =============================================
+# ERROR METRICS HELPER
+# =============================================
+def calculate_error_metrics(ground_truth: np.ndarray, prediction: np.ndarray) -> Dict[str, float]:
+    """
+    Computes pixel-wise error metrics between ground truth and prediction.
+    Handles spatial dimension mismatch by raising an error (caller must resize).
+    """
+    if ground_truth.shape != prediction.shape:
+        raise ValueError(f"Shape mismatch: GT {ground_truth.shape} vs Pred {prediction.shape}")
+
+    # Flatten for MSE/MAE
+    gt_flat = ground_truth.flatten()
+    pred_flat = prediction.flatten()
+
+    mse = mean_squared_error(gt_flat, pred_flat)
+    mae = mean_absolute_error(gt_flat, pred_flat)
+    max_err = np.max(np.abs(ground_truth - prediction))
+
+    # SSIM calculation
+    # Determine data range. If both are constant (unlikely), default to 1.0
+    data_range = ground_truth.max() - ground_truth.min()
+    if data_range < 1e-6:
+        data_range = prediction.max() - prediction.min()
+    if data_range < 1e-6:
+        data_range = 1.0
+
+    try:
+        # Use win_size based on smaller dimension to avoid errors on small images
+        win_size = min(7, ground_truth.shape[0] // 4, ground_truth.shape[1] // 4)
+        if win_size % 2 == 0: win_size -= 1
+        if win_size < 3: win_size = 3
+        
+        ssim_val = ssim(ground_truth, prediction, data_range=data_range, win_size=win_size)
+    except Exception as e:
+        st.warning(f"SSIM calculation failed ({e}). Returning NaN.")
+        ssim_val = np.nan
+
+    return {
+        "MSE": mse,
+        "MAE": mae,
+        "Max Error": max_err,
+        "SSIM": ssim_val
+    }
+
+# =============================================
 # DEPOSITION PARAMETERS (normalisation)
 # =============================================
 class DepositionParameters:
@@ -145,10 +193,6 @@ class DepositionParameters:
             return 10**log_val
         else:
             return norm_value * (high - low) + low
-
-    # =========================================================
-    # REMOVED: compute_dynamics_speed - THERMODYNAMICALLY INCONSISTENT
-    # =========================================================
 
 # =============================================
 # DEPOSITION PHYSICS (derived quantities)
@@ -945,9 +989,9 @@ class CoreShellInterpolator:
                 t_vals = np.array([th['t_nd'] for th in thick_hist])
                 th_vals = np.array([th['th_nm'] for th in thick_hist])
                 t_max = t_vals[-1] if len(t_vals) > 0 else 1.0
-                t_norm = t_vals / t_max
+                t_norm_arr = t_vals / t_max
                 source_thickness.append({
-                    't_norm': t_norm,
+                    't_norm': t_norm_arr,
                     'th_nm': th_vals,
                     't_max': t_max
                 })
@@ -1343,30 +1387,6 @@ class ResultsManager:
         else: return str(obj)
 
 # =============================================
-# ERROR COMPUTATION FUNCTION (NEW FOR GROUND TRUTH COMPARISON)
-# =============================================
-def compute_errors(gt_field, interp_field):
-    """
-    Compute quantitative error metrics between ground truth and interpolated fields.
-    """
-    flat_gt = gt_field.flatten()
-    flat_interp = interp_field.flatten()
-    
-    mse = mean_squared_error(flat_gt, flat_interp)
-    mae = mean_absolute_error(flat_gt, flat_interp)
-    max_err = np.max(np.abs(gt_field - interp_field))
-    
-    # SSIM requires same shape and range
-    data_range = max(gt_field.max() - gt_field.min(), interp_field.max() - interp_field.min())
-    # Handle constant fields
-    if data_range == 0:
-        ssim_val = 1.0 if np.allclose(gt_field, interp_field) else 0.0
-    else:
-        ssim_val = ssim(gt_field, interp_field, data_range=data_range)
-    
-    return {'MSE': mse, 'MAE': mae, 'Max Error': max_err, 'SSIM': ssim_val}
-
-# =============================================
 # MAIN STREAMLIT APP
 # =============================================
 def main():
@@ -1554,12 +1574,10 @@ def main():
         with col_info1:
             st.metric("Current Thickness", f"{current_thickness:.3f} nm")
         with col_info2:
-            # REMOVED: Dynamics speed ω - THERMODYNAMICALLY INCONSISTENT
             st.empty()
         with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
 
-        # MODIFIED: Added new tab for Ground Truth Comparison
         tabs = st.tabs(["📊 Field Visualization", "📈 Thickness Evolution",
                        "🎬 Animation", "🧪 Derived Quantities", "⚖️ Weights", 
                        "💾 Export", "🔍 Ground Truth Comparison"])
@@ -1853,143 +1871,173 @@ def main():
                                  f"temporal_sequence_{target_hash}.zip",
                                  "application/zip")
 
+        # =============================================
         # NEW TAB: Ground Truth Comparison
+        # =============================================
         with tabs[6]:
             st.markdown('<h2 class="section-header">🔍 Ground Truth Comparison</h2>', unsafe_allow_html=True)
-            
+            st.info("Compare the interpolated result against a selected Ground Truth PKL file at the current time step.")
+
             if not st.session_state.solutions:
-                st.warning("No solutions loaded for ground truth comparison. Load some PKL files first.")
+                st.warning("No solutions loaded. Please load PKL files first to enable comparison.")
             else:
-                # Filter and select ground truth based on closeness to target parameters
-                target = mgr.target_params  # Current target params
-                close_solutions = []
-                for idx, sol in enumerate(st.session_state.solutions):
-                    sol_params = sol['params']
-                    # Normalize and compute distance (similar to interpolator's kernel)
-                    deltas = [
-                        abs(DepositionParameters.normalize(target.get('fc', 0.18), 'fc') - 
-                            DepositionParameters.normalize(sol_params.get('fc', 0.18), 'fc')),
-                        abs(DepositionParameters.normalize(target.get('rs', 0.2), 'rs') - 
-                            DepositionParameters.normalize(sol_params.get('rs', 0.2), 'rs')),
-                        abs(DepositionParameters.normalize(target.get('c_bulk', 0.5), 'c_bulk') - 
-                            DepositionParameters.normalize(sol_params.get('c_bulk', 0.5), 'c_bulk')),
-                        abs(DepositionParameters.normalize(target.get('L0_nm', 20.0), 'L0_nm') - 
-                            DepositionParameters.normalize(sol_params.get('L0_nm', 20.0), 'L0_nm'))
-                    ]
-                    dist = np.sqrt(sum(d**2 for d in deltas))  # Euclidean in norm space
-                    if dist < 0.1:  # Threshold for "close" (adjustable)
-                        close_solutions.append((idx, dist, sol))
+                # Filter solutions suitable for comparison (optional, but good for UX)
+                # We allow all, but we can sort by parameter closeness if desired.
+                # For simplicity, we list all loaded files.
                 
-                if not close_solutions:
-                    st.info("No close-matching ground truth found. Showing all solutions.")
-                    close_solutions = [(idx, 0, sol) for idx, sol in enumerate(st.session_state.solutions)]
+                gt_options = [f"{i}: {sol['metadata']['filename']}" for i, sol in enumerate(st.session_state.solutions)]
+                selected_gt_idx = st.selectbox("Select Ground Truth File", range(len(st.session_state.solutions)), format_func=lambda x: gt_options[x])
                 
-                # Sort by closeness
-                close_solutions.sort(key=lambda x: x[1])
+                gt_solution = st.session_state.solutions[selected_gt_idx]
                 
-                # Display selection
-                gt_options = [f"Source {s[0]} (dist={s[1]:.3f}): fc={s[2]['params'].get('fc',0):.3f}, rs={s[2]['params'].get('rs',0):.3f}, c={s[2]['params'].get('c_bulk',0):.2f}, L0={s[2]['params'].get('L0_nm',20):.1f} nm"
-                              for s in close_solutions]
-                selected_gt_label = st.selectbox("Select Ground Truth Simulation", gt_options)
+                st.markdown(f"**Selected File:** `{gt_solution['metadata']['filename']}`")
+                st.markdown(f"**Parameters:** fc={gt_solution['params'].get('fc', 0):.3f}, rs={gt_solution['params'].get('rs', 0):.3f}, c={gt_solution['params'].get('c_bulk', 0):.2f}, L0={gt_solution['params'].get('L0_nm', 0):.1f}nm")
+
+                # Get interpolated fields at current time
+                interp_fields = mgr.get_fields(current_time_norm, use_interpolation=True)
+                interp_shape = interp_fields['phi'].shape
+
+                # Retrieve Ground Truth fields at the same normalized time
+                # Need to interpolate within the GT history if exact time doesn't exist
+                gt_history = gt_solution.get('history', [])
                 
-                if selected_gt_label:
-                    gt_idx = int(selected_gt_label.split("Source ")[1].split(" ")[0])
-                    gt_sol = st.session_state.solutions[gt_idx]
-                    gt_params = gt_sol['params']
+                if not gt_history:
+                    st.error("Selected ground truth file has no history/snapshots.")
+                else:
+                    # Find t_max for GT
+                    gt_t_max = gt_solution.get('thickness_history', [{}])[-1].get('t_nd', 1.0)
+                    if gt_t_max == 0: gt_t_max = 1.0
                     
-                    # Recompute interpolation with GT params
-                    with st.spinner("Computing interpolation at ground truth parameters..."):
-                        interp_res = st.session_state.interpolator.interpolate_fields(
-                            st.session_state.solutions, gt_params, target_shape=(256,256),
-                            n_time_points=100, time_norm=st.session_state.current_time
-                        )
+                    target_t_gt = current_time_norm * gt_t_max
                     
-                    if interp_res:
-                        # Get GT fields at current time
-                        # Create a temporary TemporalFieldManager for the GT simulation
-                        gt_mgr = TemporalFieldManager(st.session_state.interpolator, [gt_sol], gt_params,
-                                                      n_key_frames=5, lru_size=1)
-                        gt_fields = gt_mgr.get_fields(st.session_state.current_time)
-                        
-                        # Ensure shapes match (resize if needed)
-                        target_shape = interp_res['shape']
-                        for key in gt_fields:
-                            if gt_fields[key].shape != target_shape:
-                                factors = (target_shape[0]/gt_fields[key].shape[0], target_shape[1]/gt_fields[key].shape[1])
-                                gt_fields[key] = zoom(gt_fields[key], factors, order=1)
-                        
-                        # Compute material proxies
-                        interp_material = DepositionPhysics.material_proxy(interp_res['fields']['phi'], interp_res['fields']['psi'])
-                        gt_material = DepositionPhysics.material_proxy(gt_fields['phi'], gt_fields['psi'])
-                        
-                        # Fields to compare
-                        compare_fields = {
-                            'phi (shell)': ('phi', 'viridis'),
-                            'c (concentration)': ('c', 'plasma'),
-                            'psi (core)': ('psi', 'inferno'),
-                            'material proxy': ('material', 'Set1')
-                        }
-                        
-                        # For each field: side-by-side + diff + errors
-                        for field_title, (field_key, cmap_choice) in compare_fields.items():
-                            st.subheader(field_title)
-                            
-                            if field_key == 'material':
-                                interp_data = interp_material
-                                gt_data = gt_material
-                            else:
-                                interp_data = interp_res['fields'][field_key]
-                                gt_data = gt_fields[field_key]
-                            
-                            # Difference
-                            diff = gt_data - interp_data
-                            
-                            # Errors
-                            errors = compute_errors(gt_data, interp_data)
-                            
-                            # Display metrics
-                            col_err1, col_err2, col_err3, col_err4 = st.columns(4)
-                            col_err1.metric("MSE", f"{errors['MSE']:.4e}")
-                            col_err2.metric("MAE", f"{errors['MAE']:.4e}")
-                            col_err3.metric("Max Error", f"{errors['Max Error']:.4e}")
-                            col_err4.metric("SSIM", f"{errors['SSIM']:.3f}")
-                            
-                            # Insights
-                            if errors['SSIM'] > 0.9:
-                                strength = "Strong structural similarity – interpolation captures overall patterns well."
-                            else:
-                                strength = "Moderate similarity – some structural differences."
-                            if errors['Max Error'] > 0.1 * (gt_data.max() - gt_data.min()):
-                                weakness = "High max errors likely in interface regions or boundaries."
-                            else:
-                                weakness = "Low max errors – consistent across domain."
-                            st.info(f"**Strengths:** {strength}\n\n**Weaknesses:** {weakness}")
-                            
-                            # Plots: 3 columns
-                            col_plot1, col_plot2, col_plot3 = st.columns(3)
-                            with col_plot1:
-                                st.markdown("**Ground Truth**")
-                                fig_gt = st.session_state.visualizer.create_field_heatmap(
-                                    gt_data, "Ground Truth", cmap_name=cmap_choice, L0_nm=gt_params.get('L0_nm',20.0)
-                                )
-                                st.pyplot(fig_gt)
-                            with col_plot2:
-                                st.markdown("**Interpolated**")
-                                fig_interp = st.session_state.visualizer.create_field_heatmap(
-                                    interp_data, "Interpolated", cmap_name=cmap_choice, L0_nm=gt_params.get('L0_nm',20.0)
-                                )
-                                st.pyplot(fig_interp)
-                            with col_plot3:
-                                st.markdown("**Difference (GT - Interp)**")
-                                fig_diff = st.session_state.visualizer.create_field_heatmap(
-                                    diff, "Difference", cmap_name='RdBu_r', L0_nm=gt_params.get('L0_nm',20.0)
-                                )
-                                st.pyplot(fig_diff)
-                        
-                        # Cleanup temp GT manager
-                        del gt_mgr
+                    # Extract closest frames
+                    t_vals = np.array([s['t_nd'] for s in gt_history])
+                    
+                    if len(gt_history) == 1:
+                        snap = gt_history[0]
+                        gt_phi = snap['phi']
+                        gt_c = snap['c']
+                        gt_psi = snap['psi']
                     else:
-                        st.error("Failed to compute interpolation for comparison.")
+                        # Interpolate linearly between snapshots
+                        if target_t_gt <= t_vals[0]:
+                            snap = gt_history[0]
+                            gt_phi, gt_c, gt_psi = snap['phi'], snap['c'], snap['psi']
+                        elif target_t_gt >= t_vals[-1]:
+                            snap = gt_history[-1]
+                            gt_phi, gt_c, gt_psi = snap['phi'], snap['c'], snap['psi']
+                        else:
+                            idx = np.searchsorted(t_vals, target_t_gt) - 1
+                            idx = max(0, min(idx, len(gt_history)-2))
+                            t1, t2 = t_vals[idx], t_vals[idx+1]
+                            alpha = (target_t_gt - t1) / (t2 - t1) if t2 > t1 else 0.0
+                            
+                            s1, s2 = gt_history[idx], gt_history[idx+1]
+                            gt_phi = (1 - alpha) * s1['phi'] + alpha * s2['phi']
+                            gt_c   = (1 - alpha) * s1['c']   + alpha * s2['c']
+                            gt_psi = (1 - alpha) * s1['psi'] + alpha * s2['psi']
+
+                    # Ensure GT fields are 2D
+                    def ensure_2d(arr):
+                        if arr.ndim == 3: return arr[arr.shape[0]//2, :, :]
+                        return arr
+                    
+                    gt_phi = ensure_2d(gt_phi)
+                    gt_c = ensure_2d(gt_c)
+                    gt_psi = ensure_2d(gt_psi)
+
+                    # Resize GT fields to match Interpolation shape
+                    if gt_phi.shape != interp_shape:
+                        factors = (interp_shape[0]/gt_phi.shape[0], interp_shape[1]/gt_phi.shape[1])
+                        gt_phi = zoom(gt_phi, factors, order=1)
+                        gt_c   = zoom(gt_c,   factors, order=1)
+                        gt_psi = zoom(gt_psi, factors, order=1)
+
+                    # Compute Derived Fields for both
+                    gt_material = DepositionPhysics.material_proxy(gt_phi, gt_psi)
+                    interp_material = DepositionPhysics.material_proxy(interp_fields['phi'], interp_fields['psi'])
+
+                    # Define fields to compare
+                    comparison_set = {
+                        'Phi (Shell Phase)': {'gt': gt_phi, 'interp': interp_fields['phi'], 'cmap': 'viridis'},
+                        'Concentration (c)': {'gt': gt_c, 'interp': interp_fields['c'], 'cmap': 'plasma'},
+                        'Psi (Core Phase)': {'gt': gt_psi, 'interp': interp_fields['psi'], 'cmap': 'inferno'},
+                        'Material Proxy': {'gt': gt_material, 'interp': interp_material, 'cmap': 'Set1', 'is_material': True}
+                    }
+
+                    selected_field_name = st.selectbox("Select Field for Comparison", list(comparison_set.keys()))
+                    field_data = comparison_set[selected_field_name]
+                    
+                    gt_f = field_data['gt']
+                    interp_f = field_data['interp']
+                    field_cmap = field_data['cmap']
+                    is_mat = field_data.get('is_material', False)
+
+                    # Compute Metrics
+                    try:
+                        metrics = calculate_error_metrics(gt_f, interp_f)
+                    except ValueError as e:
+                        st.error(f"Error computing metrics: {e}")
+                        metrics = {}
+
+                    if metrics:
+                        c_m1, c_m2, c_m3, c_m4 = st.columns(4)
+                        c_m1.metric("MSE", f"{metrics['MSE']:.2e}")
+                        c_m2.metric("MAE", f"{metrics['MAE']:.2e}")
+                        c_m3.metric("Max Error", f"{metrics['Max Error']:.2e}")
+                        c_m4.metric("SSIM", f"{metrics['SSIM']:.4f}")
+
+                    # Compute Difference Map
+                    diff_map = gt_f - interp_f
+                    
+                    # Determine symmetric limits for difference plot
+                    max_diff = np.max(np.abs(diff_map))
+                    if max_diff == 0: max_diff = 1.0
+
+                    # Visualizations
+                    col_v1, col_v2, col_v3 = st.columns(3)
+
+                    with col_v1:
+                        st.markdown("**Ground Truth**")
+                        fig_gt = st.session_state.visualizer.create_field_heatmap(
+                            gt_f, f"GT: {selected_field_name}",
+                            cmap_name=field_cmap, L0_nm=L0_nm,
+                            target_params=gt_solution['params'],
+                            time_real_s=target_t_gt * gt_solution['params'].get('tau0_s', 1e-4)
+                        )
+                        st.pyplot(fig_gt)
+
+                    with col_v2:
+                        st.markdown("**Interpolated**")
+                        fig_int = st.session_state.visualizer.create_field_heatmap(
+                            interp_f, f"Interp: {selected_field_name}",
+                            cmap_name=field_cmap, L0_nm=L0_nm,
+                            target_params=target,
+                            time_real_s=current_time_real
+                        )
+                        st.pyplot(fig_int)
+
+                    with col_v3:
+                        st.markdown("**Difference (GT - Interp)**")
+                        fig_diff = st.session_state.visualizer.create_field_heatmap(
+                            diff_map, "Error Map",
+                            cmap_name='RdBu', # Diverging colormap
+                            L0_nm=L0_nm,
+                            vmin=-max_diff, vmax=max_diff,
+                            target_params=None,
+                            colorbar_label="Difference"
+                        )
+                        st.pyplot(fig_diff)
+                    
+                    # Histogram of errors
+                    st.subheader("Error Distribution")
+                    fig_hist, ax_hist = plt.subplots(figsize=(10, 4))
+                    ax_hist.hist(diff_map.flatten(), bins=50, color='gray', alpha=0.7)
+                    ax_hist.axvline(0, color='red', linestyle='--')
+                    ax_hist.set_title(f"Distribution of Errors (Mean: {np.mean(diff_map):.2e})")
+                    ax_hist.set_xlabel("Pixel Value Difference")
+                    ax_hist.set_ylabel("Frequency")
+                    st.pyplot(fig_hist)
 
     else:
         st.info("""
@@ -2003,3 +2051,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
