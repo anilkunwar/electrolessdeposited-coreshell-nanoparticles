@@ -126,7 +126,7 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi22-streamlit-red)](https://electroless-deposition-fields-interpolation22.streamlit.app/)  (weight analysis with Sankey diagram different than r21)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi23-streamlit-red)](https://electroless-deposition-fields-interpolation23.streamlit.app/) (more advanced r21 version)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi23-streamlit-red)](https://electroless-deposition-fields-interpolation23.streamlit.app/) (more advanced r21 version, with Sankey diagram)
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi24-streamlit-red)](https://electroless-deposition-fields-interpolation24.streamlit.app/) (r21 and r22 integrated with Sankey diagram)
 
