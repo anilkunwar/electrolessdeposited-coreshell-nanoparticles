@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 Transformer-Inspired Interpolation for Electroless Ag Shell Deposition on Cu Core
-FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL-TIME UNITS
-ENHANCEMENTS IN THIS VERSION:
-1. Optional Categorical Gating - Configurable for homogeneous datasets
-2. Tiered L0 Preference Gradient - Soft gating with 5/15/30/50nm tiers
-3. Physical Coordinate Alignment - Fair comparison across different L0 domains
-4. Radial Profile Comparison - L0-invariant metric for core-shell systems
-5. Weight Diagnostics - Warn users when interpolation is unreliable
-6. Nearest Neighbor Fallback - Honest results when no compatible sources exist
-7. Shape-Aware Soft Refinement - Adds constructive minor weights based on radial profile similarity
-8. SYNTAX ERROR FIXED - Line 814 'thickness_history_nm' check completed with 'in data:'
-9. WEIGHT VISUALIZATION - Advanced diagrams (Sankey, chord, radar, breakdown) added
+FULL TEMPORAL SUPPORT + HYBRID WEIGHT QUANTIFICATION + PHYSICS-AWARE INTERPOLATION
+
+KEY ENHANCEMENTS IN THIS VERSION:
+1. HYBRID WEIGHT COMPUTATION - Combines individual parameter weights + attention + physics refinement
+2. WEIGHT VISUALIZATION - Sankey, Chord, Radar, and Breakdown diagrams for weight analysis
+3. PROPORTIONAL SOURCE WEIGHTING - Sources weighted by hybrid weight magnitude
+4. INDIVIDUAL PARAMETER WEIGHTS - L0, fc, rs, c_bulk each get separate weight components
+5. PHYSICS REFINEMENT FACTORS - Alpha (L0), Beta (params), Gamma (shape) refinement
+6. TRANSFORMER ATTENTION - Learned attention scores combined with physics priors
+7. WEIGHT DIAGNOSTICS - Entropy, max weight, effective sources for uncertainty quantification
+8. BUG FIX - Fixed UnboundLocalError in _get_fields_at_time by ensuring phi, c, psi always initialized
 """
 import streamlit as st
 import numpy as np
@@ -45,7 +45,7 @@ from functools import lru_cache
 import hashlib
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from skimage.metrics import structural_similarity as ssim
-from math import pi, cos, sin  # <-- ADDED for chord diagram
+from math import cos, sin, pi
 warnings.filterwarnings('ignore')
 
 # =============================================
@@ -84,12 +84,12 @@ COLORMAP_OPTIONS = {
 }
 
 # =============================================
-# EXACT PHASE-FIELD MATERIAL COLORS (matching phase field generator)
+# EXACT PHASE-FIELD MATERIAL COLORS
 # =============================================
 MATERIAL_COLORS_EXACT = {
-    'electrolyte': (0.894, 0.102, 0.110, 1.0),  # Red
-    'Ag': (1.000, 0.498, 0.000, 1.0),  # Orange
-    'Cu': (0.600, 0.600, 0.600, 1.0)  # Gray
+    'electrolyte': (0.894, 0.102, 0.110, 1.0),
+    'Ag': (1.000, 0.498, 0.000, 1.0),
+    'Cu': (0.600, 0.600, 0.600, 1.0)
 }
 
 MATERIAL_COLORMAP_MATPLOTLIB = ListedColormap([
@@ -110,7 +110,7 @@ MATERIAL_COLORSCALE_PLOTLY = [
 ]
 
 # =============================================
-# DEPOSITION PARAMETERS (normalisation)
+# DEPOSITION PARAMETERS
 # =============================================
 class DepositionParameters:
     """Normalises and stores core‑shell deposition parameters."""
@@ -145,7 +145,7 @@ class DepositionParameters:
             return norm_value * (high - low) + low
 
 # =============================================
-# DEPOSITION PHYSICS (derived quantities)
+# DEPOSITION PHYSICS
 # =============================================
 class DepositionPhysics:
     """Computes derived quantities for core‑shell deposition."""
@@ -197,30 +197,14 @@ class DepositionPhysics:
         }
     
     @staticmethod
-    def compute_growth_rate(thickness_history: List[Dict], time_idx: int) -> float:
-        if time_idx == 0 or time_idx >= len(thickness_history):
-            return 0.0
-        dt = thickness_history[time_idx]['t_nd'] - thickness_history[time_idx-1]['t_nd']
-        if dt == 0:
-            return 0.0
-        dth = thickness_history[time_idx]['th_nm'] - thickness_history[time_idx-1]['th_nm']
-        return dth / dt if dt > 0 else 0.0
-    
-    @staticmethod
     def compute_radial_profile(field, L0, center_frac=0.5, n_bins=100):
-        """
-        Compute radially-averaged profile for centered core-shell system.
-        L0-invariant comparison metric.
-        """
         H, W = field.shape
         x = np.linspace(0, L0, W)
         y = np.linspace(0, L0, H)
         X, Y = np.meshgrid(x, y, indexing='xy')
-        # Distance from center
         center_x, center_y = center_frac * L0, center_frac * L0
         R = np.sqrt((X - center_x)**2 + (Y - center_y)**2)
-        # Bin by radius
-        r_max = np.sqrt(2) * L0 / 2  # Corner distance
+        r_max = np.sqrt(2) * L0 / 2
         r_edges = np.linspace(0, r_max, n_bins + 1)
         r_centers = (r_edges[:-1] + r_edges[1:]) / 2
         profile = np.array([
@@ -229,6 +213,446 @@ class DepositionPhysics:
             for i in range(n_bins)
         ])
         return r_centers, profile
+
+# =============================================
+# HYBRID WEIGHT VISUALIZER
+# =============================================
+class HybridWeightVisualizer:
+    """
+    Comprehensive weight visualization system for core-shell interpolation.
+    Creates Sankey, Chord, Radar, and Breakdown diagrams for weight analysis.
+    """
+    
+    def __init__(self):
+        self.color_scheme = {
+            'L0': '#FF6B6B',
+            'fc': '#4ECDC4',
+            'rs': '#95E1D3',
+            'c_bulk': '#FFD93D',
+            'Attention': '#9D4EDD',
+            'Spatial': '#36A2EB',
+            'Combined': '#9966FF',
+            'Query': '#FF6B6B'
+        }
+        
+        self.font_config = {
+            'family': 'Arial, sans-serif',
+            'size_title': 24,
+            'size_labels': 18,
+            'size_ticks': 14,
+            'color': '#2C3E50',
+            'weight': 'bold'
+        }
+    
+    def get_colormap(self, cmap_name, n_colors=10):
+        try:
+            cmap = plt.get_cmap(cmap_name)
+            return [f'rgb({int(r*255)}, {int(g*255)}, {int(b*255)})'
+                    for r, g, b, _ in [cmap(i/n_colors) for i in range(n_colors)]]
+        except:
+            cmap = plt.get_cmap('viridis')
+            return [f'rgb({int(r*255)}, {int(g*255)}, {int(b*255)})'
+                    for r, g, b, _ in [cmap(i/n_colors) for i in range(n_colors)]]
+    
+    def create_enhanced_sankey_diagram(self, sources_data, target_params, param_sigmas):
+        labels = ['Target']
+        
+        for source in sources_data:
+            idx = source['source_index']
+            l0 = source['L0_nm']
+            fc = source['fc']
+            labels.append(f"S{idx}\nL0={l0:.0f}nm\nfc={fc:.2f}")
+        
+        component_start = len(labels)
+        labels.extend(['L0 Weight', 'fc Weight', 'rs Weight', 'c_bulk Weight', 
+                      'Attention', 'Physics Refinement', 'Combined Weight'])
+        
+        source_indices = []
+        target_indices = []
+        values = []
+        colors = []
+        
+        color_palette = self.get_colormap('viridis', len(sources_data) + 7)
+        
+        for i, source in enumerate(sources_data):
+            source_idx = i + 1
+            source_color = color_palette[i % len(color_palette)]
+            
+            source_indices.append(source_idx)
+            target_indices.append(component_start)
+            values.append(source['l0_weight'] * 100)
+            colors.append(f'rgba(255, 107, 107, 0.8)')
+            
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 1)
+            values.append(source['fc_weight'] * 100)
+            colors.append(f'rgba(78, 205, 196, 0.8)')
+            
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 2)
+            values.append(source['rs_weight'] * 100)
+            colors.append(f'rgba(149, 225, 211, 0.8)')
+            
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 3)
+            values.append(source['c_bulk_weight'] * 100)
+            colors.append(f'rgba(255, 217, 61, 0.8)')
+            
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 4)
+            values.append(source['attention_weight'] * 100)
+            colors.append(f'rgba(157, 78, 221, 0.8)')
+            
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 5)
+            values.append(source['physics_refinement'] * 100)
+            colors.append(f'rgba(54, 162, 235, 0.8)')
+            
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 6)
+            values.append(source['combined_weight'] * 100)
+            colors.append(f'rgba(153, 102, 255, 0.8)')
+        
+        for comp_idx in range(7):
+            source_indices.append(component_start + comp_idx)
+            target_indices.append(0)
+            comp_value = sum(v for s, t, v in zip(source_indices, target_indices, values)
+                           if t == component_start + comp_idx)
+            values.append(comp_value * 0.5)
+            colors.append(f'rgba(153, 102, 255, 0.6)')
+        
+        fig = go.Figure(data=[go.Sankey(
+            node=dict(
+                pad=25,
+                thickness=30,
+                line=dict(color="black", width=2),
+                label=labels,
+                color=["#FF6B6B"] + 
+                      [color_palette[i % len(color_palette)] for i in range(len(sources_data))] + 
+                      ["#FF6B6B", "#4ECDC4", "#95E1D3", "#FFD93D", "#9D4EDD", "#36A2EB", "#9966FF"],
+                hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<extra></extra>'
+            ),
+            link=dict(
+                source=source_indices,
+                target=target_indices,
+                value=values,
+                color=colors,
+                hovertemplate='<b>%{source.label}</b> → <b>%{target.label}</b><br>Flow: %{value:.2f}<extra></extra>',
+                line=dict(width=0.5, color='rgba(255,255,255,0.3)')
+            ),
+            hoverinfo='all'
+        )])
+        
+        fig.update_layout(
+            title=dict(
+                text=f'<b>SANKEY DIAGRAM: HYBRID WEIGHT COMPONENT FLOW</b><br>' + 
+                     f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
+                font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5, y=0.95, xanchor='center', yanchor='top'
+            ),
+            font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
+                     color=self.font_config['color']),
+            width=1400,
+            height=900,
+            plot_bgcolor='rgba(240, 240, 245, 0.9)',
+            paper_bgcolor='white',
+            margin=dict(t=100, l=50, r=50, b=50),
+            hoverlabel=dict(
+                font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
+                         color='white'),
+                bgcolor='rgba(44, 62, 80, 0.9)',
+                bordercolor='white'
+            )
+        )
+        
+        return fig
+    
+    def create_enhanced_chord_diagram(self, sources_data, target_params):
+        n_sources = len(sources_data)
+        center_x, center_y = 0, 0
+        radius = 1.5
+        
+        source_positions = []
+        for i in range(n_sources):
+            angle = 2 * pi * i / n_sources
+            x = center_x + radius * cos(angle)
+            y = center_y + radius * sin(angle)
+            source_positions.append((x, y))
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=[center_x], y=[center_y],
+            mode='markers+text',
+            name='Target',
+            marker=dict(size=50, color=self.color_scheme['Query'],
+                       symbol='star', line=dict(width=3, color='white')),
+            text=[f'Target\nL0={target_params.get("L0_nm", 20):.0f}nm\nfc={target_params.get("fc", 0.18):.2f}'],
+            textposition="middle center",
+            textfont=dict(size=16, color='white', weight='bold'),
+            hoverinfo='text'
+        ))
+        
+        source_x = []
+        source_y = []
+        source_colors = []
+        source_sizes = []
+        
+        for i, source in enumerate(sources_data):
+            x, y = source_positions[i]
+            source_x.append(x)
+            source_y.append(y)
+            node_size = 20 + source['combined_weight'] * 60
+            source_sizes.append(node_size)
+            source_colors.append(self.color_scheme['Combined'])
+        
+        fig.add_trace(go.Scatter(
+            x=source_x, y=source_y,
+            mode='markers+text',
+            name='Sources',
+            marker=dict(size=source_sizes, color=source_colors,
+                       line=dict(width=2, color='white')),
+            text=[f"S{i}" for i in range(n_sources)],
+            textposition="top center",
+            textfont=dict(size=12, color='white', weight='bold'),
+            hoverinfo='text'
+        ))
+        
+        for i, source in enumerate(sources_data):
+            sx, sy = source_positions[i]
+            cx = (sx + center_x) / 2
+            cy = (sy + center_y) / 2
+            dx = center_x - sx
+            dy = center_y - sy
+            length = np.sqrt(dx*dx + dy*dy)
+            if length > 0:
+                nx = -dy / length * 0.3
+                ny = dx / length * 0.3
+            else:
+                nx, ny = 0, 0
+            
+            t = np.linspace(0, 1, 50)
+            
+            combined_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx - nx*1.0) + t**2 * center_x
+            combined_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy - ny*1.0) + t**2 * center_y
+            combined_width = max(2, source['combined_weight'] * 20)
+            
+            fig.add_trace(go.Scatter(
+                x=combined_curve_x, y=combined_curve_y,
+                mode='lines',
+                name=f'Source {i} - Combined',
+                line=dict(width=combined_width, color='rgba(153, 102, 255, 0.8)', dash='solid'),
+                hoverinfo='text',
+                hovertext=f"Combined Weight: {source['combined_weight']:.3f}",
+                showlegend=False
+            ))
+        
+        fig.update_layout(
+            title=dict(
+                text=f'<b>ENHANCED CHORD DIAGRAM: HYBRID WEIGHT VISUALIZATION</b><br>' + 
+                     f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
+                font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5, y=0.95
+            ),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
+                       font=dict(size=self.font_config['size_labels'], family=self.font_config['family']),
+                       bgcolor='rgba(255, 255, 255, 0.8)', bordercolor='black', borderwidth=1),
+            width=1200,
+            height=1000,
+            plot_bgcolor='rgba(240, 240, 245, 0.9)',
+            paper_bgcolor='white',
+            hovermode='closest',
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-2.5, 2.5]),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-2.5, 2.5])
+        )
+        
+        return fig
+    
+    def create_hierarchical_radar_chart(self, sources_data, target_params, param_sigmas):
+        fig = go.Figure()
+        
+        angles = [s['source_index'] * 60 for s in sources_data]
+        
+        l0_weights = [s['l0_weight'] for s in sources_data]
+        fc_weights = [s['fc_weight'] for s in sources_data]
+        rs_weights = [s['rs_weight'] for s in sources_data]
+        c_bulk_weights = [s['c_bulk_weight'] for s in sources_data]
+        attention_weights = [s['attention_weight'] for s in sources_data]
+        combined_weights = [s['combined_weight'] for s in sources_data]
+        
+        max_weight = max(max(l0_weights), max(fc_weights), max(rs_weights), 
+                        max(c_bulk_weights), max(attention_weights), max(combined_weights), 1e-6)
+        
+        l0_norm = [w/max_weight for w in l0_weights]
+        fc_norm = [w/max_weight for w in fc_weights]
+        rs_norm = [w/max_weight for w in rs_weights]
+        c_bulk_norm = [w/max_weight for w in c_bulk_weights]
+        attention_norm = [w/max_weight for w in attention_weights]
+        combined_norm = [w/max_weight for w in combined_weights]
+        
+        fig.add_trace(go.Scatterpolar(
+            r=l0_norm, theta=angles, mode='lines+markers',
+            name='L0 Weight', line=dict(color=self.color_scheme['L0'], width=3, dash='dash'),
+            marker=dict(size=10, color=self.color_scheme['L0']),
+            hoverinfo='text',
+            text=[f'L0 Weight: {w:.3f}' for w in l0_weights]
+        ))
+        
+        fig.add_trace(go.Scatterpolar(
+            r=fc_norm, theta=angles, mode='lines+markers',
+            name='fc Weight', line=dict(color=self.color_scheme['fc'], width=3, dash='dot'),
+            marker=dict(size=10, color=self.color_scheme['fc']),
+            hoverinfo='text',
+            text=[f'fc Weight: {w:.3f}' for w in fc_weights]
+        ))
+        
+        fig.add_trace(go.Scatterpolar(
+            r=combined_norm, theta=angles, mode='lines+markers',
+            name='Combined Weight', line=dict(color=self.color_scheme['Combined'], width=4),
+            marker=dict(size=12, color=self.color_scheme['Combined']),
+            hoverinfo='text',
+            text=[f'Combined: {w:.3f}' for w in combined_weights]
+        ))
+        
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 1.1],
+                               tickfont=dict(size=14, family=self.font_config['family']),
+                               title=dict(text='Normalized Weight',
+                                         font=dict(size=16, family=self.font_config['family'], weight='bold'))),
+                angularaxis=dict(direction='clockwise', rotation=90,
+                                tickfont=dict(size=14, family=self.font_config['family'])),
+                bgcolor='rgba(240, 240, 245, 0.5)'
+            ),
+            title=dict(
+                text=f'<b>HIERARCHICAL RADAR CHART</b><br>Target: L0={target_params.get("L0_nm", 20):.0f}nm',
+                font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5
+            ),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
+                       font=dict(size=self.font_config['size_labels'], family=self.font_config['family'])),
+            width=1200,
+            height=900,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            hovermode='closest'
+        )
+        
+        return fig
+    
+    def create_weight_formula_breakdown(self, sources_data, target_params, param_sigmas):
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                '<b>Weight Component Breakdown</b>',
+                '<b>Cumulative Weight Distribution</b>',
+                '<b>Parameter Weight Analysis</b>',
+                '<b>Hybrid Weight Distribution</b>'
+            ),
+            vertical_spacing=0.15,
+            horizontal_spacing=0.1
+        )
+        
+        sources_data = sorted(sources_data, key=lambda x: x['source_index'])
+        source_indices = [s['source_index'] for s in sources_data]
+        
+        l0_values = [s['l0_weight'] for s in sources_data]
+        fc_values = [s['fc_weight'] for s in sources_data]
+        rs_values = [s['rs_weight'] for s in sources_data]
+        c_bulk_values = [s['c_bulk_weight'] for s in sources_data]
+        attention_values = [s['attention_weight'] for s in sources_data]
+        combined_values = [s['combined_weight'] for s in sources_data]
+        
+        fig.add_trace(go.Bar(
+            x=source_indices, y=l0_values, name='L0 Weight',
+            marker_color=self.color_scheme['L0'],
+            text=[f'{v:.3f}' for v in l0_values], textposition='outside', textfont=dict(size=10)
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Bar(
+            x=source_indices, y=fc_values, name='fc Weight',
+            marker_color=self.color_scheme['fc'],
+            text=[f'{v:.3f}' for v in fc_values], textposition='outside', textfont=dict(size=10)
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Bar(
+            x=source_indices, y=attention_values, name='Attention',
+            marker_color=self.color_scheme['Attention'],
+            text=[f'{v:.3f}' for v in attention_values], textposition='outside', textfont=dict(size=10)
+        ), row=1, col=1)
+        
+        sorted_weights = np.sort(combined_values)[::-1]
+        cumulative = np.cumsum(sorted_weights) / np.sum(sorted_weights) if np.sum(sorted_weights) > 0 else np.zeros_like(sorted_weights)
+        x_vals = np.arange(1, len(cumulative) + 1)
+        
+        fig.add_trace(go.Scatter(
+            x=x_vals, y=cumulative, mode='lines+markers', name='Cumulative Weight',
+            line=dict(color=self.color_scheme['Combined'], width=4), marker=dict(size=8),
+            fill='tozeroy', fillcolor='rgba(153, 102, 255, 0.2)'
+        ), row=1, col=2)
+        
+        if len(cumulative) > 0 and np.sum(sorted_weights) > 0:
+            threshold_idx = np.where(cumulative >= 0.9)[0]
+            if len(threshold_idx) > 0:
+                fig.add_hline(y=0.9, line_dash="dash", line_color="red",
+                             annotation_text="90% threshold", row=1, col=2)
+                fig.add_vline(x=threshold_idx[0]+1, line_dash="dash", line_color="red", row=1, col=2)
+        
+        param_means = [np.mean(l0_values), np.mean(fc_values), np.mean(rs_values), np.mean(c_bulk_values)]
+        param_names = ['L0', 'fc', 'rs', 'c_bulk']
+        param_colors = [self.color_scheme['L0'], self.color_scheme['fc'], 
+                       self.color_scheme['rs'], self.color_scheme['c_bulk']]
+        
+        fig.add_trace(go.Bar(
+            x=param_names, y=param_means, name='Mean Weight by Parameter',
+            marker_color=param_colors,
+            text=[f'{v:.3f}' for v in param_means], textposition='auto'
+        ), row=2, col=1)
+        
+        fig.add_trace(go.Scatter(
+            x=source_indices, y=combined_values, mode='markers+lines',
+            name='Combined Weight',
+            line=dict(color=self.color_scheme['Combined'], width=3),
+            marker=dict(size=15, color=self.color_scheme['Combined'],
+                       symbol='circle', line=dict(width=2, color='white')),
+            text=[f"S{i}: Combined={w:.3f}" for i, w in zip(source_indices, combined_values)]
+        ), row=2, col=2)
+        
+        fig.update_layout(
+            barmode='stack',
+            title=dict(
+                text=f'<b>HYBRID WEIGHT FORMULA ANALYSIS</b><br>' + 
+                     f'wᵢ = α(L0) × β(params) × γ(shape) × Attention<br>' + 
+                     f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
+                font=dict(family=self.font_config['family'], size=20,
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5, y=0.98
+            ),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
+                       font=dict(size=12)),
+            width=1400,
+            height=1000,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            hovermode='closest'
+        )
+        
+        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Cumulative Weight", row=1, col=2, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Parameter", row=2, col=1, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Mean Weight", row=2, col=1, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Source Index", row=2, col=2, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(size=14))
+        
+        return fig
 
 # =============================================
 # MEMORY-EFFICIENT TEMPORAL CACHE SYSTEM
@@ -250,93 +674,103 @@ class TemporalCacheEntry:
 
 
 class TemporalFieldManager:
-    """
-    Three-tier temporal management system with hierarchical source filtering.
-    KEY PRINCIPLE: Normalized time t_nd ∈ [0,1] maps to real time via τ₀ ONLY.
-    Domain size L0 affects spatial resolution, NOT temporal dynamics speed.
-    """
+    """Three-tier temporal management system with hierarchical source filtering."""
     
     def __init__(self, interpolator, sources: List[Dict], target_params: Dict,
                  n_key_frames: int = 10, lru_size: int = 3,
                  require_categorical_match: bool = False):
-        self.interpolator = interpolator
-        self.target_params = target_params
-        self.n_key_frames = n_key_frames
-        self.lru_size = lru_size
-        self.require_categorical_match = require_categorical_match
-        
-        # ✅ ENHANCEMENT 1: Apply Hierarchical Hard Masking BEFORE caching
-        self.sources, self.filter_stats = interpolator.filter_sources_hierarchy(
-            sources, target_params, require_categorical_match=require_categorical_match
-        )
-        self._use_fallback = False
-        
-        # Display filtering stats to user
-        if self.filter_stats:
-            kept = self.filter_stats.get('kept', 0)
-            total = len(sources)
-            if kept < total:
-                st.info(f"🛡️ Hard Masking: {kept}/{total} sources compatible. "
-                       f"(Excluded: {self.filter_stats.get('categorical', 0)} cat, "
-                       f"{self.filter_stats.get('L0_hard', 0)} L0)")
-            if kept == 0:
-                st.warning("⚠️ No compatible sources found. Using nearest neighbor fallback.")
+        try:
+            self.interpolator = interpolator
+            self.target_params = target_params
+            self.n_key_frames = n_key_frames
+            self.lru_size = lru_size
+            self.require_categorical_match = require_categorical_match
+            
+            self.sources, self.filter_stats = interpolator.filter_sources_hierarchy(
+                sources, target_params, require_categorical_match=require_categorical_match
+            )
+            self._use_fallback = False
+            
+            if self.filter_stats:
+                kept = self.filter_stats.get('kept', 0)
+                total = len(sources)
+                if kept < total:
+                    st.info(f"🛡️ Hard Masking: {kept}/{total} sources compatible.")
+                if kept == 0:
+                    st.warning("⚠️ No compatible sources found. Using nearest neighbor fallback.")
+                    self._use_fallback = True
+                else:
+                    st.success(f"✅ All {total} sources compatible.")
+            
+            if not self.sources:
+                self.sources = sources
                 self._use_fallback = True
-            else:
-                st.success(f"✅ All {total} sources compatible.")
-        
-        if not self.sources:
-            # Fallback to original list to prevent crash, but weights will be low
-            self.sources = sources
-            self._use_fallback = True
-        
-        self.avg_tau0 = None
-        self.avg_t_max_nd = None
-        self.thickness_time: Optional[Dict] = None
-        self.weights: Optional[Dict] = None
-        self._compute_thickness_curve()
-        
-        self.key_times: np.ndarray = np.linspace(0, 1, n_key_frames)
-        self.key_frames: Dict[float, Dict[str, np.ndarray]] = {}
-        self.key_thickness: Dict[float, float] = {}
-        self.key_time_real: Dict[float, float] = {}
-        self._precompute_key_frames()
-        
-        self.lru_cache: OrderedDict[float, TemporalCacheEntry] = OrderedDict()
-        self.animation_temp_dir: Optional[str] = None
-        self.animation_frame_paths: List[str] = []
+            
+            self.avg_tau0 = None
+            self.avg_t_max_nd = None
+            self.thickness_time: Optional[Dict] = None
+            self.weights: Optional[Dict] = None
+            self._compute_thickness_curve()
+            
+            self.key_times: np.ndarray = np.linspace(0, 1, n_key_frames)
+            self.key_frames: Dict[float, Dict[str, np.ndarray]] = {}
+            self.key_thickness: Dict[float, float] = {}
+            self.key_time_real: Dict[float, float] = {}
+            self._precompute_key_frames()
+            
+            self.lru_cache: OrderedDict[float, TemporalCacheEntry] = OrderedDict()
+            self.animation_temp_dir: Optional[str] = None
+            self.animation_frame_paths: List[str] = []
+        except Exception as e:
+            st.error(f"❌ TemporalFieldManager initialization failed: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+            raise
     
     def _compute_thickness_curve(self):
-        res = self.interpolator.interpolate_fields(
-            self.sources, self.target_params, target_shape=(256, 256),
-            n_time_points=100, time_norm=None
-        )
-        if res:
-            self.thickness_time = res['derived']['thickness_time']
-            self.weights = res['weights']
-            self.avg_tau0 = res.get('avg_tau0', 1e-4)
-            self.avg_t_max_nd = res.get('avg_t_max_nd', 1.0)
-        else:
+        try:
+            res = self.interpolator.interpolate_fields(
+                self.sources, self.target_params, target_shape=(256, 256),
+                n_time_points=100, time_norm=None
+            )
+            if res:
+                self.thickness_time = res['derived']['thickness_time']
+                self.weights = res['weights']
+                self.avg_tau0 = res.get('avg_tau0', 1e-4)
+                self.avg_t_max_nd = res.get('avg_t_max_nd', 1.0)
+            else:
+                self.thickness_time = {'t_norm': [0, 1], 'th_nm': [0, 0], 't_real_s': [0, 0]}
+                self.weights = {'combined': [1.0], 'kernel': [1.0], 'attention': [0.0], 'entropy': 0.0}
+                self.avg_tau0 = 1e-4
+                self.avg_t_max_nd = 1.0
+        except Exception as e:
+            st.error(f"❌ Thickness curve computation failed: {str(e)}")
             self.thickness_time = {'t_norm': [0, 1], 'th_nm': [0, 0], 't_real_s': [0, 0]}
             self.weights = {'combined': [1.0], 'kernel': [1.0], 'attention': [0.0], 'entropy': 0.0}
             self.avg_tau0 = 1e-4
             self.avg_t_max_nd = 1.0
     
     def _precompute_key_frames(self):
-        st.info(f"Pre-computing {self.n_key_frames} key frames...")
-        progress_bar = st.progress(0)
-        for i, t in enumerate(self.key_times):
-            res = self.interpolator.interpolate_fields(
-                self.sources, self.target_params, target_shape=(256, 256),
-                n_time_points=100, time_norm=t
-            )
-            if res:
-                self.key_frames[t] = res['fields']
-                self.key_thickness[t] = res['derived']['thickness_nm']
-                self.key_time_real[t] = res.get('time_real_s', 0.0)
-            progress_bar.progress((i + 1) / self.n_key_frames)
-        progress_bar.empty()
-        st.success(f"Key frames ready. Memory: ~{self._estimate_key_frame_memory():.1f} MB")
+        try:
+            st.info(f"Pre-computing {self.n_key_frames} key frames...")
+            progress_bar = st.progress(0)
+            for i, t in enumerate(self.key_times):
+                res = self.interpolator.interpolate_fields(
+                    self.sources, self.target_params, target_shape=(256, 256),
+                    n_time_points=100, time_norm=t
+                )
+                if res:
+                    self.key_frames[t] = res['fields']
+                    self.key_thickness[t] = res['derived']['thickness_nm']
+                    self.key_time_real[t] = res.get('time_real_s', 0.0)
+                progress_bar.progress((i + 1) / self.n_key_frames)
+            progress_bar.empty()
+            st.success(f"Key frames ready. Memory: ~{self._estimate_key_frame_memory():.1f} MB")
+        except Exception as e:
+            st.error(f"❌ Key frame precomputation failed: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+            raise
     
     def _estimate_key_frame_memory(self) -> float:
         if not self.key_frames:
@@ -346,60 +780,59 @@ class TemporalFieldManager:
         return (bytes_per_frame * len(self.key_frames)) / (1024 * 1024)
     
     def get_fields(self, time_norm: float, use_interpolation: bool = True) -> Dict[str, np.ndarray]:
-        t_key = round(time_norm, 4)
-        time_real = time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
-        
-        # LRU cache check
-        if t_key in self.lru_cache:
-            entry = self.lru_cache.pop(t_key)
-            self.lru_cache[t_key] = entry
-            return entry.fields
-        
-        # Key frame check
-        if t_key in self.key_frames:
-            fields = self.key_frames[t_key]
-            self._add_to_lru(t_key, fields, self.key_thickness.get(t_key, 0.0), time_real)
-            return fields
-        
-        # Interpolate between key frames
-        if use_interpolation and self.key_frames:
-            key_times_arr = np.array(list(self.key_frames.keys()))
-            idx = np.searchsorted(key_times_arr, t_key)
+        try:
+            t_key = round(time_norm, 4)
+            time_real = time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
             
-            if idx == 0:
-                fields = self.key_frames[key_times_arr[0]]
-                self._add_to_lru(t_key, fields, self.key_thickness[key_times_arr[0]], time_real)
-                return fields
-            elif idx >= len(key_times_arr):
-                fields = self.key_frames[key_times_arr[-1]]
-                self._add_to_lru(t_key, fields, self.key_thickness[key_times_arr[-1]], time_real)
+            if t_key in self.lru_cache:
+                entry = self.lru_cache.pop(t_key)
+                self.lru_cache[t_key] = entry
+                return entry.fields
+            
+            if t_key in self.key_frames:
+                fields = self.key_frames[t_key]
+                self._add_to_lru(t_key, fields, self.key_thickness.get(t_key, 0.0), time_real)
                 return fields
             
-            t0, t1 = key_times_arr[idx-1], key_times_arr[idx]
-            alpha = (t_key - t0) / (t1 - t0) if (t1 - t0) > 0 else 0.0
-            f0, f1 = self.key_frames[t0], self.key_frames[t1]
-            th0, th1 = self.key_thickness[t0], self.key_thickness[t1]
+            if use_interpolation and self.key_frames:
+                key_times_arr = np.array(list(self.key_frames.keys()))
+                idx = np.searchsorted(key_times_arr, t_key)
+                
+                if idx == 0:
+                    fields = self.key_frames[key_times_arr[0]]
+                    self._add_to_lru(t_key, fields, self.key_thickness[key_times_arr[0]], time_real)
+                    return fields
+                elif idx >= len(key_times_arr):
+                    fields = self.key_frames[key_times_arr[-1]]
+                    self._add_to_lru(t_key, fields, self.key_thickness[key_times_arr[-1]], time_real)
+                    return fields
+                
+                t0, t1 = key_times_arr[idx-1], key_times_arr[idx]
+                alpha = (t_key - t0) / (t1 - t0) if (t1 - t0) > 0 else 0.0
+                f0, f1 = self.key_frames[t0], self.key_frames[t1]
+                th0, th1 = self.key_thickness[t0], self.key_thickness[t1]
+                
+                interp_fields = {}
+                for key in f0:
+                    interp_fields[key] = (1 - alpha) * f0[key] + alpha * f1[key]
+                interp_thickness = (1 - alpha) * th0 + alpha * th1
+                
+                self._add_to_lru(t_key, interp_fields, interp_thickness, time_real)
+                return interp_fields
             
-            interp_fields = {}
-            for key in f0:
-                interp_fields[key] = (1 - alpha) * f0[key] + alpha * f1[key]
-            interp_thickness = (1 - alpha) * th0 + alpha * th1
+            res = self.interpolator.interpolate_fields(
+                self.sources, self.target_params, target_shape=(256, 256),
+                n_time_points=100, time_norm=time_norm
+            )
+            if res:
+                self._add_to_lru(t_key, res['fields'], res['derived']['thickness_nm'], time_real)
+                return res['fields']
             
-            self._add_to_lru(t_key, interp_fields, interp_thickness, time_real)
-            return interp_fields
-        
-        # Fallback: direct interpolation
-        res = self.interpolator.interpolate_fields(
-            self.sources, self.target_params, target_shape=(256, 256),
-            n_time_points=100, time_norm=time_norm
-        )
-        if res:
-            self._add_to_lru(t_key, res['fields'], res['derived']['thickness_nm'], time_real)
-            return res['fields']
-        
-        # Last resort: nearest key frame
-        nearest_t = min(self.key_frames.keys(), key=lambda x: abs(x - t_key))
-        return self.key_frames[nearest_t]
+            nearest_t = min(self.key_frames.keys(), key=lambda x: abs(x - t_key))
+            return self.key_frames[nearest_t]
+        except Exception as e:
+            st.error(f"❌ get_fields failed at time_norm={time_norm}: {str(e)}")
+            return {'phi': np.zeros((256, 256)), 'c': np.zeros((256, 256)), 'psi': np.zeros((256, 256))}
     
     def _add_to_lru(self, time_norm: float, fields: Dict[str, np.ndarray],
                    thickness_nm: float, time_real_s: float):
@@ -546,33 +979,6 @@ class EnhancedSolutionLoader:
             params['use_edl'] = False
         elif 'EDL' in filename:
             params['use_edl'] = True
-            edl_match = re.search(r'EDL([0-9.]+)', filename)
-            if edl_match:
-                params['lambda0_edl'] = float(edl_match.group(1))
-        
-        k_match = re.search(r'_k([0-9.]+)_', filename)
-        if k_match:
-            params['k0_nd'] = float(k_match.group(1))
-        
-        M_match = re.search(r'_M([0-9.]+)_', filename)
-        if M_match:
-            params['M_nd'] = float(M_match.group(1))
-        
-        D_match = re.search(r'_D([0-9.]+)_', filename)
-        if D_match:
-            params['D_nd'] = float(D_match.group(1))
-        
-        Nx_match = re.search(r'_Nx(\d+)_', filename)
-        if Nx_match:
-            params['Nx'] = int(Nx_match.group(1))
-        
-        steps_match = re.search(r'_steps(\d+)\.', filename)
-        if steps_match:
-            params['n_steps'] = int(steps_match.group(1))
-        
-        tau_match = re.search(r'_tau0([0-9.eE+-]+)s', filename)
-        if tau_match:
-            params['tau0_s'] = float(tau_match.group(1))
         
         return params
     
@@ -628,8 +1034,7 @@ class EnhancedSolutionLoader:
                 standardized['coords_nd'] = data.get('coords_nd', None)
                 standardized['diagnostics'] = data.get('diagnostics', [])
                 
-                # ✅ SYNTAX ERROR FIX: Complete the 'in' statement with 'data:'
-                if 'thickness_history_nm' in data:
+                if 'thickness_history_nm' in 
                     thick_list = []
                     for entry in data['thickness_history_nm']:
                         if len(entry) >= 3:
@@ -665,7 +1070,6 @@ class EnhancedSolutionLoader:
                 if not standardized['params']:
                     parsed = self.parse_filename(os.path.basename(file_path))
                     standardized['params'].update(parsed)
-                    st.sidebar.info(f"Parsed parameters from filename: {os.path.basename(file_path)}")
                 
                 params = standardized['params']
                 params.setdefault('fc', params.get('core_radius_frac', 0.18))
@@ -675,9 +1079,6 @@ class EnhancedSolutionLoader:
                 params.setdefault('bc_type', params.get('bc_type', 'Neu'))
                 params.setdefault('use_edl', params.get('use_edl', False))
                 params.setdefault('mode', params.get('mode', '2D (planar)'))
-                params.setdefault('growth_model', params.get('growth_model', 'Model A'))
-                params.setdefault('alpha_nd', params.get('alpha_nd', 2.0))
-                params.setdefault('tau0_s', params.get('tau0_s', 1e-4))
                 
                 if not standardized['history']:
                     st.sidebar.warning(f"No snapshots in {os.path.basename(file_path)}")
@@ -735,7 +1136,7 @@ class PositionalEncoding(nn.Module):
 
 
 # =============================================
-# ENHANCED CORE‑SHELL INTERPOLATOR WITH TIERED L0 PREFERENCE + OPTIONAL CATEGORICAL GATING
+# ENHANCED CORE‑SHELL INTERPOLATOR WITH HYBRID WEIGHTS
 # =============================================
 class CoreShellInterpolator:
     def __init__(self, d_model=64, nhead=8, num_layers=3,
@@ -752,8 +1153,8 @@ class CoreShellInterpolator:
         
         self.temperature = temperature
         self.gating_mode = gating_mode
-        self.lambda_shape = lambda_shape      # weight for shape boost (λ)
-        self.sigma_shape = sigma_shape        # decay constant for radial MSE
+        self.lambda_shape = lambda_shape
+        self.sigma_shape = sigma_shape
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -776,23 +1177,11 @@ class CoreShellInterpolator:
         self.lambda_shape = lambda_shape
         self.sigma_shape = sigma_shape
     
-    # ✅ ENHANCEMENT 1: Hierarchical Hard Masking Method with Optional Categorical Checks
     def filter_sources_hierarchy(self, sources: List[Dict], target_params: Dict,
                               require_categorical_match: bool = False) -> Tuple[List[Dict], Dict]:
-        """
-        Hierarchical Hard Masking:
-        1. Optional: Categorical mismatch (mode, bc_type, use_edl)
-        2. Soft: L0 delta handled by preference tiers (5/15/30/50nm)
-        3. Keep: All sources passing optional categorical check
-        
-        Returns:
-            valid_sources: List of sources that pass all hard masks
-            stats: Dictionary with exclusion counts for diagnostics
-        """
         valid_sources = []
         excluded_reasons = {'categorical': 0, 'L0_hard': 0, 'kept': 0}
         
-        target_L0 = target_params.get('L0_nm', 20.0)
         target_mode = target_params.get('mode', '2D (planar)')
         target_bc = target_params.get('bc_type', 'Neu')
         target_edl = target_params.get('use_edl', False)
@@ -800,7 +1189,6 @@ class CoreShellInterpolator:
         for src in sources:
             params = src.get('params', {})
             
-            # --- TIER 1: OPTIONAL CATEGORICAL MASK ---
             if require_categorical_match:
                 if params.get('mode') != target_mode:
                     excluded_reasons['categorical'] += 1
@@ -812,12 +1200,9 @@ class CoreShellInterpolator:
                     excluded_reasons['categorical'] += 1
                     continue
             
-            # --- TIER 2: NO HARD L0 CUTOFF (All pass to soft gating) ---
-            # L0 preference is now handled by compute_alpha with tiered weights
             valid_sources.append(src)
             excluded_reasons['kept'] += 1
         
-        # --- FALLBACK: If all sources excluded, take absolute nearest neighbor ---
         if not valid_sources and sources:
             st.warning("⚠️ No sources passed filters. Using nearest neighbor fallback.")
             distances = []
@@ -830,130 +1215,11 @@ class CoreShellInterpolator:
         
         return valid_sources, excluded_reasons
     
-    def compute_composite_gates(self, source_params: List[Dict], target_params: Dict) -> List[float]:
-        """
-        Compute composite gate factors based on hierarchical gating modes.
-        Returns a list of multiplicative factors (one per source).
-        """
-        target_L0 = target_params.get('L0_nm', 20.0)
-        target_fc = target_params.get('fc', 0.18)
-        target_rs = target_params.get('rs', 0.2)
-        target_c_bulk = target_params.get('c_bulk', 0.5)
-        
-        gates = []
-        for src in source_params:
-            src_L0 = src.get('L0_nm', 20.0)
-            src_fc = src.get('fc', 0.18)
-            src_rs = src.get('rs', 0.2)
-            src_c_bulk = src.get('c_bulk', 0.5)
-            
-            delta_L0 = abs(target_L0 - src_L0)
-            delta_fc = abs(target_fc - src_fc)
-            delta_rs = abs(target_rs - src_rs)
-            delta_c_bulk = abs(target_c_bulk - src_c_bulk)
-            
-            if self.gating_mode == "No Gating":
-                gate = 1.0
-            
-            elif self.gating_mode == "Joint Multiplicative":
-                gate = 1.0
-                # L0 gate
-                if delta_L0 < 5:
-                    gate *= 0.95
-                elif delta_L0 < 10:
-                    gate *= 0.60
-                elif delta_L0 < 15:
-                    gate *= 0.40
-                elif delta_L0 < 25:
-                    gate *= 0.20
-                else:
-                    gate *= 0.05
-                # fc gate
-                if delta_fc < 0.05:
-                    gate *= 0.95
-                else:
-                    gate *= 0.60
-                # rs gate
-                if delta_rs < 0.05:
-                    gate *= 0.95
-                else:
-                    gate *= 0.60
-                # c_bulk gate (log‑sensitive)
-                if delta_c_bulk < 0.05:
-                    gate *= 0.95
-                else:
-                    gate *= 0.60
-            
-            elif self.gating_mode == "Hierarchical: L0 → fc → rs → c_bulk":
-                gate = 1.0
-                # Root L0 gate
-                if delta_L0 < 5:
-                    gate *= 0.95
-                elif delta_L0 < 10:
-                    gate *= 0.60
-                elif delta_L0 < 15:
-                    gate *= 0.40
-                elif delta_L0 < 25:
-                    gate *= 0.20
-                else:
-                    gate *= 0.05
-                # Only apply sub‑gates if L0 mismatch is not too severe
-                if gate > 0.5:
-                    if delta_fc < 0.05:
-                        gate *= 0.95
-                    else:
-                        gate *= 0.60
-                    if delta_rs < 0.05:
-                        gate *= 0.95
-                    else:
-                        gate *= 0.60
-                    if delta_c_bulk < 0.05:
-                        gate *= 0.95
-                    else:
-                        gate *= 0.60
-            
-            elif self.gating_mode == "Hierarchical-Parallel: L0 → (fc, rs, c_bulk)":
-                gate = 1.0
-                # Root L0 gate
-                if delta_L0 < 5:
-                    gate *= 0.95
-                elif delta_L0 < 10:
-                    gate *= 0.60
-                elif delta_L0 < 15:
-                    gate *= 0.40
-                elif delta_L0 < 25:
-                    gate *= 0.20
-                else:
-                    gate *= 0.05
-                # Parallel sub‑gates, independent
-                if gate > 0.5:
-                    fc_gate = 0.95 if delta_fc < 0.05 else 0.60
-                    rs_gate = 0.95 if delta_rs < 0.05 else 0.60
-                    c_gate = 0.95 if delta_c_bulk < 0.05 else 0.60
-                    gate *= fc_gate * rs_gate * c_gate
-            
-            gates.append(max(gate, 0.01))  # floor at 0.01 to avoid zero weights
-        
-        return gates
-    
-    # ========== NEW METHODS FOR TIERED L0 PREFERENCE ==========
     def compute_alpha(self, source_params: List[Dict], target_L0: float,
                      preference_tiers: Dict = None) -> np.ndarray:
-        """
-        L0-proximity factor with configurable preference tiers.
-        
-        Tiers (default):
-        - Preferred: ΔL0 ≤ 5nm → weight 0.95-1.0
-        - Acceptable: 5 < ΔL0 ≤ 15nm → weight 0.60-0.85
-        - Marginal: 15 < ΔL0 ≤ 30nm → weight 0.30-0.55
-        - Poor: 30 < ΔL0 ≤ 50nm → weight 0.10-0.25
-        - Exclude: ΔL0 > 50nm → weight 0.01-0.05
-        
-        This ensures target L0=45nm prefers source at 40nm (Δ=5nm) over 60nm (Δ=15nm).
-        """
         if preference_tiers is None:
             preference_tiers = {
-                'preferred': (5.0, 1.0),      # (max_delta, base_weight)
+                'preferred': (5.0, 1.0),
                 'acceptable': (15.0, 0.75),
                 'marginal': (30.0, 0.45),
                 'poor': (50.0, 0.15),
@@ -965,21 +1231,17 @@ class CoreShellInterpolator:
             src_L0 = src.get('L0_nm', 20.0)
             delta = abs(target_L0 - src_L0)
             
-            # Piecewise preference function with linear interpolation between tiers
             if delta <= preference_tiers['preferred'][0]:
                 weight = preference_tiers['preferred'][1]
             elif delta <= preference_tiers['acceptable'][0]:
-                # Linear interpolation between preferred and acceptable
                 t = (delta - 5.0) / (15.0 - 5.0)
                 weight = preference_tiers['preferred'][1] - t * (
                     preference_tiers['preferred'][1] - preference_tiers['acceptable'][1])
             elif delta <= preference_tiers['marginal'][0]:
-                # Linear interpolation between acceptable and marginal
                 t = (delta - 15.0) / (30.0 - 15.0)
                 weight = preference_tiers['acceptable'][1] - t * (
                     preference_tiers['acceptable'][1] - preference_tiers['marginal'][1])
             elif delta <= preference_tiers['poor'][0]:
-                # Linear interpolation between marginal and poor
                 t = (delta - 30.0) / (50.0 - 30.0)
                 weight = preference_tiers['marginal'][1] - t * (
                     preference_tiers['marginal'][1] - preference_tiers['poor'][1])
@@ -990,98 +1252,64 @@ class CoreShellInterpolator:
         
         return np.array(alphas)
     
-    def compute_alpha_hybrid(self, source_params: List[Dict], target_L0: float,
-                            sigma_base: float = 8.0) -> np.ndarray:
-        """
-        Hybrid: Gaussian decay modulated by preference tiers.
-        Combines smooth Gaussian with tiered physical intuition.
-        """
-        alphas = []
-        for src in source_params:
-            delta = abs(target_L0 - src.get('L0_nm', 20.0))
-            # Base Gaussian
-            gaussian_weight = np.exp(-0.5 * (delta / sigma_base) ** 2)
-            # Tier multiplier
-            if delta <= 5:
-                tier_mult = 1.0
-            elif delta <= 15:
-                tier_mult = 0.85
-            elif delta <= 30:
-                tier_mult = 0.55
-            elif delta <= 50:
-                tier_mult = 0.25
-            else:
-                tier_mult = 0.05
-            alphas.append(gaussian_weight * tier_mult)
-        return np.array(alphas)
-    
-    def compute_beta(self, source_params: List[Dict], target_params: Dict) -> np.ndarray:
-        """
-        Parameter closeness factor for fc, rs, c_bulk only.
-        Uses weighted Gaussian with fixed weights (fc:2.0, rs:1.5, c_bulk:3.0)
-        and the existing kernel sigmas (normalized).
-        """
+    def compute_beta(self, source_params: List[Dict], target_params: Dict) -> Tuple[np.ndarray, Dict]:
         weights = {'fc': 2.0, 'rs': 1.5, 'c_bulk': 3.0}
         betas = []
+        individual_weights = {'fc': [], 'rs': [], 'c_bulk': []}
+        
         for src in source_params:
             sq_sum = 0.0
+            src_indiv_weights = {}
+            
             for i, (pname, w) in enumerate(weights.items()):
                 norm_src = DepositionParameters.normalize(src.get(pname, 0.5), pname)
                 norm_tar = DepositionParameters.normalize(target_params.get(pname, 0.5), pname)
                 diff = norm_src - norm_tar
-                # use the corresponding sigma (order: fc, rs, c_bulk, L0)
                 sigma_idx = ['fc', 'rs', 'c_bulk'].index(pname)
                 sigma = self.param_sigma[sigma_idx]
+                
+                indiv_weight = np.exp(-0.5 * (diff / sigma) ** 2)
+                src_indiv_weights[pname] = indiv_weight
+                
                 sq_sum += w * (diff / sigma) ** 2
+            
             beta = np.exp(-0.5 * sq_sum)
             betas.append(beta)
-        return np.array(betas)
+            
+            for pname in weights.keys():
+                individual_weights[pname].append(src_indiv_weights[pname])
+        
+        return np.array(betas), individual_weights
     
     def compute_gamma(self, source_fields: List[Dict], source_params: List[Dict],
                      target_params: Dict, time_norm: float, beta_weights: np.ndarray) -> np.ndarray:
-        """
-        Shape-similarity boost factor.
-        Computes radial profiles for each source, builds a reference profile as weighted average
-        of source profiles using beta_weights, then calculates MSE for each source vs reference.
-        gamma = exp(-MSE / sigma_shape)
-        """
         n_sources = len(source_fields)
         if n_sources == 0:
             return np.array([])
         
-        # Collect profiles and their radial grids
         profiles = []
         radii_list = []
-        L0_list = []
         
         for i, src in enumerate(source_params):
             L0 = src.get('L0_nm', 20.0)
-            L0_list.append(L0)
-            # Use phi field for radial profile (shell phase)
             field = source_fields[i]['phi']
             r_centers, profile = DepositionPhysics.compute_radial_profile(field, L0, n_bins=100)
             profiles.append(profile)
             radii_list.append(r_centers)
         
-        # Determine common radial grid (from 0 to max radius among all sources)
         max_radius = max([r[-1] for r in radii_list])
         r_common = np.linspace(0, max_radius, 100)
         
-        # Interpolate all profiles to common grid
         profiles_interp = []
         for i in range(n_sources):
             prof_interp = np.interp(r_common, radii_list[i], profiles[i], left=0, right=0)
             profiles_interp.append(prof_interp)
-        profiles_interp = np.array(profiles_interp)  # shape (n_sources, n_bins)
+        profiles_interp = np.array(profiles_interp)
         
-        # Build reference profile: weighted average using beta_weights (normalized)
         beta_norm = beta_weights / (np.sum(beta_weights) + 1e-12)
         ref_profile = np.sum(profiles_interp * beta_norm[:, None], axis=0)
         
-        # Compute MSE for each source
         mse = np.mean((profiles_interp - ref_profile) ** 2, axis=1)
-        
-        # Convert to gamma
         gamma = np.exp(-mse / self.sigma_shape)
         
         return gamma
@@ -1104,9 +1332,18 @@ class CoreShellInterpolator:
         return torch.FloatTensor(features)
     
     def _get_fields_at_time(self, source: Dict, time_norm: float, target_shape: Tuple[int, int]):
+        """
+        FIXED: Ensure phi, c, psi are always initialized before use.
+        This fixes the UnboundLocalError.
+        """
+        # Initialize with default zeros to prevent UnboundLocalError
+        phi = np.zeros(target_shape)
+        c = np.zeros(target_shape)
+        psi = np.zeros(target_shape)
+        
         history = source.get('history', [])
         if not history:
-            return {'phi': np.zeros(target_shape), 'c': np.zeros(target_shape), 'psi': np.zeros(target_shape)}
+            return {'phi': phi, 'c': c, 'psi': psi}
         
         t_max = 1.0
         if source.get('thickness_history'):
@@ -1116,48 +1353,64 @@ class CoreShellInterpolator:
         
         t_target = time_norm * t_max
         
-        if len(history) == 1:
-            snap = history[0]
-            phi = self._ensure_2d(snap['phi'])
-            c = self._ensure_2d(snap['c'])
-            psi = self._ensure_2d(snap['psi'])
-        else:
-            t_vals = np.array([s['t_nd'] for s in history])
-            if t_target <= t_vals[0]:
+        try:
+            if len(history) == 1:
                 snap = history[0]
                 phi = self._ensure_2d(snap['phi'])
                 c = self._ensure_2d(snap['c'])
                 psi = self._ensure_2d(snap['psi'])
-            elif t_target >= t_vals[-1]:
-                snap = history[-1]
-                phi = self._ensure_2d(snap['phi'])
-                c = self._ensure_2d(snap['c'])
-                psi = self._ensure_2d(snap['psi'])
             else:
-                idx = np.searchsorted(t_vals, t_target) - 1
-                idx = max(0, min(idx, len(history)-2))
-                t1, t2 = t_vals[idx], t_vals[idx+1]
-                snap1, snap2 = history[idx], history[idx+1]
-                alpha = (t_target - t1) / (t2 - t1) if t2 > t1 else 0.0
-                
-                phi1 = self._ensure_2d(snap1['phi'])
-                phi2 = self._ensure_2d(snap2['phi'])
-                c1 = self._ensure_2d(snap1['c'])
-                c2 = self._ensure_2d(snap2['c'])
-                psi1 = self._ensure_2d(snap1['psi'])
-                psi2 = self._ensure_2d(snap2['psi'])
-                
-                phi = (1 - alpha) * phi1 + alpha * phi2
-                c = (1 - alpha) * c1 + alpha * c2
-                psi = (1 - alpha) * psi1 + alpha * psi2
-        
-        if phi.shape != target_shape:
-            factors = (target_shape[0]/phi.shape[0], target_shape[1]/phi.shape[1])
-            phi = zoom(phi, factors, order=1)
-            c = zoom(c, factors, order=1)
-            psi = zoom(psi, factors, order=1)
+                t_vals = np.array([s['t_nd'] for s in history])
+                if t_target <= t_vals[0]:
+                    snap = history[0]
+                    phi = self._ensure_2d(snap['phi'])
+                    c = self._ensure_2d(snap['c'])
+                    psi = self._ensure_2d(snap['psi'])
+                elif t_target >= t_vals[-1]:
+                    snap = history[-1]
+                    phi = self._ensure_2d(snap['phi'])
+                    c = self._ensure_2d(snap['c'])
+                    psi = self._ensure_2d(snap['psi'])
+                else:
+                    idx = np.searchsorted(t_vals, t_target) - 1
+                    idx = max(0, min(idx, len(history)-2))
+                    t1, t2 = t_vals[idx], t_vals[idx+1]
+                    snap1, snap2 = history[idx], history[idx+1]
+                    alpha = (t_target - t1) / (t2 - t1) if t2 > t1 else 0.0
+                    
+                    phi1 = self._ensure_2d(snap1['phi'])
+                    phi2 = self._ensure_2d(snap2['phi'])
+                    c1 = self._ensure_2d(snap1['c'])
+                    c2 = self._ensure_2d(snap2['c'])
+                    psi1 = self._ensure_2d(snap1['psi'])
+                    psi2 = self._ensure_2d(snap2['psi'])
+                    
+                    phi = (1 - alpha) * phi1 + alpha * phi2
+                    c = (1 - alpha) * c1 + alpha * c2
+                    psi = (1 - alpha) * psi1 + alpha * psi2
+            
+            if phi.shape != target_shape:
+                factors = (target_shape[0]/phi.shape[0], target_shape[1]/phi.shape[1])
+                phi = zoom(phi, factors, order=1)
+                c = zoom(c, factors, order=1)
+                psi = zoom(psi, factors, order=1)
+        except Exception as e:
+            st.warning(f"Warning in _get_fields_at_time: {str(e)}")
+            phi = np.zeros(target_shape)
+            c = np.zeros(target_shape)
+            psi = np.zeros(target_shape)
         
         return {'phi': phi, 'c': c, 'psi': psi}
+    
+    def _ensure_2d(self, arr):
+        if arr is None:
+            return np.zeros((1,1))
+        if torch.is_tensor(arr):
+            arr = arr.cpu().numpy()
+        if arr.ndim == 3:
+            mid = arr.shape[0] // 2
+            return arr[mid, :, :]
+        return arr
     
     def interpolate_fields(self, sources: List[Dict], target_params: Dict,
                           target_shape: Tuple[int, int] = (256, 256),
@@ -1167,13 +1420,11 @@ class CoreShellInterpolator:
         if not sources:
             return None
         
-        # ✅ ENHANCEMENT 1: Apply hard filtering with optional categorical check
         filtered_sources, filter_stats = self.filter_sources_hierarchy(
             sources, target_params, require_categorical_match=require_categorical_match
         )
         active_sources = filtered_sources if filtered_sources else sources
         
-        # Display L0 distribution diagnostics
         if not require_categorical_match and len(active_sources) > 0:
             l0_values = [src['params'].get('L0_nm', 20.0) for src in active_sources]
             target_L0 = target_params.get('L0_nm', 20.0)
@@ -1200,8 +1451,6 @@ class CoreShellInterpolator:
             params.setdefault('bc_type', params.get('bc_type', 'Neu'))
             params.setdefault('use_edl', params.get('use_edl', False))
             params.setdefault('mode', params.get('mode', '2D (planar)'))
-            params.setdefault('growth_model', params.get('growth_model', 'Model A'))
-            params.setdefault('tau0_s', params.get('tau0_s', 1e-4))
             
             source_params.append(params)
             
@@ -1239,23 +1488,17 @@ class CoreShellInterpolator:
             st.error("No valid source fields.")
             return None
         
-        # ========== NEW: Compute shape-aware refinement factors ==========
         target_L0 = target_params.get('L0_nm', 20.0)
         
-        # Use tiered L0 preference (compute_alpha)
         alpha = self.compute_alpha(source_params, target_L0)
-        beta = self.compute_beta(source_params, target_params)
+        beta, individual_param_weights = self.compute_beta(source_params, target_params)
         
-        # For gamma, we need beta weights (normalized) to build reference profile
         beta_norm = beta / (np.sum(beta) + 1e-12)
-        gamma = self.compute_gamma(source_fields, source_params, target_params, t_req, beta_norm)
+        gamma = self.compute_gamma(source_fields, source_params, target_params, 
+                                  t_req if t_req is not None else 1.0, beta_norm)
         
-        # Combine into a single physics-based weight factor
         refinement_factor = alpha * beta * (1.0 + self.lambda_shape * gamma)
         
-        # ==================================================================
-        
-        # Transformer attention computation
         source_features = self.encode_parameters(source_params)
         target_features = self.encode_parameters([target_params])
         all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)
@@ -1271,11 +1514,9 @@ class CoreShellInterpolator:
                                   source_reps.transpose(1,2)).squeeze(1)
         attn_scores = attn_scores / np.sqrt(self.d_model) / self.temperature
         
-        # Multiply attention scores by the physics-based refinement factor
         final_scores = attn_scores * torch.FloatTensor(refinement_factor).unsqueeze(0)
         final_weights = torch.softmax(final_scores, dim=-1).squeeze().detach().cpu().numpy()
         
-        # ----- Ensure final_weights is always a 1D array of length num_sources -----
         if np.isscalar(final_weights):
             final_weights = np.array([final_weights])
         elif final_weights.ndim == 0:
@@ -1284,26 +1525,22 @@ class CoreShellInterpolator:
             final_weights = final_weights.flatten()
         
         if len(final_weights) != len(source_fields):
-            st.warning(f"Weight length mismatch: {len(final_weights)} vs {len(source_fields)}. Truncating/padding.")
+            st.warning(f"Weight length mismatch: {len(final_weights)} vs {len(source_fields)}.")
             if len(final_weights) > len(source_fields):
                 final_weights = final_weights[:len(source_fields)]
             else:
                 final_weights = np.pad(final_weights, (0, len(source_fields)-len(final_weights)),
                                       'constant', constant_values=0)
         
-        # ✅ Weight Diagnostics
         eps = 1e-10
         entropy = -np.sum(final_weights * np.log(final_weights + eps))
         max_weight = np.max(final_weights)
         effective_sources = np.sum(final_weights > 0.01)
         
-        # Lower threshold for soft gating (was 0.1, now 0.2 since all sources pass)
         if max_weight < 0.2:
             st.warning(f"⚠️ Moderate confidence: max weight={max_weight:.3f}, "
-                      f"effective sources={effective_sources}. "
-                      f"Consider adjusting L0 preference or adding closer sources.")
+                      f"effective sources={effective_sources}.")
         
-        # Field interpolation
         interp = {'phi': np.zeros(target_shape),
                  'c': np.zeros(target_shape),
                  'psi': np.zeros(target_shape)}
@@ -1317,7 +1554,6 @@ class CoreShellInterpolator:
         interp['c'] = gaussian_filter(interp['c'], sigma=1.0)
         interp['psi'] = gaussian_filter(interp['psi'], sigma=1.0)
         
-        # Thickness interpolation
         common_t_norm = np.linspace(0, 1, n_time_points)
         thickness_curves = []
         for i, thick in enumerate(source_thickness):
@@ -1335,7 +1571,6 @@ class CoreShellInterpolator:
         for i, curve in enumerate(thickness_curves):
             thickness_interp += final_weights[i] * curve
         
-        # Time scaling
         avg_tau0 = np.average(source_tau0, weights=final_weights)
         avg_t_max_nd = np.average(source_t_max_nd, weights=final_weights)
         if target_params.get('tau0_s') is not None:
@@ -1348,7 +1583,6 @@ class CoreShellInterpolator:
         else:
             t_real = avg_t_max_nd * avg_tau0
         
-        # Derived quantities
         material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'])
         alpha_phys = target_params.get('alpha_nd', 2.0)
         potential = DepositionPhysics.potential_proxy(interp['c'], alpha_phys)
@@ -1370,6 +1604,32 @@ class CoreShellInterpolator:
                 dth = thickness_interp[idx] - thickness_interp[idx-1]
                 growth_rate = dth / dt_real if dt_real > 0 else 0.0
         
+        # Prepare sources data for visualization
+        sources_data = []
+        for i, (src_params, alpha_w, beta_w, gamma_w, indiv_weights, combined_w, attn_w) in enumerate(zip(
+            source_params, alpha, beta, gamma,
+            [dict(fc=individual_param_weights['fc'][i],
+                 rs=individual_param_weights['rs'][i],
+                 c_bulk=individual_param_weights['c_bulk'][i]) for i in range(len(source_params))],
+            final_weights, attn_scores.squeeze().detach().cpu().numpy()
+        )):
+            sources_data.append({
+                'source_index': i,
+                'L0_nm': src_params.get('L0_nm', 20.0),
+                'fc': src_params.get('fc', 0.18),
+                'rs': src_params.get('rs', 0.2),
+                'c_bulk': src_params.get('c_bulk', 0.5),
+                'l0_weight': float(alpha_w),
+                'fc_weight': float(indiv_weights['fc']),
+                'rs_weight': float(indiv_weights['rs']),
+                'c_bulk_weight': float(indiv_weights['c_bulk']),
+                'beta_weight': float(beta_w),
+                'gamma_weight': float(gamma_w),
+                'attention_weight': float(attn_w),
+                'physics_refinement': float(alpha_w * beta_w * (1.0 + self.lambda_shape * gamma_w)),
+                'combined_weight': float(combined_w)
+            })
+        
         result = {
             'fields': interp,
             'derived': {
@@ -1389,12 +1649,14 @@ class CoreShellInterpolator:
                 'alpha': alpha.tolist(),
                 'beta': beta.tolist(),
                 'gamma': gamma.tolist(),
+                'individual_params': individual_param_weights,
                 'refinement_factor': refinement_factor.tolist(),
                 'attention': attn_scores.squeeze().detach().cpu().numpy().tolist(),
                 'entropy': float(entropy),
                 'max_weight': float(max_weight),
                 'effective_sources': int(effective_sources)
             },
+            'sources_data': sources_data,
             'target_params': target_params,
             'shape': target_shape,
             'num_sources': len(source_fields),
@@ -1407,20 +1669,10 @@ class CoreShellInterpolator:
         }
         
         return result
-    
-    def _ensure_2d(self, arr):
-        if arr is None:
-            return np.zeros((1,1))
-        if torch.is_tensor(arr):
-            arr = arr.cpu().numpy()
-        if arr.ndim == 3:
-            mid = arr.shape[0] // 2
-            return arr[mid, :, :]
-        return arr
 
 
 # =============================================
-# ENHANCED HEATMAP VISUALIZER WITH EXACT PHASE-FIELD MATERIAL COLORS
+# ENHANCED HEATMAP VISUALIZER
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
@@ -1473,1040 +1725,6 @@ class HeatMapVisualizer:
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         return fig
-    
-    def create_interactive_heatmap(self, field_data, title, cmap_name='viridis',
-                                 L0_nm=20.0, width=800, height=700,
-                                 target_params=None, time_real_s=None):
-        ny, nx = field_data.shape
-        x = np.linspace(0, L0_nm, nx)
-        y = np.linspace(0, L0_nm, ny)
-        
-        is_material = self._is_material_proxy(field_data, "", title)
-        
-        if is_material:
-            hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
-                     for j in range(nx)] for i in range(ny)]
-            fig = go.Figure(data=go.Heatmap(
-                z=field_data, x=x, y=y, colorscale=MATERIAL_COLORSCALE_PLOTLY,
-                hoverinfo='text', text=hover,
-                colorbar=dict(
-                    title=dict(text="Material Phase", font=dict(size=14)),
-                    tickvals=[0, 1, 2],
-                    ticktext=['Electrolyte', 'Ag', 'Cu']
-                ),
-                zmin=0, zmax=2
-            ))
-        else:
-            hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Value={field_data[i,j]:.4f}"
-                     for j in range(nx)] for i in range(ny)]
-            fig = go.Figure(data=go.Heatmap(
-                z=field_data, x=x, y=y, colorscale=cmap_name,
-                hoverinfo='text', text=hover,
-                colorbar=dict(title=dict(text="Value", font=dict(size=14)))
-            ))
-        
-        title_str = title
-        if target_params:
-            fc = target_params.get('fc', 0); rs = target_params.get('rs', 0)
-            cb = target_params.get('c_bulk', 0)
-            title_str += f"<br>fc={fc:.3f}, rs={rs:.3f}, c_bulk={cb:.2f}, L0={L0_nm} nm"
-        if time_real_s is not None:
-            title_str += f"<br>t = {time_real_s:.3e} s"
-        
-        fig.update_layout(
-            title=dict(text=title_str, font=dict(size=20), x=0.5),
-            xaxis=dict(title="X (nm)", scaleanchor="y", scaleratio=1),
-            yaxis=dict(title="Y (nm)"),
-            width=width, height=height
-        )
-        return fig
-    
-    def create_thickness_plot(self, thickness_time, source_curves=None, weights=None,
-                           title="Shell Thickness Evolution", figsize=(10,6),
-                           current_time_norm=None, current_time_real=None,
-                           show_growth_rate=False):
-        fig, ax = plt.subplots(figsize=figsize, dpi=300)
-        
-        if 't_real_s' in thickness_time:
-            t_plot = np.array(thickness_time['t_real_s'])
-            ax.set_xlabel("Time (s)")
-        else:
-            t_plot = np.array(thickness_time['t_norm'])
-            ax.set_xlabel("Normalized Time")
-        
-        th_nm = np.array(thickness_time['th_nm'])
-        ax.plot(t_plot, th_nm, 'b-', linewidth=3, label='Interpolated')
-        
-        if show_growth_rate and len(t_plot) > 1:
-            growth_rate = np.gradient(th_nm, t_plot)
-            ax2 = ax.twinx()
-            ax2.plot(t_plot, growth_rate, 'g--', linewidth=2, alpha=0.7, label='Growth rate')
-            ax2.set_ylabel('Growth Rate (nm/s)', fontsize=12, color='green')
-            ax2.tick_params(axis='y', labelcolor='green')
-            ax2.grid(False)
-        
-        if source_curves is not None and weights is not None:
-            for i, (src_t, src_th) in enumerate(source_curves):
-                alpha = min(weights[i] * 5, 0.8)
-                ax.plot(src_t, src_th, '--', linewidth=1, alpha=alpha,
-                       label=f'Source {i+1} (w={weights[i]:.3f})')
-        
-        if current_time_norm is not None:
-            if 't_real_s' in thickness_time:
-                current_th = np.interp(current_time_norm,
-                                      np.array(thickness_time['t_norm']), th_nm)
-                current_t_plot = np.interp(current_time_norm,
-                                          np.array(thickness_time['t_norm']), t_plot)
-            else:
-                current_t_plot = current_time_norm
-                current_th = np.interp(current_time_norm,
-                                      np.array(thickness_time['t_norm']), th_nm)
-            
-            ax.axvline(current_t_plot, color='r', linestyle='--',
-                      linewidth=2, alpha=0.7)
-            ax.plot(current_t_plot, current_th, 'ro', markersize=8,
-                   label=f'Current: t={current_t_plot:.2e}, h={current_th:.2f} nm')
-        
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc='best')
-        plt.tight_layout()
-        return fig
-    
-    def create_temporal_comparison_plot(self, fields_list, times_list, field_key='phi',
-                                      cmap_name='viridis', L0_nm=20.0, n_cols=3):
-        n_frames = len(fields_list)
-        n_rows = (n_frames + n_cols - 1) // n_cols
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows), dpi=200)
-        
-        if n_frames == 1:
-            axes = np.array([axes])
-        axes = axes.flatten()
-        
-        extent = self._get_extent(L0_nm)
-        is_material = "material" in field_key.lower()
-        
-        if is_material:
-            cmap = MATERIAL_COLORMAP_MATPLOTLIB
-            norm = MATERIAL_BOUNDARY_NORM
-            vmin, vmax = 0, 2
-        else:
-            cmap = cmap_name
-            norm = None
-            all_values = [f[field_key] for f in fields_list]
-            vmin = min(np.min(v) for v in all_values)
-            vmax = max(np.max(v) for v in all_values)
-        
-        for i, (fields, t) in enumerate(zip(fields_list, times_list)):
-            ax = axes[i]
-            if norm is not None:
-                im = ax.imshow(fields[field_key], cmap=cmap, norm=norm,
-                              extent=extent, aspect='equal', origin='lower')
-            else:
-                im = ax.imshow(fields[field_key], cmap=cmap, vmin=vmin, vmax=vmax,
-                              extent=extent, aspect='equal', origin='lower')
-            ax.set_title(f't = {t:.3e} s', fontsize=12)
-            ax.set_xlabel('X (nm)')
-            ax.set_ylabel('Y (nm)')
-        
-        for j in range(i+1, len(axes)):
-            axes[j].axis('off')
-        
-        cbar = plt.colorbar(im, ax=axes, fraction=0.046, pad=0.04)
-        if is_material:
-            cbar.set_ticks([0, 1, 2])
-            cbar.set_ticklabels(['Electrolyte', 'Ag', 'Cu'])
-        else:
-            cbar.set_label(field_key)
-        
-        plt.suptitle(f'Temporal Evolution: {field_key}', fontsize=16, fontweight='bold')
-        plt.tight_layout()
-        return fig
-
-
-# =============================================
-# ENHANCED WEIGHT VISUALIZER WITH ADVANCED DIAGRAMS  <-- ADDED
-# =============================================
-class WeightVisualizer:
-    def __init__(self):
-        # Enhanced color scheme with high contrast
-        self.color_scheme = {
-            'Twin': '#FF6B6B', # Bright Red
-            'ISF': '#4ECDC4', # Turquoise
-            'ESF': '#95E1D3', # Light Teal
-            'No Defect': '#FFD93D', # Bright Yellow
-            'Query': '#9D4EDD', # Purple
-            'Spatial': '#36A2EB', # Bright Blue
-            'Defect': '#FF6384', # Pink
-            'Attention': '#4BC0C0', # Cyan
-            'Combined': '#9966FF' # Purple
-        }
-       
-        # Font configuration for high readability
-        self.font_config = {
-            'family': 'Arial, sans-serif',
-            'size_title': 24,
-            'size_labels': 18,
-            'size_ticks': 14,
-            'color': '#2C3E50',
-            'weight': 'bold'
-        }
-       
-        # High contrast color maps for different visualizations
-        self.color_maps = {
-            'sankey': 'viridis',
-            'chord': 'plasma',
-            'radar': 'inferno',
-            'sunburst': 'magma',
-            'treemap': 'turbo',
-            'heatmap': 'jet'
-        }
-   
-    def get_colormap(self, cmap_name, n_colors=10):
-        """Get color palette from colormap"""
-        try:
-            cmap = plt.get_cmap(cmap_name)
-            return [f'rgb({int(r*255)}, {int(g*255)}, {int(b*255)})'
-                   for r, g, b, _ in [cmap(i/n_colors) for i in range(n_colors)]]
-        except:
-            # Fallback to viridis
-            cmap = plt.get_cmap('viridis')
-            return [f'rgb({int(r*255)}, {int(g*255)}, {int(b*255)})'
-                   for r, g, b, _ in [cmap(i/n_colors) for i in range(n_colors)]]
-    
-    def create_enhanced_sankey_diagram(self, sources_data, target_c_bulk, target_L0, alpha_sigma):
-        """
-        Create enhanced Sankey diagram with improved fonts, contrast, and colors
-        """
-        # Create nodes for Sankey diagram
-        labels = ['Target'] # Start with target node
-       
-        # Add source nodes with enhanced labels
-        for source in sources_data:
-            c_bulk = source['c_bulk']
-            L0 = source['L0_nm']
-            labels.append(f"S{source['source_index']}\n{L0:.1f}nm\nc_bulk={c_bulk:.3f}")
-       
-        # Add component nodes
-        component_start = len(labels)
-        labels.extend(['Alpha (L0)', 'Beta (params)', 'Gamma (shape)', 'Combined Weight'])
-       
-        # Create links
-        source_indices = []
-        target_indices = []
-        values = []
-        colors = []
-        link_labels = []
-       
-        # Get vibrant color palette
-        color_palette = self.get_colormap(self.color_maps['sankey'], len(sources_data) + 4)
-       
-        # Links from sources to components
-        for i, source in enumerate(sources_data):
-            source_idx = i + 1 # +1 because index 0 is target
-           
-            # Get vibrant color for this source
-            source_color = color_palette[i % len(color_palette)]
-           
-            # Link to alpha (L0)
-            source_indices.append(source_idx)
-            target_indices.append(component_start)
-            alpha_value = source['alpha'] * 100 # Scale for visibility
-            values.append(alpha_value)
-            colors.append(f'rgba(54, 162, 235, 0.8)') # Blue for alpha
-            link_labels.append(f"Alpha: {source['alpha']:.3f}")
-           
-            # Link to beta (params)
-            source_indices.append(source_idx)
-            target_indices.append(component_start + 1)
-            beta_value = source['beta'] * 100
-            values.append(beta_value)
-            colors.append(f'rgba(255, 99, 132, 0.8)') # Pink for beta
-            link_labels.append(f"Beta: {source['beta']:.3f}")
-           
-            # Link to gamma (shape)
-            source_indices.append(source_idx)
-            target_indices.append(component_start + 2)
-            gamma_w = source.get('gamma', source['combined_weight'] * 0.5)
-            gamma_value = gamma_w * 100
-            values.append(gamma_value)
-            colors.append(f'rgba(75, 192, 192, 0.8)') # Cyan for gamma
-            link_labels.append(f"Gamma: {gamma_w:.3f}")
-           
-            # Link to combined weight
-            source_indices.append(source_idx)
-            target_indices.append(component_start + 3)
-            combined_value = source['combined_weight'] * 100
-            values.append(combined_value)
-            colors.append(f'rgba(153, 102, 255, 0.8)') # Purple for combined
-            link_labels.append(f"Combined: {source['combined_weight']:.3f}")
-       
-        # Links from components to target
-        for comp_idx, comp_name in enumerate(['Alpha', 'Beta', 'Gamma', 'Combined']):
-            source_indices.append(component_start + comp_idx)
-            target_indices.append(0) # Target node
-           
-            # Sum of all flows into this component
-            comp_value = sum(v for s, t, v in zip(source_indices, target_indices, values)
-                           if t == component_start + comp_idx)
-            values.append(comp_value * 0.5) # Reduce flow to target for visual clarity
-           
-            # Use component-specific colors
-            if comp_name == 'Alpha':
-                colors.append(f'rgba(54, 162, 235, 0.6)')
-            elif comp_name == 'Beta':
-                colors.append(f'rgba(255, 99, 132, 0.6)')
-            elif comp_name == 'Gamma':
-                colors.append(f'rgba(75, 192, 192, 0.6)')
-            else: # Combined
-                colors.append(f'rgba(153, 102, 255, 0.6)')
-           
-            link_labels.append(f"{comp_name} → Target")
-       
-        # Create enhanced Sankey diagram
-        fig = go.Figure(data=[go.Sankey(
-            node=dict(
-                pad=25, # Increased padding
-                thickness=30, # Thicker nodes
-                line=dict(color="black", width=2), # Black border for contrast
-                label=labels,
-                color=["#FF6B6B"] + # Target color (bright red)
-                      [color_palette[i % len(color_palette)] for i in range(len(sources_data))] + # Source colors
-                      ["#36A2EB", "#FF6384", "#4BC0C0", "#9966FF"], # Component colors
-                hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<extra></extra>'
-            ),
-            link=dict(
-                source=source_indices,
-                target=target_indices,
-                value=values,
-                color=colors,
-                hovertemplate='<b>%{source.label}</b> → <b>%{target.label}</b><br>Flow: %{value:.2f}<extra></extra>',
-                customdata=link_labels,
-                line=dict(width=0.5, color='rgba(255,255,255,0.3)')
-            ),
-            hoverinfo='all'
-        )])
-       
-        # Enhanced layout with better fonts and contrast
-        fig.update_layout(
-            title=dict(
-                text=f'<b>SANKEY DIAGRAM: ATTENTION COMPONENT FLOW</b><br>Target: c_bulk={target_c_bulk:.3f} | L0={target_L0:.1f}nm | σ_alpha={alpha_sigma}',
-                font=dict(
-                    family=self.font_config['family'],
-                    size=self.font_config['size_title'],
-                    color=self.font_config['color'],
-                    weight='bold'
-                ),
-                x=0.5,
-                y=0.95,
-                xanchor='center',
-                yanchor='top'
-            ),
-            font=dict(
-                family=self.font_config['family'],
-                size=self.font_config['size_labels'],
-                color=self.font_config['color']
-            ),
-            width=1400, # Wider for better visibility
-            height=900, # Taller for better visibility
-            plot_bgcolor='rgba(240, 240, 245, 0.9)', # Light background
-            paper_bgcolor='white',
-            margin=dict(t=100, l=50, r=50, b=50),
-            hoverlabel=dict(
-                font=dict(
-                    family=self.font_config['family'],
-                    size=self.font_config['size_labels'],
-                    color='white'
-                ),
-                bgcolor='rgba(44, 62, 80, 0.9)', # Dark background for hover
-                bordercolor='white'
-            )
-        )
-       
-        # Add annotations for color coding
-        annotations = [
-            dict(
-                x=0.02, y=1.05,
-                xref='paper', yref='paper',
-                text='<b>COLOR CODING:</b>',
-                showarrow=False,
-                font=dict(size=14, color='darkblue', weight='bold')
-            ),
-            dict(
-                x=0.02, y=1.02,
-                xref='paper', yref='paper',
-                text='• Alpha: <span style="color:#36A2EB">█</span>',
-                showarrow=False,
-                font=dict(size=12, color='#36A2EB')
-            ),
-            dict(
-                x=0.15, y=1.02,
-                xref='paper', yref='paper',
-                text='• Beta: <span style="color:#FF6384">█</span>',
-                showarrow=False,
-                font=dict(size=12, color='#FF6384')
-            ),
-            dict(
-                x=0.28, y=1.02,
-                xref='paper', yref='paper',
-                text='• Gamma: <span style="color:#4BC0C0">█</span>',
-                showarrow=False,
-                font=dict(size=12, color='#4BC0C0')
-            ),
-            dict(
-                x=0.41, y=1.02,
-                xref='paper', yref='paper',
-                text='• Combined: <span style="color:#9966FF">█</span>',
-                showarrow=False,
-                font=dict(size=12, color='#9966FF')
-            )
-        ]
-       
-        fig.update_layout(annotations=annotations)
-       
-        return fig
-
-    def create_enhanced_chord_diagram(self, sources_data, target_c_bulk, target_L0):
-        """
-        Create enhanced chord diagram with target at center and weight components in different colors
-        """
-        # Create circular layout
-        n_sources = len(sources_data)
-        center_x, center_y = 0, 0
-        radius = 1.5
-       
-        # Calculate positions for sources in a circle
-        source_positions = []
-        for i in range(n_sources):
-            angle = 2 * pi * i / n_sources
-            x = center_x + radius * cos(angle)
-            y = center_y + radius * sin(angle)
-            source_positions.append((x, y))
-       
-        # Create figure
-        fig = go.Figure()
-       
-        # Add center target node (larger and highlighted)
-        fig.add_trace(go.Scatter(
-            x=[center_x],
-            y=[center_y],
-            mode='markers+text',
-            name='Target',
-            marker=dict(
-                size=50,
-                color=self.color_scheme['Query'],
-                symbol='star',
-                line=dict(width=3, color='white')
-            ),
-            text=[f'Target\nL0={target_L0:.1f}\nc_bulk={target_c_bulk:.3f}'],
-            textposition="middle center",
-            textfont=dict(
-                size=16,
-                color='white',
-                weight='bold'
-            ),
-            hoverinfo='text',
-            hovertext=f'Target: L0={target_L0:.1f}nm, c_bulk={target_c_bulk:.3f}'
-        ))
-       
-        # Add source nodes in circle
-        source_x = []
-        source_y = []
-        source_text = []
-        source_colors = []
-        source_sizes = []
-       
-        for i, source in enumerate(sources_data):
-            x, y = source_positions[i]
-            source_x.append(x)
-            source_y.append(y)
-           
-            # Node color based on defect type - adapt for Ag-Cu (use EDL or mode)
-            edl_color = '#FF6B6B' if source['use_edl'] else '#4ECDC4'  # Red for EDL, Turquoise for no EDL
-            source_colors.append(edl_color)
-           
-            # Node size based on combined weight
-            node_size = 20 + source['combined_weight'] * 60
-            source_sizes.append(node_size)
-           
-            # Node text
-            source_text.append(
-                f"Source {i}<br>"
-                f"L0: {source['L0_nm']:.1f}nm<br>"
-                f"c_bulk: {source['c_bulk']:.3f}<br>"
-                f"Combined: {source['combined_weight']:.3f}"
-            )
-       
-        # Add source nodes trace
-        fig.add_trace(go.Scatter(
-            x=source_x,
-            y=source_y,
-            mode='markers+text',
-            name='Sources',
-            marker=dict(
-                size=source_sizes,
-                color=source_colors,
-                line=dict(width=2, color='white')
-            ),
-            text=[f"S{i}" for i in range(n_sources)],
-            textposition="top center",
-            textfont=dict(size=12, color='white', weight='bold'),
-            hoverinfo='text',
-            hovertext=source_text
-        ))
-       
-        # Add connecting lines for each weight component
-        for i, source in enumerate(sources_data):
-            sx, sy = source_positions[i]
-           
-            # Calculate control points for curved lines
-            cx = (sx + center_x) / 2
-            cy = (sy + center_y) / 2
-           
-            # Normal for perpendicular offset
-            dx = center_x - sx
-            dy = center_y - sy
-            length = np.sqrt(dx*dx + dy*dy)
-            if length > 0:
-                nx = -dy / length * 0.3
-                ny = dx / length * 0.3
-            else:
-                nx, ny = 0, 0
-           
-            # Create curved paths for each component
-            t = np.linspace(0, 1, 50)
-           
-            # Alpha weight line (Blue)
-            alpha_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx + nx*0.5) + t**2 * center_x
-            alpha_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy + ny*0.5) + t**2 * center_y
-            alpha_width = max(1, source['alpha'] * 15)
-           
-            fig.add_trace(go.Scatter(
-                x=alpha_curve_x,
-                y=alpha_curve_y,
-                mode='lines',
-                name=f'Source {i} - Alpha',
-                line=dict(
-                    width=alpha_width,
-                    color='rgba(54, 162, 235, 0.7)', # Blue for alpha
-                    dash='solid'
-                ),
-                hoverinfo='text',
-                hovertext=f"Alpha Weight: {source['alpha']:.3f}",
-                showlegend=False
-            ))
-           
-            # Beta weight line (Pink)
-            beta_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx + nx*0) + t**2 * center_x
-            beta_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy + ny*0) + t**2 * center_y
-            beta_width = max(1, source['beta'] * 15)
-           
-            fig.add_trace(go.Scatter(
-                x=beta_curve_x,
-                y=beta_curve_y,
-                mode='lines',
-                name=f'Source {i} - Beta',
-                line=dict(
-                    width=beta_width,
-                    color='rgba(255, 99, 132, 0.7)', # Pink for beta
-                    dash='dot'
-                ),
-                hoverinfo='text',
-                hovertext=f"Beta Weight: {source['beta']:.3f}",
-                showlegend=False
-            ))
-           
-            # Gamma weight line (Cyan)
-            gamma_w = source.get('gamma', source['combined_weight'] * 0.5)
-            gamma_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx - nx*0.5) + t**2 * center_x
-            gamma_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy - ny*0.5) + t**2 * center_y
-            gamma_width = max(1, gamma_w * 15)
-           
-            fig.add_trace(go.Scatter(
-                x=gamma_curve_x,
-                y=gamma_curve_y,
-                mode='lines',
-                name=f'Source {i} - Gamma',
-                line=dict(
-                    width=gamma_width,
-                    color='rgba(75, 192, 192, 0.7)', # Cyan for gamma
-                    dash='dash'
-                ),
-                hoverinfo='text',
-                hovertext=f"Gamma Weight: {gamma_w:.3f}",
-                showlegend=False
-            ))
-           
-            # Combined weight line (Purple) - Thicker and on top
-            combined_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx - nx*1.0) + t**2 * center_x
-            combined_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy - ny*1.0) + t**2 * center_y
-            combined_width = max(2, source['combined_weight'] * 20)
-           
-            fig.add_trace(go.Scatter(
-                x=combined_curve_x,
-                y=combined_curve_y,
-                mode='lines',
-                name=f'Source {i} - Combined',
-                line=dict(
-                    width=combined_width,
-                    color='rgba(153, 102, 255, 0.8)', # Purple for combined
-                    dash='solid'
-                ),
-                hoverinfo='text',
-                hovertext=f"Combined Weight: {source['combined_weight']:.3f}",
-                showlegend=False
-            ))
-       
-        # Update layout for enhanced chord diagram
-        fig.update_layout(
-            title=dict(
-                text=f'<b>ENHANCED CHORD DIAGRAM: WEIGHT COMPONENT VISUALIZATION</b><br>Target: L0={target_L0:.1f}nm, c_bulk={target_c_bulk:.3f}',
-                font=dict(
-                    family=self.font_config['family'],
-                    size=self.font_config['size_title'],
-                    color=self.font_config['color'],
-                    weight='bold'
-                ),
-                x=0.5,
-                y=0.95
-            ),
-            showlegend=True,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.5,
-                font=dict(
-                    size=self.font_config['size_labels'],
-                    family=self.font_config['family']
-                )
-            ),
-            width=1200,
-            height=1000,
-            plot_bgcolor='rgba(240, 240, 245, 0.9)',
-            paper_bgcolor='white',
-            hovermode='closest',
-            xaxis=dict(
-                showgrid=False,
-                zeroline=False,
-                showticklabels=False,
-                range=[-2.5, 2.5]
-            ),
-            yaxis=dict(
-                showgrid=False,
-                zeroline=False,
-                showticklabels=False,
-                range=[-2.5, 2.5]
-            )
-        )
-       
-        # Add legend annotations for line types
-        annotations = [
-            dict(
-                x=0.02, y=1.05,
-                xref='paper', yref='paper',
-                text='<b>LINE TYPES:</b>',
-                showarrow=False,
-                font=dict(size=14, color='darkblue', weight='bold')
-            ),
-            dict(
-                x=0.02, y=1.02,
-                xref='paper', yref='paper',
-                text='<span style="color:#36A2EB">━━━━</span> Alpha (L0)',
-                showarrow=False,
-                font=dict(size=12, color='#36A2EB')
-            ),
-            dict(
-                x=0.02, y=1.0,
-                xref='paper', yref='paper',
-                text='<span style="color:#FF6384">⸺⸺⸺</span> Beta (params)',
-                showarrow=False,
-                font=dict(size=12, color='#FF6384')
-            ),
-            dict(
-                x=0.02, y=0.98,
-                xref='paper', yref='paper',
-                text='<span style="color:#4BC0C0">- - - -</span> Gamma (shape)',
-                showarrow=False,
-                font=dict(size=12, color='#4BC0C0')
-            ),
-            dict(
-                x=0.02, y=0.96,
-                xref='paper', yref='paper',
-                text='<span style="color:#9966FF">━━━━</span> Combined Weight',
-                showarrow=False,
-                font=dict(size=12, color='#9966FF', weight='bold')
-            )
-        ]
-       
-        fig.update_layout(annotations=annotations)
-       
-        return fig
-    
-    def create_hierarchical_radar_chart(self, sources_data, target_c_bulk, target_L0, alpha_sigma):
-        """Create hierarchical radar chart with enhanced styling"""
-        fig = go.Figure()
-       
-        # Group by use_edl (adapt for Ag-Cu categorical)
-        edl_groups = {}
-        for source in sources_data:
-            edl = 'EDL' if source['use_edl'] else 'No EDL'
-            if edl not in edl_groups:
-                edl_groups[edl] = []
-            edl_groups[edl].append(source)
-       
-        # Use vibrant colormap
-        color_palette = self.get_colormap('plasma', len(edl_groups))
-       
-        # Create traces for each EDL group
-        for idx, (edl, sources) in enumerate(edl_groups.items()):
-            c_bulks = [s['c_bulk'] for s in sources]
-            alpha_weights = [s['alpha'] for s in sources]
-            beta_weights = [s['beta'] for s in sources]
-            gamma_weights = [s['gamma'] for s in sources]
-            combined_weights = [s['combined_weight'] for s in sources]
-           
-            # Normalize for radar display
-            max_weight = max(max(alpha_weights), max(beta_weights), max(gamma_weights), max(combined_weights), 1e-6)
-            alpha_norm = [w/max_weight for w in alpha_weights]
-            beta_norm = [w/max_weight for w in beta_weights]
-            gamma_norm = [w/max_weight for w in gamma_weights]
-            combined_norm = [w/max_weight for w in combined_weights]
-           
-            # Use colormap colors
-            color = color_palette[idx % len(color_palette)]
-           
-            # Plot alpha weights (outer ring)
-            fig.add_trace(go.Scatterpolar(
-                r=alpha_norm,
-                theta=c_bulks,
-                mode='lines+markers',
-                name=f'{edl} - Alpha',
-                line=dict(color=color, width=3, dash='dash'),
-                marker=dict(size=10, color=color),
-                hoverinfo='text',
-                text=[f'{edl}<br>c_bulk: {c:.3f}<br>Alpha: {aw:.3f}'
-                      for c, aw in zip(c_bulks, alpha_weights)]
-            ))
-           
-            # Plot beta weights (middle ring)
-            fig.add_trace(go.Scatterpolar(
-                r=beta_norm,
-                theta=c_bulks,
-                mode='lines+markers',
-                name=f'{edl} - Beta',
-                line=dict(color=color, width=3, dash='dot'),
-                marker=dict(size=10, color=color),
-                hoverinfo='text',
-                text=[f'{edl}<br>c_bulk: {c:.3f}<br>Beta: {bw:.3f}'
-                      for c, bw in zip(c_bulks, beta_weights)]
-            ))
-           
-            # Plot gamma weights (inner ring)
-            fig.add_trace(go.Scatterpolar(
-                r=gamma_norm,
-                theta=c_bulks,
-                mode='lines+markers',
-                name=f'{edl} - Gamma',
-                line=dict(color=color, width=3, dash='dashdot'),
-                marker=dict(size=10, color=color),
-                hoverinfo='text',
-                text=[f'{edl}<br>c_bulk: {c:.3f}<br>Gamma: {gw:.3f}'
-                      for c, gw in zip(c_bulks, gamma_weights)]
-            ))
-           
-            # Plot combined weights (center ring)
-            fig.add_trace(go.Scatterpolar(
-                r=combined_norm,
-                theta=c_bulks,
-                mode='lines+markers',
-                name=f'{edl} - Combined',
-                line=dict(color=color, width=4),
-                marker=dict(size=12, color=color),
-                hoverinfo='text',
-                text=[f'{edl}<br>c_bulk: {c:.3f}<br>Combined: {cw:.3f}<br>EDL Match: {s["use_edl"]}'
-                      for c, cw, s in zip(c_bulks, combined_weights, sources)]
-            ))
-       
-        # Add target c_bulk line with high visibility
-        fig.add_trace(go.Scatterpolar(
-            r=[0, 1],
-            theta=[target_c_bulk, target_c_bulk],
-            mode='lines',
-            name='Target c_bulk',
-            line=dict(color='#FF0000', width=5),
-            hoverinfo='text',
-            hovertext=f'Target c_bulk: {target_c_bulk:.3f}'
-        ))
-       
-        # Update layout with enhanced styling
-        fig.update_layout(
-            polar=dict(
-                radialaxis=dict(
-                    visible=True,
-                    range=[0, 1.1],
-                    tickfont=dict(size=14, family=self.font_config['family']),
-                    title=dict(
-                        text='Normalized Weight',
-                        font=dict(size=16, family=self.font_config['family'], weight='bold')
-                    )
-                ),
-                angularaxis=dict(
-                    direction='clockwise',
-                    rotation=90,
-                    tickfont=dict(size=14, family=self.font_config['family'])
-                ),
-                bgcolor='rgba(240, 240, 245, 0.5)'
-            ),
-            title=dict(
-                text=f'<b>HIERARCHICAL RADAR CHART</b><br>Target: c_bulk={target_c_bulk:.3f} | L0={target_L0:.1f}nm | σ_alpha={alpha_sigma}',
-                font=dict(
-                    family=self.font_config['family'],
-                    size=self.font_config['size_title'],
-                    color=self.font_config['color'],
-                    weight='bold'
-                ),
-                x=0.5
-            ),
-            showlegend=True,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.5,
-                font=dict(
-                    size=self.font_config['size_labels'],
-                    family=self.font_config['family']
-                )
-            ),
-            width=1200,
-            height=900,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            hovermode='closest'
-        )
-       
-        return fig
-
-    def create_weight_formula_breakdown(self, sources_data, target_c_bulk, target_L0, alpha_sigma):
-        """Create comprehensive weight formula breakdown visualization"""
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=(
-                '<b>Weight Component Breakdown</b>',
-                '<b>Cumulative Weight Distribution</b>',
-                '<b>EDL Type Analysis</b>',
-                '<b>c_bulk Weight Distribution</b>'
-            ),
-            vertical_spacing=0.15,
-            horizontal_spacing=0.1
-        )
-       
-        # Sort sources by c_bulk
-        sources_data = sorted(sources_data, key=lambda x: x['c_bulk'])
-       
-        c_bulks = [s['c_bulk'] for s in sources_data]
-        source_indices = [s['source_index'] for s in sources_data]
-       
-        # Prepare data
-        alpha_values = [s['alpha'] for s in sources_data]
-        beta_values = [s['beta'] for s in sources_data]
-        gamma_values = [s['gamma'] for s in sources_data]
-        combined_values = [s['combined_weight'] for s in sources_data]
-       
-        # Plot 1: Component breakdown (stacked bar)
-        fig.add_trace(go.Bar(
-            x=source_indices,
-            y=alpha_values,
-            name='Alpha (L0)',
-            marker_color='#36A2EB',
-            text=[f'{v:.3f}' for v in alpha_values],
-            textposition='outside',
-            textfont=dict(size=10)
-        ), row=1, col=1)
-       
-        fig.add_trace(go.Bar(
-            x=source_indices,
-            y=beta_values,
-            name='Beta (params)',
-            marker_color='#FF6384',
-            text=[f'{v:.3f}' for v in beta_values],
-            textposition='outside',
-            textfont=dict(size=10)
-        ), row=1, col=1)
-       
-        fig.add_trace(go.Bar(
-            x=source_indices,
-            y=gamma_values,
-            name='Gamma (shape)',
-            marker_color='#4BC0C0',
-            text=[f'{v:.3f}' for v in gamma_values],
-            textposition='outside',
-            textfont=dict(size=10)
-        ), row=1, col=1)
-       
-        # Plot 2: Cumulative distribution
-        sorted_weights = np.sort(combined_values)[::-1]
-        cumulative = np.cumsum(sorted_weights) / np.sum(sorted_weights) if np.sum(sorted_weights) > 0 else np.zeros_like(sorted_weights)
-        x_vals = np.arange(1, len(cumulative) + 1)
-       
-        fig.add_trace(go.Scatter(
-            x=x_vals,
-            y=cumulative,
-            mode='lines+markers',
-            name='Cumulative Weight',
-            line=dict(color='#9966FF', width=4),
-            marker=dict(size=8),
-            fill='tozeroy',
-            fillcolor='rgba(153, 102, 255, 0.2)'
-        ), row=1, col=2)
-       
-        # Add 90% threshold
-        if len(cumulative) > 0 and np.sum(sorted_weights) > 0:
-            threshold_idx = np.where(cumulative >= 0.9)[0]
-            if len(threshold_idx) > 0:
-                fig.add_hline(y=0.9, line_dash="dash", line_color="red",
-                             annotation_text="90% threshold", row=1, col=2)
-                fig.add_vline(x=threshold_idx[0]+1, line_dash="dash", line_color="red", row=1, col=2)
-       
-        # Plot 3: EDL type analysis
-        edl_counts = {}
-        edl_weights = {}
-        for source in sources_data:
-            edl = 'EDL' if source['use_edl'] else 'No EDL'
-            if edl not in edl_counts:
-                edl_counts[edl] = 0
-                edl_weights[edl] = 0.0
-            edl_counts[edl] += 1
-            edl_weights[edl] += source['combined_weight']
-       
-        fig.add_trace(go.Bar(
-            x=list(edl_counts.keys()),
-            y=list(edl_counts.values()),
-            name='Count by EDL',
-            marker_color=['#FF6B6B' if k == 'EDL' else '#4ECDC4' for k in edl_counts.keys()],
-            text=[f'{c} sources' for c in edl_counts.values()],
-            textposition='auto'
-        ), row=2, col=1)
-       
-        fig.add_trace(go.Bar(
-            x=list(edl_weights.keys()),
-            y=list(edl_weights.values()),
-            name='Weight by EDL',
-            marker_color=['#FF6B6B' if k == 'EDL' else '#4ECDC4' for k in edl_weights.keys()],
-            text=[f'{w:.3f}' for w in edl_weights.values()],
-            textposition='auto'
-        ), row=2, col=1)
-       
-        # Plot 4: c_bulk distribution with different symbols for weight types
-        # Combined weights
-        fig.add_trace(go.Scatter(
-            x=c_bulks,
-            y=combined_values,
-            mode='markers+lines',
-            name='Combined Weight',
-            line=dict(color='#9966FF', width=3),
-            marker=dict(
-                size=15,
-                color='#9966FF',
-                symbol='circle',
-                line=dict(width=2, color='white')
-            ),
-            text=[f"S{i}: {d:.3f}<br>Combined: {w:.3f}" for i, d, w in zip(source_indices, c_bulks, combined_values)]
-        ), row=2, col=2)
-       
-        # Alpha weights
-        fig.add_trace(go.Scatter(
-            x=c_bulks,
-            y=alpha_values,
-            mode='markers',
-            name='Alpha Weight',
-            marker=dict(
-                size=10,
-                color='#36A2EB',
-                symbol='square',
-                line=dict(width=1, color='white')
-            ),
-            text=[f"S{i}: {d:.3f}<br>Alpha: {w:.3f}" for i, d, w in zip(source_indices, c_bulks, alpha_values)]
-        ), row=2, col=2)
-       
-        # Beta weights
-        fig.add_trace(go.Scatter(
-            x=c_bulks,
-            y=beta_values,
-            mode='markers',
-            name='Beta Weight',
-            marker=dict(
-                size=10,
-                color='#FF6384',
-                symbol='diamond',
-                line=dict(width=1, color='white')
-            ),
-            text=[f"S{i}: {d:.3f}<br>Beta: {w:.3f}" for i, d, w in zip(source_indices, c_bulks, beta_values)]
-        ), row=2, col=2)
-       
-        # Gamma weights
-        fig.add_trace(go.Scatter(
-            x=c_bulks,
-            y=gamma_values,
-            mode='markers',
-            name='Gamma Weight',
-            marker=dict(
-                size=10,
-                color='#4BC0C0',
-                symbol='triangle-up',
-                line=dict(width=1, color='white')
-            ),
-            text=[f"S{i}: {d:.3f}<br>Gamma: {w:.3f}" for i, d, w in zip(source_indices, c_bulks, gamma_values)]
-        ), row=2, col=2)
-       
-        # Add target c_bulk reference
-        fig.add_vline(x=target_c_bulk, line_dash="dot", line_color="green",
-                     annotation_text="Target c_bulk", row=2, col=2)
-       
-        # Update layout
-        fig.update_layout(
-            barmode='stack',
-            title=dict(
-                text=f'<b>WEIGHT FORMULA ANALYSIS</b><br>wᵢ(c*) = [ᾱᵢ(c*)·α(L0)·β(fc,rs,c)·γ(shape)]/Σ[...] + 10⁻⁶<br>σ_alpha={alpha_sigma}, Target: c_bulk={target_c_bulk:.3f}',
-                font=dict(
-                    family=self.font_config['family'],
-                    size=20,
-                    color=self.font_config['color'],
-                    weight='bold'
-                ),
-                x=0.5,
-                y=0.98
-            ),
-            showlegend=True,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=12)
-            ),
-            width=1400,
-            height=1000,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            hovermode='closest'
-        )
-       
-        # Update axes labels
-        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(size=14))
-        fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Cumulative Weight", row=1, col=2, title_font=dict(size=14))
-        fig.update_xaxes(title_text="EDL Type", row=2, col=1, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Count / Weight", row=2, col=1, title_font=dict(size=14))
-        fig.update_xaxes(title_text="c_bulk", row=2, col=2, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(size=14))
-       
-        return fig
 
 
 # =============================================
@@ -2521,7 +1739,7 @@ class ResultsManager:
         export = {
             'metadata': {
                 'generated_at': datetime.now().isoformat(),
-                'interpolation_method': 'core_shell_temporal_transformer',
+                'interpolation_method': 'core_shell_hybrid_weight_transformer',
                 'visualization_params': visualization_params
             },
             'result': {
@@ -2529,6 +1747,7 @@ class ResultsManager:
                 'shape': res['shape'],
                 'num_sources': res['num_sources'],
                 'weights': res['weights'],
+                'sources_data': res.get('sources_data', []),
                 'time_norm': res.get('time_norm', 1.0),
                 'time_real_s': res.get('time_real_s', 0.0),
                 'growth_rate': res['derived'].get('growth_rate', 0.0)
@@ -2560,35 +1779,6 @@ class ResultsManager:
         json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
         return json_str, filename
     
-    def export_to_csv(self, interpolation_result, filename=None):
-        if filename is None:
-            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-            p = interpolation_result['target_params']
-            fc = p.get('fc', 0); rs = p.get('rs', 0)
-            cb = p.get('c_bulk', 0)
-            t = interpolation_result.get('time_real_s', 0)
-            filename = f"fields_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_t{t:.3e}s_{ts}.csv"
-        
-        shape = interpolation_result['shape']
-        L0 = interpolation_result['target_params'].get('L0_nm', 20.0)
-        x = np.linspace(0, L0, shape[1]); y = np.linspace(0, L0, shape[0])
-        X, Y = np.meshgrid(x, y)
-        
-        data = {'x_nm': X.flatten(), 'y_nm': Y.flatten(),
-               'time_norm': interpolation_result.get('time_norm', 0),
-               'time_real_s': interpolation_result.get('time_real_s', 0)}
-        
-        for fname, arr in interpolation_result['fields'].items():
-            data[fname] = arr.flatten()
-        
-        for dname, val in interpolation_result['derived'].items():
-            if isinstance(val, np.ndarray):
-                data[dname] = val.flatten()
-        
-        df = pd.DataFrame(data)
-        csv_str = df.to_csv(index=False)
-        return csv_str, filename
-    
     def _json_serializer(self, obj):
         if isinstance(obj, np.integer): return int(obj)
         elif isinstance(obj, np.floating): return float(obj)
@@ -2599,144 +1789,10 @@ class ResultsManager:
 
 
 # =============================================
-# ERROR COMPUTATION WITH PHYSICAL COORDINATE ALIGNMENT
-# =============================================
-def create_common_physical_grid(L0_list, target_resolution_nm=0.2):
-    """
-    Create a common physical grid for fair comparison across different L0 domains.
-    """
-    L_ref = np.ceil(max(L0_list) / 10) * 10  # Round up to nearest 10nm
-    n_pixels = int(np.ceil(L_ref / target_resolution_nm))
-    n_pixels = max(n_pixels, 256)  # Ensure minimum resolution
-    x_ref = np.linspace(0, L_ref, n_pixels)
-    y_ref = np.linspace(0, L_ref, n_pixels)
-    return L_ref, x_ref, y_ref, (n_pixels, n_pixels)
-
-
-def resample_to_physical_grid(field, L0_original, x_ref, y_ref, method='linear'):
-    """
-    Resample a field from its original physical domain to a reference grid.
-    """
-    H, W = field.shape
-    x_orig = np.linspace(0, L0_original, W)
-    y_orig = np.linspace(0, L0_original, H)
-    
-    # Create interpolator (note: RegularGridInterpolator expects (y, x) ordering)
-    interpolator = RegularGridInterpolator(
-        (y_orig, x_orig), field,
-        method=method, bounds_error=False, fill_value=0.0
-    )
-    
-    # Create meshgrid for target coordinates
-    X_ref, Y_ref = np.meshgrid(x_ref, y_ref, indexing='xy')
-    points = np.stack([Y_ref.ravel(), X_ref.ravel()], axis=1)
-    
-    # Interpolate
-    field_resampled = interpolator(points).reshape(Y_ref.shape)
-    return field_resampled
-
-
-def compare_fields_physical(gt_field, gt_L0, interp_field, interp_L0,
-                           target_resolution_nm=0.2, compare_region='overlap'):
-    """
-    ✅ ENHANCEMENT 2: Compare two fields with different domain sizes using
-    physical-coordinate alignment.
-    """
-    # 1. Create common reference grid
-    L_ref, x_ref, y_ref, shape_ref = create_common_physical_grid(
-        [gt_L0, interp_L0], target_resolution_nm
-    )
-    
-    # 2. Resample both fields
-    gt_resampled = resample_to_physical_grid(gt_field, gt_L0, x_ref, y_ref)
-    interp_resampled = resample_to_physical_grid(interp_field, interp_L0, x_ref, y_ref)
-    
-    # 3. Optional: Mask to overlapping region only
-    if compare_region == 'overlap':
-        gt_mask = np.zeros(shape_ref, dtype=bool)
-        interp_mask = np.zeros(shape_ref, dtype=bool)
-        
-        gt_H, gt_W = gt_field.shape
-        interp_H, interp_W = interp_field.shape
-        
-        gt_x_max_idx = int(np.round(gt_L0 / target_resolution_nm))
-        gt_y_max_idx = int(np.round(gt_L0 / target_resolution_nm))
-        interp_x_max_idx = int(np.round(interp_L0 / target_resolution_nm))
-        interp_y_max_idx = int(np.round(interp_L0 / target_resolution_nm))
-        
-        gt_mask[:gt_y_max_idx, :gt_x_max_idx] = True
-        interp_mask[:interp_y_max_idx, :interp_x_max_idx] = True
-        
-        valid_mask = gt_mask & interp_mask
-        if np.sum(valid_mask) < 100:
-            valid_mask = np.ones_like(valid_mask)
-    else:
-        valid_mask = np.ones(shape_ref, dtype=bool)
-    
-    # 4. Compute errors on aligned, masked fields
-    gt_valid = gt_resampled[valid_mask]
-    interp_valid = interp_resampled[valid_mask]
-    
-    mse = np.mean((gt_valid - interp_valid) ** 2)
-    mae = np.mean(np.abs(gt_valid - interp_valid))
-    max_err = np.max(np.abs(gt_valid - interp_valid))
-    
-    # SSIM on cropped valid region
-    if np.sum(valid_mask) > 1000:
-        y_idx, x_idx = np.where(valid_mask)
-        y_min, y_max = y_idx.min(), y_idx.max()
-        x_min, x_max = x_idx.min(), x_idx.max()
-        ssim_val = ssim(
-            gt_resampled[y_min:y_max, x_min:x_max],
-            interp_resampled[y_min:y_max, x_min:x_max],
-            data_range=max(gt_resampled.max() - gt_resampled.min(), 1e-6)
-        )
-    else:
-        ssim_val = np.nan
-    
-    return {
-        'gt_aligned': gt_resampled,
-        'interp_aligned': interp_resampled,
-        'valid_mask': valid_mask,
-        'L_ref': L_ref,
-        'shape_ref': shape_ref,
-        'metrics': {
-            'MSE': mse,
-            'MAE': mae,
-            'Max Error': max_err,
-            'SSIM': ssim_val,
-            'valid_pixels': int(np.sum(valid_mask))
-        }
-    }
-
-
-def compute_errors(gt_field, interp_field):
-    """
-    Compute quantitative error metrics between ground truth and interpolated fields.
-    """
-    flat_gt = gt_field.flatten()
-    flat_interp = interp_field.flatten()
-    
-    mse = mean_squared_error(flat_gt, flat_interp)
-    mae = mean_absolute_error(flat_gt, interp_field)
-    max_err = np.max(np.abs(gt_field - interp_field))
-    
-    data_range = max(gt_field.max() - gt_field.min(),
-                    interp_field.max() - interp_field.min(), 1e-6)
-    
-    if data_range == 0:
-        ssim_val = 1.0 if np.allclose(gt_field, interp_field) else 0.0
-    else:
-        ssim_val = ssim(gt_field, interp_field, data_range=data_range)
-    
-    return {'MSE': mse, 'MAE': mae, 'Max Error': max_err, 'SSIM': ssim_val}
-
-
-# =============================================
 # MAIN STREAMLIT APP
 # =============================================
 def main():
-    st.set_page_config(page_title="Core‑Shell Deposition: Full Temporal Interpolation",
+    st.set_page_config(page_title="Core‑Shell Deposition: Hybrid Weight Interpolation",
                       layout="wide", page_icon="🧪", initial_sidebar_state="expanded")
     
     st.markdown("""
@@ -2750,27 +1806,29 @@ def main():
         border-radius: 0.6rem; margin: 1.2rem 0; font-size: 1.1rem; }
     .memory-stats { background-color: #FEF3C7; border-left: 5px solid #F59E0B; padding: 1.0rem;
         border-radius: 0.4rem; margin: 0.8rem 0; font-size: 0.9rem; }
-    .color-legend { display: flex; gap: 1rem; margin: 0.5rem 0; }
-    .color-item { display: flex; align-items: center; gap: 0.3rem; font-size: 0.9rem; }
-    .color-box { width: 20px; height: 20px; border: 1px solid #333; }
+    .weight-formula { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-left: 5px solid #3B82F6; padding: 1.5rem; border-radius: 10px;
+        margin: 1.5rem 0; font-family: 'Courier New', monospace; font-size: 1.1rem;
+        color: white; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition: Full Temporal Interpolation</h1>',
+    st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition: Hybrid Weight Interpolation</h1>',
                unsafe_allow_html=True)
     
     st.markdown("""
-    <div style="background:#f8f9fa; padding:0.8rem; border-radius:0.4rem; margin:1rem 0;">
-    <strong>Material Proxy Colors (max(φ,ψ)+ψ):</strong>
-    <div class="color-legend">
-    <div class="color-item"><div class="color-box" style="background:rgb(228,26,28)"></div>Electrolyte (φ≤0.5, ψ≤0.5)</div>
-    <div class="color-item"><div class="color-box" style="background:rgb(255,127,0)"></div>Ag shell (φ>0.5, ψ≤0.5)</div>
-    <div class="color-item"><div class="color-box" style="background:rgb(153,153,153)"></div>Cu core (ψ>0.5)</div>
-    </div>
+    <div class="weight-formula">
+    <strong>HYBRID WEIGHT FORMULA:</strong><br><br>
+    wᵢ = α(L0)ᵢ × β(params)ᵢ × γ(shape)ᵢ × Attentionᵢ<br><br>
+    <strong>Components:</strong><br>
+    • α(L0): L₀ proximity weight (tiered preference: 5/15/30/50nm)<br>
+    • β(params): Parameter closeness (fc, rs, c_bulk) with individual weights<br>
+    • γ(shape): Radial profile similarity boost<br>
+    • Attention: Learned transformer attention scores<br><br>
+    <strong>Result:</strong> Sources weighted proportionally by hybrid weight magnitude
     </div>
     """, unsafe_allow_html=True)
     
-    # Initialize session state
     if 'solutions' not in st.session_state:
         st.session_state.solutions = []
     if 'loader' not in st.session_state:
@@ -2779,8 +1837,8 @@ def main():
         st.session_state.interpolator = CoreShellInterpolator()
     if 'visualizer' not in st.session_state:
         st.session_state.visualizer = HeatMapVisualizer()
-    if 'weight_visualizer' not in st.session_state:   # <-- ADDED
-        st.session_state.weight_visualizer = WeightVisualizer()
+    if 'weight_visualizer' not in st.session_state:
+        st.session_state.weight_visualizer = HybridWeightVisualizer()
     if 'results_manager' not in st.session_state:
         st.session_state.results_manager = ResultsManager()
     if 'temporal_manager' not in st.session_state:
@@ -2790,7 +1848,6 @@ def main():
     if 'last_target_hash' not in st.session_state:
         st.session_state.last_target_hash = None
     
-    # Sidebar
     with st.sidebar:
         st.markdown('<h2 class="section-header">⚙️ Configuration</h2>', unsafe_allow_html=True)
         
@@ -2821,10 +1878,6 @@ def main():
         bc_type = st.selectbox("BC type", ["Neu", "Dir"], index=0)
         use_edl = st.checkbox("Use EDL catalyst", value=True)
         mode = st.selectbox("Mode", ["2D (planar)", "3D (spherical)"], index=0)
-        growth_model = st.selectbox("Growth model", ["Model A", "Model B"], index=0)
-        alpha_nd = st.slider("α (coupling)", 0.0, 10.0, 2.0, 0.1)
-        tau0_input = st.number_input("τ₀ (×10⁻⁴ s)", 1e-6, 1e6, 1.0) * 1e-4
-        tau0_target = tau0_input
         
         st.divider()
         
@@ -2834,55 +1887,20 @@ def main():
         sigma_c = st.slider("Kernel σ (c_bulk)", 0.05, 0.3, 0.15, 0.01)
         sigma_L = st.slider("Kernel σ (L0_nm)", 0.05, 0.3, 0.15, 0.01)
         temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
-        gating_mode = st.selectbox(
-            "Composite Gating Mode",
-            ["Hierarchical: L0 → fc → rs → c_bulk",
-             "Hierarchical-Parallel: L0 → (fc, rs, c_bulk)",
-             "Joint Multiplicative",
-             "No Gating"],
-            index=0,
-            help="Hierarchical modes apply L0 gate first, then sub‑gates only if L0 is close."
-        )
         
-        # NEW: Shape-aware refinement parameters
         st.markdown("#### 🌀 Shape-Aware Refinement")
-        lambda_shape = st.slider("λ (shape boost weight)", 0.0, 1.0, 0.5, 0.05,
-                               help="Controls how much the radial profile similarity adds to the weight.")
-        sigma_shape = st.slider("σ_shape (radial similarity)", 0.05, 0.5, 0.15, 0.01,
-                              help="Decay constant for the exponential of radial MSE.")
+        lambda_shape = st.slider("λ (shape boost weight)", 0.0, 1.0, 0.5, 0.05)
+        sigma_shape = st.slider("σ_shape (radial similarity)", 0.05, 0.5, 0.15, 0.01)
         
-        # ✅ NEW: Gating Preferences (Optional Categorical Check)
-        st.markdown("#### 🎚️ Gating Preferences")
-        require_categorical_match = st.checkbox(
-            "Require exact categorical match",
-            value=False,
-            help="Enable only if sources have mixed modes/BCs/EDL settings. Disable for homogeneous datasets."
-        )
+        n_key_frames = st.slider("Key frames", 1, 20, 5, 1)
+        lru_cache_size = st.slider("LRU cache size", 1, 5, 3, 1)
         
-        l0_preference_mode = st.selectbox(
-            "L0 preference mode",
-            ["Tiered (5/15/30/50nm)", "Gaussian (σ=8nm)", "Hybrid"],
-            index=0,
-            help="Tiered: ΔL0<5nm preferred, 5-15nm acceptable, 15-30nm marginal, 30-50nm poor"
-        )
-        if l0_preference_mode == "Tiered":
-            st.caption("Preferred: ΔL0<5nm → Acceptable: 5-15nm → Marginal: 15-30nm → Poor: 30-50nm")
-        
-        n_key_frames = st.slider("Key frames for temporal interpolation", 1, 20, 5, 1,
-                               help="More frames = smoother animation but more memory")
-        lru_cache_size = st.slider("Interactive cache size", 1, 5, 3, 1,
-                                 help="Frames to keep in memory for slider responsiveness")
-        
-        # Compute target hash
         target = {
             'fc': fc, 'rs': rs, 'c_bulk': c_bulk, 'L0_nm': L0_nm,
-            'bc_type': bc_type, 'use_edl': use_edl, 'mode': mode,
-            'growth_model': growth_model, 'alpha_nd': alpha_nd,
-            'tau0_s': tau0_target
+            'bc_type': bc_type, 'use_edl': use_edl, 'mode': mode
         }
         target_hash = hashlib.md5(json.dumps(target, sort_keys=True).encode()).hexdigest()[:16]
         
-        # Initialize temporal manager
         if target_hash != st.session_state.last_target_hash:
             if st.button("🧠 Initialize Temporal Interpolation", type="primary",
                         use_container_width=True):
@@ -2893,7 +1911,6 @@ def main():
                         st.session_state.interpolator.set_parameter_sigma(
                             [sigma_fc, sigma_rs, sigma_c, sigma_L])
                         st.session_state.interpolator.temperature = temperature
-                        st.session_state.interpolator.set_gating_mode(gating_mode)
                         st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
                         
                         st.session_state.temporal_manager = TemporalFieldManager(
@@ -2901,38 +1918,33 @@ def main():
                             st.session_state.solutions,
                             target,
                             n_key_frames=n_key_frames,
-                            lru_size=lru_cache_size,
-                            require_categorical_match=require_categorical_match
+                            lru_size=lru_cache_size
                         )
                         st.session_state.last_target_hash = target_hash
                         st.session_state.current_time = 1.0
                         st.success("Temporal interpolation ready!")
         
-        # Memory stats display
         if st.session_state.temporal_manager:
             with st.expander("💾 Memory Statistics"):
                 stats = st.session_state.temporal_manager.get_memory_stats()
                 st.markdown(f"""
                 <div class="memory-stats">
                 <strong>Memory Usage:</strong><br>
-                • Key frames: {stats['key_frame_entries']} frames ({stats['key_frames_mb']:.1f} MB)<br>
-                • LRU cache: {stats['lru_entries']} frames ({stats['lru_cache_mb']:.1f} MB)<br>
+                • Key frames: {stats['key_frame_entries']} ({stats['key_frames_mb']:.1f} MB)<br>
+                • LRU cache: {stats['lru_entries']} ({stats['lru_cache_mb']:.1f} MB)<br>
                 • <strong>Total: {stats['total_mb']:.1f} MB</strong>
                 </div>
                 """, unsafe_allow_html=True)
     
-    # Main area
     if st.session_state.temporal_manager:
         mgr = st.session_state.temporal_manager
         
         st.markdown('<h2 class="section-header">⏱️ Temporal Control</h2>', unsafe_allow_html=True)
         col_time1, col_time2, col_time3 = st.columns([3, 1, 1])
         with col_time1:
-            current_time_norm = st.slider("Normalized Time (0=start, 1=end)",
-                                         0.0, 1.0,
+            current_time_norm = st.slider("Normalized Time", 0.0, 1.0,
                                          value=st.session_state.current_time,
-                                         step=0.001,
-                                         format="%.3f")
+                                         step=0.001, format="%.3f")
             st.session_state.current_time = current_time_norm
         with col_time2:
             if st.button("⏮️ Start", use_container_width=True):
@@ -2949,15 +1961,11 @@ def main():
         col_info1, col_info2, col_info3 = st.columns(3)
         with col_info1:
             st.metric("Current Thickness", f"{current_thickness:.3f} nm")
-        with col_info2:
-            st.empty()
         with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
         
-        # Tabs including the enhanced Ground Truth Comparison
-        tabs = st.tabs(["📊 Field Visualization", "📈 Thickness Evolution",
-                       "🎬 Animation", "🧪 Derived Quantities", "⚖️ Weights",
-                       "💾 Export", "🔍 Ground Truth Comparison"])
+        tabs = st.tabs(["📊 Field Visualization", "⚖️ Hybrid Weight Analysis",
+                       "📈 Thickness Evolution", "💾 Export"])
         
         with tabs[0]:
             st.markdown('<h2 class="section-header">📊 Field Visualization</h2>',
@@ -2977,8 +1985,7 @@ def main():
             else:
                 field_data = fields[field_key]
             
-            cmap_cat = st.selectbox("Colormap category", list(COLORMAP_OPTIONS.keys()), index=0)
-            cmap = st.selectbox("Colormap", COLORMAP_OPTIONS[cmap_cat], index=0)
+            cmap = st.selectbox("Colormap", COLORMAP_OPTIONS['Sequential'], index=0)
             
             fig = st.session_state.visualizer.create_field_heatmap(
                 field_data,
@@ -2986,299 +1993,111 @@ def main():
                 cmap_name=cmap,
                 L0_nm=L0_nm,
                 target_params=target,
-                time_real_s=current_time_real,
-                colorbar_label="Material" if field_key == 'material' else field_choice.split()[0]
+                time_real_s=current_time_real
             )
             st.pyplot(fig)
-            
-            if st.checkbox("Show interactive heatmap"):
-                fig_inter = st.session_state.visualizer.create_interactive_heatmap(
-                    field_data,
-                    title=f"Interactive {field_choice}",
-                    cmap_name=cmap,
-                    L0_nm=L0_nm,
-                    target_params=target,
-                    time_real_s=current_time_real
-                )
-                st.plotly_chart(fig_inter, use_container_width=True)
-            
-            if st.checkbox("Show temporal evolution grid"):
-                n_compare = st.slider("Number of time points", 3, 9, 5)
-                times_compare_norm = np.linspace(0, 1, n_compare)
-                times_compare_real = [mgr.get_time_real(t) for t in times_compare_norm]
-                fields_list = []
-                for t in times_compare_norm:
-                    f = mgr.get_fields(t, use_interpolation=True)
-                    if field_key == 'material':
-                        f['material'] = DepositionPhysics.material_proxy(f['phi'], f['psi'])
-                    fields_list.append(f)
-                fig_grid = st.session_state.visualizer.create_temporal_comparison_plot(
-                    fields_list, times_compare_real,
-                    field_key='material' if field_key == 'material' else field_key,
-                    cmap_name=cmap, L0_nm=L0_nm
-                )
-                st.pyplot(fig_grid)
         
         with tabs[1]:
+            st.markdown('<h2 class="section-header">⚖️ Hybrid Weight Analysis</h2>',
+                       unsafe_allow_html=True)
+            
+            weights = mgr.weights
+            
+            st.markdown("""
+            <div class="info-box">
+            <strong>Weight Quantification:</strong> Each source receives multiple weight components
+            that are combined into a hybrid weight. The source with highest net weight contributes
+            most to the interpolation, others contribute proportionally.
+            </div>
+            """, unsafe_allow_html=True)
+            
+            weight_tabs = st.tabs(["📊 Sankey Diagram", "🔗 Chord Diagram",
+                                  "🕸️ Radar Chart", "📈 Breakdown"])
+            
+            interp_res = st.session_state.interpolator.interpolate_fields(
+                st.session_state.solutions, target, target_shape=(256,256),
+                n_time_points=100, time_norm=current_time_norm
+            )
+            sources_data = interp_res.get('sources_data', []) if interp_res else []
+            
+            with weight_tabs[0]:
+                st.markdown("#### 📊 Enhanced Sankey Diagram")
+                if sources_
+                    fig_sankey = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
+                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                    )
+                    st.plotly_chart(fig_sankey, use_container_width=True)
+            
+            with weight_tabs[1]:
+                st.markdown("#### 🔗 Enhanced Chord Diagram")
+                if sources_
+                    fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
+                        sources_data, target
+                    )
+                    st.plotly_chart(fig_chord, use_container_width=True)
+            
+            with weight_tabs[2]:
+                st.markdown("#### 🕸️ Hierarchical Radar Chart")
+                if sources_
+                    fig_radar = st.session_state.weight_visualizer.create_hierarchical_radar_chart(
+                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                    )
+                    st.plotly_chart(fig_radar, use_container_width=True)
+            
+            with weight_tabs[3]:
+                st.markdown("#### 📈 Weight Formula Breakdown")
+                if sources_
+                    fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
+                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                    )
+                    st.plotly_chart(fig_breakdown, use_container_width=True)
+            
+            st.markdown("#### 📋 Weight Diagnostics")
+            col_w1, col_w2, col_w3 = st.columns(3)
+            with col_w1:
+                st.metric("Weight Entropy", f"{weights.get('entropy', 0):.4f}",
+                         help="Higher = more uncertain")
+            with col_w2:
+                st.metric("Max Weight", f"{weights.get('max_weight', 0):.4f}",
+                         help="Lower = less confident")
+            with col_w3:
+                st.metric("Effective Sources", weights.get('effective_sources', 0),
+                         help="Sources with weight > 0.01")
+            
+            if sources_
+                st.markdown("#### 📋 Source Weight Table")
+                df_weights = pd.DataFrame(sources_data)
+                st.dataframe(
+                    df_weights[['source_index', 'L0_nm', 'fc', 'l0_weight', 'fc_weight',
+                               'beta_weight', 'attention_weight', 'combined_weight']].style
+                    .format({
+                        'L0_nm': '{:.0f}',
+                        'fc': '{:.2f}',
+                        'l0_weight': '{:.4f}',
+                        'fc_weight': '{:.4f}',
+                        'beta_weight': '{:.4f}',
+                        'attention_weight': '{:.4f}',
+                        'combined_weight': '{:.4f}'
+                    })
+                )
+        
+        with tabs[2]:
             st.markdown('<h2 class="section-header">📈 Thickness Evolution</h2>',
                        unsafe_allow_html=True)
             thickness_time = mgr.thickness_time
-            show_growth = st.checkbox("Show growth rate", value=False)
             
-            fig_th = st.session_state.visualizer.create_thickness_plot(
-                thickness_time,
-                title=f"Shell Thickness Evolution (fc={fc:.3f}, rs={rs:.3f}, c_bulk={c_bulk:.2f})",
-                current_time_norm=current_time_norm,
-                current_time_real=current_time_real,
-                show_growth_rate=show_growth
-            )
-            st.pyplot(fig_th)
-            
-            st.markdown("#### Thickness Statistics")
-            th_arr = np.array(thickness_time['th_nm'])
+            fig_th = plt.figure(figsize=(10, 6), dpi=300)
             t_arr = np.array(thickness_time['t_real_s']) if 't_real_s' in thickness_time else np.array(thickness_time['t_norm'])
-            
-            stats_cols = st.columns(4)
-            with stats_cols[0]:
-                st.metric("Final Thickness", f"{th_arr[-1]:.3f} nm")
-            with stats_cols[1]:
-                st.metric("Initial Growth Rate",
-                         f"{(th_arr[1]-th_arr[0])/(t_arr[1]-t_arr[0]):.3f} nm/s")
-            with stats_cols[2]:
-                avg_rate = (th_arr[-1] - th_arr[0]) / (t_arr[-1] - t_arr[0])
-                st.metric("Avg Growth Rate", f"{avg_rate:.3f} nm/s")
-            with stats_cols[3]:
-                idx_50 = np.argmin(np.abs(th_arr - 0.5*th_arr[-1]))
-                st.metric("Time to 50% thickness", f"{t_arr[idx_50]:.3e} s")
-        
-        with tabs[2]:
-            st.markdown('<h2 class="section-header">🎬 Animation</h2>',
-                       unsafe_allow_html=True)
-            anim_method = st.radio("Animation method",
-                                  ["Real-time interpolation", "Pre-rendered (smooth)"],
-                                  help="Real-time: compute on fly, lower memory. Pre-rendered: smoother but uses disk.")
-            
-            if anim_method == "Real-time interpolation":
-                fps = st.slider("FPS", 1, 30, 10)
-                n_frames = st.slider("Frames", 10, 100, 30)
-                if st.button("▶️ Play Animation", use_container_width=True):
-                    placeholder = st.empty()
-                    times = np.linspace(0, 1, n_frames)
-                    for t_norm in times:
-                        fields = mgr.get_fields(t_norm, use_interpolation=True)
-                        t_real = mgr.get_time_real(t_norm)
-                        field_data = DepositionPhysics.material_proxy(fields['phi'],
-                                                                    fields['psi']) if field_key == 'material' else fields[field_key]
-                        fig = st.session_state.visualizer.create_field_heatmap(
-                            field_data,
-                            title=f"t = {t_real:.3e} s",
-                            cmap_name=cmap,
-                            L0_nm=L0_nm,
-                            target_params=target,
-                            time_real_s=t_real,
-                            colorbar_label="Material" if field_key == 'material' else field_choice.split()[0]
-                        )
-                        placeholder.pyplot(fig)
-                        time.sleep(1/fps)
-                    st.success("Animation complete")
-            else:  # Pre-rendered
-                n_frames = st.slider("Pre-render frames", 20, 100, 50)
-                if st.button("🎥 Pre-render Animation", use_container_width=True):
-                    with st.spinner(f"Rendering {n_frames} frames to disk..."):
-                        frame_paths = mgr.prepare_animation_streaming(n_frames)
-                        st.success(f"Pre-rendered {len(frame_paths)} frames")
-                    
-                    if mgr.animation_frame_paths:
-                        fps = st.slider("Playback FPS", 1, 30, 15)
-                        if st.button("▶️ Play Pre-rendered", use_container_width=True):
-                            placeholder = st.empty()
-                            for i, frame_path in enumerate(mgr.animation_frame_paths):
-                                data = np.load(frame_path)
-                                fields = {'phi': data['phi'], 'c': data['c'], 'psi': data['psi']}
-                                t_real = float(data['time_real_s'])
-                                field_data = DepositionPhysics.material_proxy(fields['phi'],
-                                                                            fields['psi']) if field_key == 'material' else fields[field_key]
-                                fig = st.session_state.visualizer.create_field_heatmap(
-                                    field_data,
-                                    title=f"t = {t_real:.3e} s [Pre-rendered]",
-                                    cmap_name=cmap,
-                                    L0_nm=L0_nm,
-                                    target_params=target,
-                                    time_real_s=t_real,
-                                    colorbar_label="Material" if field_key == 'material' else field_choice.split()[0]
-                                )
-                                placeholder.pyplot(fig)
-                                time.sleep(1/fps)
-                            st.success("Playback complete")
-                    
-                    if st.button("🗑️ Clean Pre-rendered", use_container_width=True):
-                        mgr.cleanup_animation()
-                        st.success("Cleaned up")
+            th_arr = np.array(thickness_time['th_nm'])
+            plt.plot(t_arr, th_arr, 'b-', linewidth=3, label='Interpolated')
+            plt.xlabel("Time (s)" if 't_real_s' in thickness_time else "Normalized Time")
+            plt.ylabel("Thickness (nm)")
+            plt.title(f"Shell Thickness Evolution")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            st.pyplot(fig_th)
         
         with tabs[3]:
-            st.markdown('<h2 class="section-header">🧪 Derived Quantities</h2>',
-                       unsafe_allow_html=True)
-            res = st.session_state.interpolator.interpolate_fields(
-                st.session_state.solutions, target, target_shape=(256,256),
-                n_time_points=100, time_norm=current_time_norm,
-                require_categorical_match=require_categorical_match
-            )
-            
-            if res:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Shell thickness (nm)", f"{res['derived']['thickness_nm']:.3f}")
-                with col2:
-                    st.metric("Growth rate (nm/s)",
-                             f"{res['derived'].get('growth_rate', 0):.3f}")
-                with col3:
-                    st.metric("Sources used", res['num_sources'])
-                
-                st.subheader("Phase Statistics")
-                stats = res['derived']['phase_stats']
-                cols = st.columns(3)
-                with cols[0]:
-                    st.metric("Electrolyte", f"{stats['Electrolyte'][0]:.4f} nd²",
-                             help=f"Real: {stats['Electrolyte'][1]*1e18:.2f} nm²")
-                with cols[1]:
-                    st.metric("Ag shell", f"{stats['Ag'][0]:.4f} nd²",
-                             help=f"Real: {stats['Ag'][1]*1e18:.2f} nm²")
-                with cols[2]:
-                    st.metric("Cu core", f"{stats['Cu'][0]:.4f} nd²",
-                             help=f"Real: {stats['Cu'][1]*1e18:.2f} nm²")
-                
-                col_viz1, col_viz2 = st.columns(2)
-                with col_viz1:
-                    st.subheader("Material Proxy")
-                    st.markdown("*Threshold logic: Electrolyte=red (φ≤0.5,ψ≤0.5) | Ag=orange (φ>0.5,ψ≤0.5) | Cu=gray (ψ>0.5)*")
-                    fig_mat = st.session_state.visualizer.create_field_heatmap(
-                        res['derived']['material'], "Material Proxy",
-                        cmap_name='Set1', L0_nm=L0_nm, target_params=target,
-                        colorbar_label="Material", vmin=0, vmax=2,
-                        time_real_s=current_time_real
-                    )
-                    st.pyplot(fig_mat)
-                with col_viz2:
-                    st.subheader("Potential Proxy")
-                    fig_pot = st.session_state.visualizer.create_field_heatmap(
-                        res['derived']['potential'], "Potential Proxy",
-                        cmap_name='RdBu_r', L0_nm=L0_nm, target_params=target,
-                        colorbar_label="-α·c",
-                        time_real_s=current_time_real
-                    )
-                    st.pyplot(fig_pot)
-        
-        # ================== MODIFIED WEIGHTS TAB ==================
-        with tabs[4]:
-            st.markdown('<h2 class="section-header">⚖️ Weights & Uncertainty</h2>',
-                       unsafe_allow_html=True)
-            weights = mgr.weights
-            
-            # Display new refinement factors if available
-            if 'alpha' in weights:
-                st.subheader("Shape-Aware Refinement Factors")
-                df_refine = pd.DataFrame({
-                    'Source': range(len(weights['alpha'])),
-                    'α (L0)': weights['alpha'],
-                    'β (params)': weights['beta'],
-                    'γ (shape)': weights['gamma'],
-                    'refinement_factor': weights['refinement_factor']
-                })
-                st.dataframe(df_refine.style.format("{:.4f}"))
-            
-            df_weights = pd.DataFrame({
-                'Source': range(len(weights['combined'])),
-                'Combined': weights['combined'],
-                'Attention': weights['attention']
-            })
-            st.dataframe(df_weights.style.format("{:.4f}"))
-            
-            entropy = weights.get('entropy', 0.0)
-            max_weight = weights.get('max_weight', 0.0)
-            effective_sources = weights.get('effective_sources', 0)
-            
-            col_w1, col_w2, col_w3 = st.columns(3)
-            with col_w1:
-                st.metric("Weight Entropy (Uncertainty)", f"{entropy:.4f}",
-                         help="Higher = more uncertain (sources contribute equally)")
-            with col_w2:
-                st.metric("Max Weight", f"{max_weight:.4f}",
-                         help="Lower = less confident interpolation")
-            with col_w3:
-                st.metric("Effective Sources", effective_sources,
-                         help="Sources with weight > 0.01")
-            
-            if max_weight < 0.2:
-                st.warning("⚠️ Moderate confidence: No source closely matches target parameters")
-            
-            fig_w, ax = plt.subplots(figsize=(10,5))
-            x = np.arange(len(weights['combined']))
-            width = 0.35
-            ax.bar(x - width/2, weights['attention'], width, label='Attention (learned)', alpha=0.7)
-            ax.bar(x + width/2, weights['combined'], width, label='Combined', alpha=0.7)
-            ax.set_xlabel('Source Index')
-            ax.set_ylabel('Weight')
-            ax.set_title('Interpolation Weights (Attention + Physics Refinement)')
-            ax.legend()
-            st.pyplot(fig_w)
-            
-            # --- NEW: Advanced weight visualizations ---
-            st.markdown("---")
-            st.subheader("Advanced Weight Diagrams")
-            if st.checkbox("Show enhanced weight visualizations", value=False):
-                # Build sources_data from mgr.sources and mgr.weights
-                if mgr.sources and 'alpha' in mgr.weights:
-                    sources_data = []
-                    for i, src in enumerate(mgr.sources):
-                        # Ensure we have the needed keys; gamma might be missing
-                        sources_data.append({
-                            'source_index': i,
-                            'c_bulk': src['params'].get('c_bulk', 0.5),
-                            'L0_nm': src['params'].get('L0_nm', 20.0),
-                            'fc': src['params'].get('fc', 0.18),
-                            'rs': src['params'].get('rs', 0.2),
-                            'use_edl': src['params'].get('use_edl', False),
-                            'alpha': mgr.weights['alpha'][i] if i < len(mgr.weights['alpha']) else 0.0,
-                            'beta': mgr.weights['beta'][i] if i < len(mgr.weights['beta']) else 0.0,
-                            'gamma': mgr.weights.get('gamma', [0.0]*len(mgr.sources))[i] if i < len(mgr.weights.get('gamma', [])) else 0.0,
-                            'combined_weight': mgr.weights['combined'][i] if i < len(mgr.weights['combined']) else 0.0,
-                            'attention_weight': mgr.weights['attention'][i] if i < len(mgr.weights['attention']) else 0.0
-                        })
-                    
-                    target_c_bulk = mgr.target_params.get('c_bulk', 0.5)
-                    target_L0 = mgr.target_params.get('L0_nm', 20.0)
-                    alpha_sigma = sigma_L  # from sidebar
-                    
-                    # Create visualizations
-                    viz = st.session_state.weight_visualizer
-                    
-                    with st.spinner("Generating Sankey diagram..."):
-                        fig_sankey = viz.create_enhanced_sankey_diagram(
-                            sources_data, target_c_bulk, target_L0, alpha_sigma
-                        )
-                        st.plotly_chart(fig_sankey, use_container_width=True)
-                    
-                    with st.spinner("Generating chord diagram..."):
-                        fig_chord = viz.create_enhanced_chord_diagram(
-                            sources_data, target_c_bulk, target_L0
-                        )
-                        st.plotly_chart(fig_chord, use_container_width=True)
-                    
-                    with st.spinner("Generating radar chart..."):
-                        fig_radar = viz.create_hierarchical_radar_chart(
-                            sources_data, target_c_bulk, target_L0, alpha_sigma
-                        )
-                        st.plotly_chart(fig_radar, use_container_width=True)
-                    
-                    with st.spinner("Generating breakdown plots..."):
-                        fig_breakdown = viz.create_weight_formula_breakdown(
-                            sources_data, target_c_bulk, target_L0, alpha_sigma
-                        )
-                        st.plotly_chart(fig_breakdown, use_container_width=True)
-                else:
-                    st.info("Weight component data not available. Please re-run interpolation with shape-aware refinement enabled.")
-        
-        with tabs[5]:
             st.markdown('<h2 class="section-header">💾 Export Data</h2>',
                        unsafe_allow_html=True)
             col_exp1, col_exp2 = st.columns(2)
@@ -3286,246 +2105,15 @@ def main():
                 if st.button("📊 Export Current State (JSON)", use_container_width=True):
                     res = st.session_state.interpolator.interpolate_fields(
                         st.session_state.solutions, target, target_shape=(256,256),
-                        n_time_points=100, time_norm=current_time_norm,
-                        require_categorical_match=require_categorical_match
+                        n_time_points=100, time_norm=current_time_norm
                     )
                     if res:
                         export_data = st.session_state.results_manager.prepare_export_data(
-                            res, {'cmap': cmap, 'field': field_key,
-                                 'time_norm': current_time_norm,
-                                 'time_real_s': current_time_real}
+                            res, {'time_norm': current_time_norm, 'time_real_s': current_time_real}
                         )
                         json_str, fname = st.session_state.results_manager.export_to_json(export_data)
                         st.download_button("⬇️ Download JSON", json_str, fname, "application/json")
-            with col_exp2:
-                if st.button("📈 Export Current State (CSV)", use_container_width=True):
-                    res = st.session_state.interpolator.interpolate_fields(
-                        st.session_state.solutions, target, target_shape=(256,256),
-                        n_time_points=100, time_norm=current_time_norm,
-                        require_categorical_match=require_categorical_match
-                    )
-                    if res:
-                        csv_str, fname = st.session_state.results_manager.export_to_csv(res)
-                        st.download_button("⬇️ Download CSV", csv_str, fname, "text/csv")
-            
-            st.markdown("#### Full Temporal Export")
-            if st.button("📦 Export All Key Frames (ZIP)", use_container_width=True):
-                import zipfile
-                import io
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    for t_norm in mgr.key_times:
-                        res_t = st.session_state.interpolator.interpolate_fields(
-                            st.session_state.solutions, target, target_shape=(256,256),
-                            n_time_points=100, time_norm=t_norm,
-                            require_categorical_match=require_categorical_match
-                        )
-                        if res_t:
-                            export_data = st.session_state.results_manager.prepare_export_data(
-                                res_t, {'time_norm': t_norm,
-                                       'time_real_s': res_t.get('time_real_s',0)}
-                            )
-                            json_str, _ = st.session_state.results_manager.export_to_json(export_data)
-                            zip_file.writestr(f"frame_t{t_norm:.4f}.json", json_str)
-                st.download_button("⬇️ Download ZIP",
-                                  zip_buffer.getvalue(),
-                                  f"temporal_sequence_{target_hash}.zip",
-                                  "application/zip")
-        
-        # ✅ ENHANCEMENT 2 & 3: Enhanced Ground Truth Comparison Tab
-        with tabs[6]:
-            st.markdown('<h2 class="section-header">🔍 Ground Truth Comparison</h2>',
-                       unsafe_allow_html=True)
-            if not st.session_state.solutions:
-                st.warning("No solutions loaded for ground truth comparison. Load some PKL files first.")
-            else:
-                target = mgr.target_params
-                
-                # Filter and select ground truth based on closeness to target parameters
-                close_solutions = []
-                for idx, sol in enumerate(st.session_state.solutions):
-                    sol_params = sol['params']
-                    deltas = [
-                        abs(DepositionParameters.normalize(target.get('fc', 0.18), 'fc') -
-                           DepositionParameters.normalize(sol_params.get('fc', 0.18), 'fc')),
-                        abs(DepositionParameters.normalize(target.get('rs', 0.2), 'rs') -
-                           DepositionParameters.normalize(sol_params.get('rs', 0.2), 'rs')),
-                        abs(DepositionParameters.normalize(target.get('c_bulk', 0.5), 'c_bulk') -
-                           DepositionParameters.normalize(sol_params.get('c_bulk', 0.5), 'c_bulk')),
-                        abs(DepositionParameters.normalize(target.get('L0_nm', 20.0), 'L0_nm') -
-                           DepositionParameters.normalize(sol_params.get('L0_nm', 20.0), 'L0_nm'))
-                    ]
-                    dist = np.sqrt(sum(d**2 for d in deltas))
-                    if dist < 0.3:
-                        close_solutions.append((idx, dist, sol))
-                
-                if not close_solutions:
-                    st.info("No close-matching ground truth found. Showing all solutions.")
-                    close_solutions = [(idx, 0, sol) for idx, sol in enumerate(st.session_state.solutions)]
-                close_solutions.sort(key=lambda x: x[1])
-                
-                gt_options = [f"Source {s[0]} (dist={s[1]:.3f}): fc={s[2]['params'].get('fc',0):.3f}, "
-                            f"rs={s[2]['params'].get('rs',0):.3f}, c={s[2]['params'].get('c_bulk',0):.2f}, "
-                            f"L0={s[2]['params'].get('L0_nm',20):.1f} nm"
-                            for s in close_solutions]
-                selected_gt_label = st.selectbox("Select Ground Truth Simulation", gt_options)
-                
-                if selected_gt_label:
-                    gt_idx = int(selected_gt_label.split("Source ")[1].split(" ")[0])
-                    gt_sol = st.session_state.solutions[gt_idx]
-                    gt_params = gt_sol['params']
-                    
-                    with st.spinner("Computing interpolation at ground truth parameters..."):
-                        interp_res = st.session_state.interpolator.interpolate_fields(
-                            st.session_state.solutions, gt_params, target_shape=(256,256),
-                            n_time_points=100, time_norm=st.session_state.current_time,
-                            require_categorical_match=require_categorical_match
-                        )
-                        
-                        if interp_res:
-                            gt_mgr = TemporalFieldManager(st.session_state.interpolator,
-                                                         [gt_sol], gt_params,
-                                                         n_key_frames=5, lru_size=1,
-                                                         require_categorical_match=False)
-                            gt_fields = gt_mgr.get_fields(st.session_state.current_time)
-                            
-                            target_shape = interp_res['shape']
-                            for key in gt_fields:
-                                if gt_fields[key].shape != target_shape:
-                                    factors = (target_shape[0]/gt_fields[key].shape[0],
-                                              target_shape[1]/gt_fields[key].shape[1])
-                                    gt_fields[key] = zoom(gt_fields[key], factors, order=1)
-                            
-                            interp_material = DepositionPhysics.material_proxy(
-                                interp_res['fields']['phi'], interp_res['fields']['psi'])
-                            gt_material = DepositionPhysics.material_proxy(
-                                gt_fields['phi'], gt_fields['psi'])
-                            
-                            compare_fields = {
-                                'phi (shell)': ('phi', 'viridis'),
-                                'c (concentration)': ('c', 'plasma'),
-                                'psi (core)': ('psi', 'inferno'),
-                                'material proxy': ('material', 'Set1')
-                            }
-                            
-                            # ✅ ENHANCEMENT 2: Physical coordinate alignment toggle
-                            use_physical_alignment = st.checkbox(
-                                "✅ Use Physical Coordinate Alignment (for different L0)",
-                                value=True,
-                                help="Resample both fields to common physical grid before comparison"
-                            )
-                            
-                            # ✅ ENHANCEMENT 3: Radial profile comparison toggle
-                            use_radial_profile = st.checkbox(
-                                "📊 Compare Radial Profiles (L0-invariant)",
-                                value=False,
-                                help="Compare radially-averaged profiles instead of 2D fields"
-                            )
-                            
-                            for field_title, (field_key, cmap_choice) in compare_fields.items():
-                                st.subheader(field_title)
-                                
-                                if field_key == 'material':
-                                    interp_data = interp_material
-                                    gt_data = gt_material
-                                else:
-                                    interp_data = interp_res['fields'][field_key]
-                                    gt_data = gt_fields[field_key]
-                                
-                                # ✅ ENHANCEMENT 2: Physical alignment for different L0
-                                if use_physical_alignment:
-                                    gt_L0 = gt_params.get('L0_nm', 20.0)
-                                    interp_L0 = gt_params.get('L0_nm', 20.0)
-                                    comparison = compare_fields_physical(
-                                        gt_data, gt_L0, interp_data, interp_L0,
-                                        target_resolution_nm=0.2,
-                                        compare_region='overlap'
-                                    )
-                                    gt_aligned = comparison['gt_aligned']
-                                    interp_aligned = comparison['interp_aligned']
-                                    errors = comparison['metrics']
-                                    st.info(f"📐 Aligned to {comparison['L_ref']:.1f}nm grid, "
-                                         f"{errors['valid_pixels']} valid pixels")
-                                else:
-                                    gt_aligned = gt_data
-                                    interp_aligned = interp_data
-                                    errors = compute_errors(gt_data, interp_data)
-                                
-                                # ✅ ENHANCEMENT 3: Radial profile comparison
-                                if use_radial_profile:
-                                    gt_L0 = gt_params.get('L0_nm', 20.0)
-                                    interp_L0 = gt_params.get('L0_nm', 20.0)
-                                    r_gt, prof_gt = DepositionPhysics.compute_radial_profile(
-                                        gt_aligned, gt_L0, n_bins=100)
-                                    r_interp, prof_interp = DepositionPhysics.compute_radial_profile(
-                                        interp_aligned, interp_L0, n_bins=100)
-                                    
-                                    # Interpolate to common radial grid
-                                    r_common = np.linspace(0, min(r_gt[-1], r_interp[-1]), 100)
-                                    prof_gt_interp = np.interp(r_common, r_gt, prof_gt)
-                                    prof_interp_interp = np.interp(r_common, r_interp, prof_interp)
-                                    
-                                    mse_radial = np.mean((prof_gt_interp - prof_interp_interp)**2)
-                                    
-                                    fig_radial, ax_radial = plt.subplots(figsize=(10, 6))
-                                    ax_radial.plot(r_gt, prof_gt, 'b-', linewidth=2, label='Ground Truth')
-                                    ax_radial.plot(r_interp, prof_interp, 'r--', linewidth=2,
-                                                  label='Interpolated')
-                                    ax_radial.set_xlabel('Radius (nm)')
-                                    ax_radial.set_ylabel('Field Value')
-                                    ax_radial.set_title(f'Radial Profile Comparison: {field_title}')
-                                    ax_radial.legend()
-                                    ax_radial.grid(True, alpha=0.3)
-                                    st.pyplot(fig_radial)
-                                    st.metric("Radial MSE", f"{mse_radial:.4e}")
-                                
-                                # Display metrics
-                                col_err1, col_err2, col_err3, col_err4 = st.columns(4)
-                                col_err1.metric("MSE", f"{errors['MSE']:.4e}")
-                                col_err2.metric("MAE", f"{errors['MAE']:.4e}")
-                                col_err3.metric("Max Error", f"{errors['Max Error']:.4e}")
-                                col_err4.metric("SSIM", f"{errors['SSIM']:.3f}"
-                                              if not np.isnan(errors['SSIM']) else "N/A")
-                                
-                                # Insights
-                                if errors['SSIM'] > 0.9:
-                                    strength = "Strong structural similarity – interpolation captures overall patterns well."
-                                else:
-                                    strength = "Moderate similarity – some structural differences."
-                                if errors['Max Error'] > 0.1 * (gt_aligned.max() - gt_aligned.min()):
-                                    weakness = "High max errors likely in interface regions or boundaries."
-                                else:
-                                    weakness = "Low max errors – consistent across domain."
-                                st.info(f"**Strengths:** {strength}\n\n**Weaknesses:** {weakness}")
-                                
-                                # Plots: 3 columns
-                                col_plot1, col_plot2, col_plot3 = st.columns(3)
-                                with col_plot1:
-                                    st.markdown("**Ground Truth**")
-                                    fig_gt = st.session_state.visualizer.create_field_heatmap(
-                                        gt_aligned, "Ground Truth", cmap_name=cmap_choice,
-                                        L0_nm=comparison['L_ref'] if use_physical_alignment else gt_params.get('L0_nm',20.0)
-                                    )
-                                    st.pyplot(fig_gt)
-                                with col_plot2:
-                                    st.markdown("**Interpolated**")
-                                    fig_interp = st.session_state.visualizer.create_field_heatmap(
-                                        interp_aligned, "Interpolated", cmap_name=cmap_choice,
-                                        L0_nm=comparison['L_ref'] if use_physical_alignment else gt_params.get('L0_nm',20.0)
-                                    )
-                                    st.pyplot(fig_interp)
-                                with col_plot3:
-                                    st.markdown("**Difference (GT - Interp)**")
-                                    diff = gt_aligned - interp_aligned
-                                    fig_diff = st.session_state.visualizer.create_field_heatmap(
-                                        diff, "Difference", cmap_name='RdBu_r',
-                                        L0_nm=comparison['L_ref'] if use_physical_alignment else gt_params.get('L0_nm',20.0)
-                                    )
-                                    st.pyplot(fig_diff)
-                            
-                            del gt_mgr
-                        else:
-                            st.error("Failed to compute interpolation for comparison.")
+    
     else:
         st.info("""
         👈 **Get Started:**
@@ -3533,8 +2121,12 @@ def main():
         2. Set target parameters
         3. Click **"Initialize Temporal Interpolation"**
         
-        The system will pre-compute key frames for smooth temporal exploration
-        while keeping memory usage low (~15-20 MB).
+        **Hybrid Weight Features:**
+        • Individual parameter weights (L0, fc, rs, c_bulk)
+        • Physics refinement factors (α, β, γ)
+        • Transformer attention scores
+        • Combined hybrid weights for proportional source weighting
+        • Comprehensive weight visualization (Sankey, Chord, Radar, Breakdown)
         """)
 
 
