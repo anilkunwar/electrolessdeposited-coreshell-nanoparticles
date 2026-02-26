@@ -12,7 +12,7 @@ ENHANCEMENTS IN THIS VERSION:
 6. Nearest Neighbor Fallback - Honest results when no compatible sources exist
 7. Shape-Aware Soft Refinement - Adds constructive minor weights based on radial profile similarity
 8. SYNTAX ERROR FIXED - Line 814 'thickness_history_nm' check completed with 'in data:'
-9. WEIGHT VISUALIZATION - Advanced diagrams (Sankey, chord, radar, breakdown) added
+9. ADVANCED WEIGHT VISUALIZATIONS - Sankey, chord, radar, breakdown diagrams (from Code 2)
 """
 import streamlit as st
 import numpy as np
@@ -1625,7 +1625,7 @@ class HeatMapVisualizer:
 
 
 # =============================================
-# ENHANCED WEIGHT VISUALIZER WITH ADVANCED DIAGRAMS  <-- ADDED
+# ENHANCED WEIGHT VISUALIZER WITH ADVANCED DIAGRAMS  <-- ADDED (from Code 2)
 # =============================================
 class WeightVisualizer:
     def __init__(self):
@@ -3168,7 +3168,7 @@ def main():
                     )
                     st.pyplot(fig_pot)
         
-        # ================== MODIFIED WEIGHTS TAB ==================
+        # ================== MODIFIED WEIGHTS TAB WITH ADVANCED DIAGRAMS ==================
         with tabs[4]:
             st.markdown('<h2 class="section-header">⚖️ Weights & Uncertainty</h2>',
                        unsafe_allow_html=True)
@@ -3222,7 +3222,7 @@ def main():
             ax.legend()
             st.pyplot(fig_w)
             
-            # --- NEW: Advanced weight visualizations ---
+            # --- NEW: Advanced weight visualizations (from Code 2) ---
             st.markdown("---")
             st.subheader("Advanced Weight Diagrams")
             if st.checkbox("Show enhanced weight visualizations", value=False):
