@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 """
 Transformer-Inspired Interpolation for Electroless Ag Shell Deposition on Cu Core
-FULL TEMPORAL SUPPORT + MEMORY-EFFICIENT ARCHITECTURE + REAL-TIME UNITS
-HYBRID WEIGHT QUANTIFICATION SYSTEM:
-1. Individual Parameter Weights - L0, fc, rs, c_bulk each get independent weight factors
-2. Transformer Attention Weights - Learned similarity from neural network
-3. Hybrid Weight Computation - Combine all weights proportionally
-4. Weight Distribution Analysis - Show relative contribution of each weight component
-5. Proportional Source Employment - Highest net weight source most important, others reduced proportionally
+FULL TEMPORAL SUPPORT + HYBRID WEIGHT QUANTIFICATION + PHYSICS-AWARE INTERPOLATION
+
+KEY ENHANCEMENTS IN THIS VERSION:
+1. HYBRID WEIGHT COMPUTATION - Combines individual parameter weights + attention + physics refinement
+2. WEIGHT VISUALIZATION - Sankey, Chord, Radar, and Breakdown diagrams for weight analysis
+3. PROPORTIONAL SOURCE WEIGHTING - Sources weighted by hybrid weight magnitude
+4. INDIVIDUAL PARAMETER WEIGHTS - L0, fc, rs, c_bulk each get separate weight components
+5. PHYSICS REFINEMENT FACTORS - Alpha (L0), Beta (params), Gamma (shape) refinement
+6. TRANSFORMER ATTENTION - Learned attention scores combined with physics priors
+7. WEIGHT DIAGNOSTICS - Entropy, max weight, effective sources for uncertainty quantification
 """
 import streamlit as st
 import numpy as np
@@ -41,6 +44,7 @@ from functools import lru_cache
 import hashlib
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from skimage.metrics import structural_similarity as ssim
+from math import cos, sin, pi
 warnings.filterwarnings('ignore')
 
 # =============================================
@@ -138,10 +142,6 @@ class DepositionParameters:
             return 10**log_val
         else:
             return norm_value * (high - low) + low
-    
-    @staticmethod
-    def get_physical_core_radius(fc: float, L0_nm: float) -> float:
-        return fc * L0_nm
 
 # =============================================
 # DEPOSITION PHYSICS
@@ -214,146 +214,465 @@ class DepositionPhysics:
         return r_centers, profile
 
 # =============================================
-# HYBRID WEIGHT QUANTIFICATION SYSTEM
+# HYBRID WEIGHT VISUALIZER (from angular bracketing code)
 # =============================================
-class HybridWeightQuantifier:
+class HybridWeightVisualizer:
     """
-    Computes hybrid weights by combining:
-    1. Individual parameter weights (L0, fc, rs, c_bulk)
-    2. Transformer attention weights (learned)
-    3. Physics-based refinement factors
-    
-    Formula: w_hybrid = (w_attention × w_L0 × w_fc × w_rs × w_cb) / Σ(...)
+    Comprehensive weight visualization system adapted from angular bracketing theory.
+    Creates Sankey, Chord, Radar, and Breakdown diagrams for weight analysis.
     """
     
-    def __init__(self, param_sigmas=None, param_weights=None):
-        # Default sigmas (normalized tolerance for each parameter)
-        if param_sigmas is None:
-            param_sigmas = {
-                'L0_nm': 0.10,    # 10% tolerance
-                'fc': 0.20,       # 20% tolerance
-                'rs': 0.30,       # 30% tolerance
-                'c_bulk': 0.15    # 15% tolerance (log-normalized)
-            }
-        self.param_sigmas = param_sigmas
-        
-        # Default weights (relative importance of each parameter)
-        if param_weights is None:
-            param_weights = {
-                'L0_nm': 1.0,     # Baseline (most critical)
-                'fc': 0.7,        # Curvature effects
-                'rs': 0.3,        # Initial condition (transient)
-                'c_bulk': 1.0     # Kinetic dominance
-            }
-        self.param_weights = param_weights
-    
-    def compute_individual_parameter_weights(self, source_params: List[Dict], 
-                                            target_params: Dict) -> Dict[str, np.ndarray]:
-        """
-        Compute individual weight factors for each parameter independently.
-        Returns dict with weight arrays for L0, fc, rs, c_bulk.
-        """
-        weights = {}
-        
-        for param_name in ['L0_nm', 'fc', 'rs', 'c_bulk']:
-            param_weights = []
-            sigma = self.param_sigmas[param_name]
-            weight = self.param_weights[param_name]
-            
-            target_val = target_params.get(param_name, 0.5)
-            target_norm = DepositionParameters.normalize(target_val, param_name)
-            
-            for src in source_params:
-                src_val = src.get(param_name, 0.5)
-                src_norm = DepositionParameters.normalize(src_val, param_name)
-                
-                # Gaussian weight based on normalized difference
-                diff = src_norm - target_norm
-                w = np.exp(-0.5 * weight * (diff / sigma) ** 2)
-                param_weights.append(w)
-            
-            weights[param_name] = np.array(param_weights)
-        
-        return weights
-    
-    def compute_hybrid_weights(self, attention_weights: np.ndarray,
-                              individual_weights: Dict[str, np.ndarray],
-                              temperature: float = 1.0) -> Tuple[np.ndarray, Dict]:
-        """
-        Combine attention weights with individual parameter weights.
-        
-        Formula: w_hybrid_i = softmax( log(attention_i) + Σ log(param_weight_i) )
-        
-        This ensures:
-        - Highest net weight source gets most importance
-        - Others reduced proportionally
-        - All weight components contribute multiplicatively
-        """
-        n_sources = len(attention_weights)
-        
-        # Start with log of attention weights (numerical stability)
-        log_weights = np.log(attention_weights + 1e-10)
-        
-        # Add log of individual parameter weights
-        for param_name, param_weights in individual_weights.items():
-            log_weights += np.log(param_weights + 1e-10)
-        
-        # Apply temperature scaling
-        log_weights = log_weights / temperature
-        
-        # Convert back to probabilities via softmax
-        max_log = np.max(log_weights)
-        exp_weights = np.exp(log_weights - max_log)
-        hybrid_weights = exp_weights / (np.sum(exp_weights) + 1e-10)
-        
-        # Compute weight distribution analysis
-        weight_analysis = {
-            'attention_contribution': attention_weights / (np.sum(attention_weights) + 1e-10),
-            'L0_contribution': individual_weights['L0_nm'] / (np.sum(individual_weights['L0_nm']) + 1e-10),
-            'fc_contribution': individual_weights['fc'] / (np.sum(individual_weights['fc']) + 1e-10),
-            'rs_contribution': individual_weights['rs'] / (np.sum(individual_weights['rs']) + 1e-10),
-            'c_bulk_contribution': individual_weights['c_bulk'] / (np.sum(individual_weights['c_bulk']) + 1e-10),
-            'hybrid': hybrid_weights,
-            'entropy': -np.sum(hybrid_weights * np.log(hybrid_weights + 1e-10)),
-            'max_weight': np.max(hybrid_weights),
-            'effective_sources': np.sum(hybrid_weights > 0.01)
+    def __init__(self):
+        self.color_scheme = {
+            'L0': '#FF6B6B',        # Red
+            'fc': '#4ECDC4',        # Turquoise
+            'rs': '#95E1D3',        # Light Teal
+            'c_bulk': '#FFD93D',    # Yellow
+            'Attention': '#9D4EDD', # Purple
+            'Spatial': '#36A2EB',   # Blue
+            'Combined': '#9966FF',  # Purple
+            'Query': '#FF6B6B'      # Red
         }
         
-        return hybrid_weights, weight_analysis
-    
-    def create_weight_breakdown_dataframe(self, source_params: List[Dict],
-                                         individual_weights: Dict[str, np.ndarray],
-                                         attention_weights: np.ndarray,
-                                         hybrid_weights: np.ndarray) -> pd.DataFrame:
-        """Create comprehensive dataframe showing all weight components."""
-        df_data = {
-            'Source': range(len(source_params)),
-            'L0_nm': [src.get('L0_nm', 20.0) for src in source_params],
-            'fc': [src.get('fc', 0.18) for src in source_params],
-            'rs': [src.get('rs', 0.2) for src in source_params],
-            'c_bulk': [src.get('c_bulk', 0.5) for src in source_params],
-            'w_attention': attention_weights,
-            'w_L0': individual_weights['L0_nm'],
-            'w_fc': individual_weights['fc'],
-            'w_rs': individual_weights['rs'],
-            'w_c_bulk': individual_weights['c_bulk'],
-            'w_hybrid': hybrid_weights
+        self.font_config = {
+            'family': 'Arial, sans-serif',
+            'size_title': 24,
+            'size_labels': 18,
+            'size_ticks': 14,
+            'color': '#2C3E50',
+            'weight': 'bold'
         }
+    
+    def get_colormap(self, cmap_name, n_colors=10):
+        """Get color palette from colormap"""
+        try:
+            cmap = plt.get_cmap(cmap_name)
+            return [f'rgb({int(r*255)}, {int(g*255)}, {int(b*255)})'
+                    for r, g, b, _ in [cmap(i/n_colors) for i in range(n_colors)]]
+        except:
+            cmap = plt.get_cmap('viridis')
+            return [f'rgb({int(r*255)}, {int(g*255)}, {int(b*255)})'
+                    for r, g, b, _ in [cmap(i/n_colors) for i in range(n_colors)]]
+    
+    def create_enhanced_sankey_diagram(self, sources_data, target_params, param_sigmas):
+        """
+        Create enhanced Sankey diagram showing weight component flow for core-shell parameters.
+        """
+        labels = ['Target']
         
-        df = pd.DataFrame(df_data)
+        for source in sources_data:
+            idx = source['source_index']
+            l0 = source['L0_nm']
+            fc = source['fc']
+            labels.append(f"S{idx}\nL0={l0:.0f}nm\nfc={fc:.2f}")
         
-        # Add relative contribution percentages
-        df['attention_%'] = df['w_attention'] / df['w_attention'].sum() * 100
-        df['L0_%'] = df['w_L0'] / df['w_L0'].sum() * 100
-        df['fc_%'] = df['w_fc'] / df['w_fc'].sum() * 100
-        df['rs_%'] = df['w_rs'] / df['w_rs'].sum() * 100
-        df['c_bulk_%'] = df['w_c_bulk'] / df['w_c_bulk'].sum() * 100
-        df['hybrid_%'] = df['w_hybrid'] / df['w_hybrid'].sum() * 100
+        component_start = len(labels)
+        labels.extend(['L0 Weight', 'fc Weight', 'rs Weight', 'c_bulk Weight', 
+                      'Attention', 'Physics Refinement', 'Combined Weight'])
         
-        # Sort by hybrid weight (highest first)
-        df = df.sort_values('w_hybrid', ascending=False).reset_index(drop=True)
+        source_indices = []
+        target_indices = []
+        values = []
+        colors = []
         
-        return df
+        color_palette = self.get_colormap('viridis', len(sources_data) + 7)
+        
+        for i, source in enumerate(sources_data):
+            source_idx = i + 1
+            source_color = color_palette[i % len(color_palette)]
+            
+            # L0 weight
+            source_indices.append(source_idx)
+            target_indices.append(component_start)
+            values.append(source['l0_weight'] * 100)
+            colors.append(f'rgba(255, 107, 107, 0.8)')
+            
+            # fc weight
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 1)
+            values.append(source['fc_weight'] * 100)
+            colors.append(f'rgba(78, 205, 196, 0.8)')
+            
+            # rs weight
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 2)
+            values.append(source['rs_weight'] * 100)
+            colors.append(f'rgba(149, 225, 211, 0.8)')
+            
+            # c_bulk weight
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 3)
+            values.append(source['c_bulk_weight'] * 100)
+            colors.append(f'rgba(255, 217, 61, 0.8)')
+            
+            # Attention weight
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 4)
+            values.append(source['attention_weight'] * 100)
+            colors.append(f'rgba(157, 78, 221, 0.8)')
+            
+            # Physics refinement
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 5)
+            values.append(source['physics_refinement'] * 100)
+            colors.append(f'rgba(54, 162, 235, 0.8)')
+            
+            # Combined weight
+            source_indices.append(source_idx)
+            target_indices.append(component_start + 6)
+            values.append(source['combined_weight'] * 100)
+            colors.append(f'rgba(153, 102, 255, 0.8)')
+        
+        for comp_idx in range(7):
+            source_indices.append(component_start + comp_idx)
+            target_indices.append(0)
+            comp_value = sum(v for s, t, v in zip(source_indices, target_indices, values)
+                           if t == component_start + comp_idx)
+            values.append(comp_value * 0.5)
+            colors.append(f'rgba(153, 102, 255, 0.6)')
+        
+        fig = go.Figure(data=[go.Sankey(
+            node=dict(
+                pad=25,
+                thickness=30,
+                line=dict(color="black", width=2),
+                label=labels,
+                color=["#FF6B6B"] + 
+                      [color_palette[i % len(color_palette)] for i in range(len(sources_data))] + 
+                      ["#FF6B6B", "#4ECDC4", "#95E1D3", "#FFD93D", "#9D4EDD", "#36A2EB", "#9966FF"],
+                hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<extra></extra>'
+            ),
+            link=dict(
+                source=source_indices,
+                target=target_indices,
+                value=values,
+                color=colors,
+                hovertemplate='<b>%{source.label}</b> → <b>%{target.label}</b><br>Flow: %{value:.2f}<extra></extra>',
+                line=dict(width=0.5, color='rgba(255,255,255,0.3)')
+            ),
+            hoverinfo='all'
+        )])
+        
+        fig.update_layout(
+            title=dict(
+                text=f'<b>SANKEY DIAGRAM: HYBRID WEIGHT COMPONENT FLOW</b><br>' + 
+                     f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
+                font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5, y=0.95, xanchor='center', yanchor='top'
+            ),
+            font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
+                     color=self.font_config['color']),
+            width=1400,
+            height=900,
+            plot_bgcolor='rgba(240, 240, 245, 0.9)',
+            paper_bgcolor='white',
+            margin=dict(t=100, l=50, r=50, b=50),
+            hoverlabel=dict(
+                font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
+                         color='white'),
+                bgcolor='rgba(44, 62, 80, 0.9)',
+                bordercolor='white'
+            )
+        )
+        
+        return fig
+    
+    def create_enhanced_chord_diagram(self, sources_data, target_params):
+        """
+        Create enhanced chord diagram with target at center and weight components.
+        """
+        n_sources = len(sources_data)
+        center_x, center_y = 0, 0
+        radius = 1.5
+        
+        source_positions = []
+        for i in range(n_sources):
+            angle = 2 * pi * i / n_sources
+            x = center_x + radius * cos(angle)
+            y = center_y + radius * sin(angle)
+            source_positions.append((x, y))
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=[center_x], y=[center_y],
+            mode='markers+text',
+            name='Target',
+            marker=dict(size=50, color=self.color_scheme['Query'],
+                       symbol='star', line=dict(width=3, color='white')),
+            text=[f'Target\nL0={target_params.get("L0_nm", 20):.0f}nm\nfc={target_params.get("fc", 0.18):.2f}'],
+            textposition="middle center",
+            textfont=dict(size=16, color='white', weight='bold'),
+            hoverinfo='text'
+        ))
+        
+        source_x = []
+        source_y = []
+        source_colors = []
+        source_sizes = []
+        
+        for i, source in enumerate(sources_data):
+            x, y = source_positions[i]
+            source_x.append(x)
+            source_y.append(y)
+            node_size = 20 + source['combined_weight'] * 60
+            source_sizes.append(node_size)
+            source_colors.append(self.color_scheme['Combined'])
+        
+        fig.add_trace(go.Scatter(
+            x=source_x, y=source_y,
+            mode='markers+text',
+            name='Sources',
+            marker=dict(size=source_sizes, color=source_colors,
+                       line=dict(width=2, color='white')),
+            text=[f"S{i}" for i in range(n_sources)],
+            textposition="top center",
+            textfont=dict(size=12, color='white', weight='bold'),
+            hoverinfo='text'
+        ))
+        
+        for i, source in enumerate(sources_data):
+            sx, sy = source_positions[i]
+            cx = (sx + center_x) / 2
+            cy = (sy + center_y) / 2
+            dx = center_x - sx
+            dy = center_y - sy
+            length = np.sqrt(dx*dx + dy*dy)
+            if length > 0:
+                nx = -dy / length * 0.3
+                ny = dx / length * 0.3
+            else:
+                nx, ny = 0, 0
+            
+            t = np.linspace(0, 1, 50)
+            
+            # Combined weight line (thickest)
+            combined_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx - nx*1.0) + t**2 * center_x
+            combined_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy - ny*1.0) + t**2 * center_y
+            combined_width = max(2, source['combined_weight'] * 20)
+            
+            fig.add_trace(go.Scatter(
+                x=combined_curve_x, y=combined_curve_y,
+                mode='lines',
+                name=f'Source {i} - Combined',
+                line=dict(width=combined_width, color='rgba(153, 102, 255, 0.8)', dash='solid'),
+                hoverinfo='text',
+                hovertext=f"Combined Weight: {source['combined_weight']:.3f}",
+                showlegend=False
+            ))
+        
+        fig.update_layout(
+            title=dict(
+                text=f'<b>ENHANCED CHORD DIAGRAM: HYBRID WEIGHT VISUALIZATION</b><br>' + 
+                     f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
+                font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5, y=0.95
+            ),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
+                       font=dict(size=self.font_config['size_labels'], family=self.font_config['family']),
+                       bgcolor='rgba(255, 255, 255, 0.8)', bordercolor='black', borderwidth=1),
+            width=1200,
+            height=1000,
+            plot_bgcolor='rgba(240, 240, 245, 0.9)',
+            paper_bgcolor='white',
+            hovermode='closest',
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-2.5, 2.5]),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-2.5, 2.5])
+        )
+        
+        return fig
+    
+    def create_hierarchical_radar_chart(self, sources_data, target_params, param_sigmas):
+        """Create hierarchical radar chart with weight components."""
+        fig = go.Figure()
+        
+        angles = [s['source_index'] * 60 for s in sources_data]  # Spread sources angularly
+        
+        l0_weights = [s['l0_weight'] for s in sources_data]
+        fc_weights = [s['fc_weight'] for s in sources_data]
+        rs_weights = [s['rs_weight'] for s in sources_data]
+        c_bulk_weights = [s['c_bulk_weight'] for s in sources_data]
+        attention_weights = [s['attention_weight'] for s in sources_data]
+        combined_weights = [s['combined_weight'] for s in sources_data]
+        
+        max_weight = max(max(l0_weights), max(fc_weights), max(rs_weights), 
+                        max(c_bulk_weights), max(attention_weights), max(combined_weights), 1e-6)
+        
+        l0_norm = [w/max_weight for w in l0_weights]
+        fc_norm = [w/max_weight for w in fc_weights]
+        rs_norm = [w/max_weight for w in rs_weights]
+        c_bulk_norm = [w/max_weight for w in c_bulk_weights]
+        attention_norm = [w/max_weight for w in attention_weights]
+        combined_norm = [w/max_weight for w in combined_weights]
+        
+        fig.add_trace(go.Scatterpolar(
+            r=l0_norm, theta=angles, mode='lines+markers',
+            name='L0 Weight', line=dict(color=self.color_scheme['L0'], width=3, dash='dash'),
+            marker=dict(size=10, color=self.color_scheme['L0']),
+            hoverinfo='text',
+            text=[f'L0 Weight: {w:.3f}' for w in l0_weights]
+        ))
+        
+        fig.add_trace(go.Scatterpolar(
+            r=fc_norm, theta=angles, mode='lines+markers',
+            name='fc Weight', line=dict(color=self.color_scheme['fc'], width=3, dash='dot'),
+            marker=dict(size=10, color=self.color_scheme['fc']),
+            hoverinfo='text',
+            text=[f'fc Weight: {w:.3f}' for w in fc_weights]
+        ))
+        
+        fig.add_trace(go.Scatterpolar(
+            r=combined_norm, theta=angles, mode='lines+markers',
+            name='Combined Weight', line=dict(color=self.color_scheme['Combined'], width=4),
+            marker=dict(size=12, color=self.color_scheme['Combined']),
+            hoverinfo='text',
+            text=[f'Combined: {w:.3f}' for w in combined_weights]
+        ))
+        
+        fig.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 1.1],
+                               tickfont=dict(size=14, family=self.font_config['family']),
+                               title=dict(text='Normalized Weight',
+                                         font=dict(size=16, family=self.font_config['family'], weight='bold'))),
+                angularaxis=dict(direction='clockwise', rotation=90,
+                                tickfont=dict(size=14, family=self.font_config['family'])),
+                bgcolor='rgba(240, 240, 245, 0.5)'
+            ),
+            title=dict(
+                text=f'<b>HIERARCHICAL RADAR CHART</b><br>Target: L0={target_params.get("L0_nm", 20):.0f}nm',
+                font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5
+            ),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
+                       font=dict(size=self.font_config['size_labels'], family=self.font_config['family'])),
+            width=1200,
+            height=900,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            hovermode='closest'
+        )
+        
+        return fig
+    
+    def create_weight_formula_breakdown(self, sources_data, target_params, param_sigmas):
+        """Create comprehensive weight formula breakdown visualization."""
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                '<b>Weight Component Breakdown</b>',
+                '<b>Cumulative Weight Distribution</b>',
+                '<b>Parameter Weight Analysis</b>',
+                '<b>Hybrid Weight Distribution</b>'
+            ),
+            vertical_spacing=0.15,
+            horizontal_spacing=0.1
+        )
+        
+        sources_data = sorted(sources_data, key=lambda x: x['source_index'])
+        source_indices = [s['source_index'] for s in sources_data]
+        
+        l0_values = [s['l0_weight'] for s in sources_data]
+        fc_values = [s['fc_weight'] for s in sources_data]
+        rs_values = [s['rs_weight'] for s in sources_data]
+        c_bulk_values = [s['c_bulk_weight'] for s in sources_data]
+        attention_values = [s['attention_weight'] for s in sources_data]
+        combined_values = [s['combined_weight'] for s in sources_data]
+        
+        # Plot 1: Component breakdown
+        fig.add_trace(go.Bar(
+            x=source_indices, y=l0_values, name='L0 Weight',
+            marker_color=self.color_scheme['L0'],
+            text=[f'{v:.3f}' for v in l0_values], textposition='outside', textfont=dict(size=10)
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Bar(
+            x=source_indices, y=fc_values, name='fc Weight',
+            marker_color=self.color_scheme['fc'],
+            text=[f'{v:.3f}' for v in fc_values], textposition='outside', textfont=dict(size=10)
+        ), row=1, col=1)
+        
+        fig.add_trace(go.Bar(
+            x=source_indices, y=attention_values, name='Attention',
+            marker_color=self.color_scheme['Attention'],
+            text=[f'{v:.3f}' for v in attention_values], textposition='outside', textfont=dict(size=10)
+        ), row=1, col=1)
+        
+        # Plot 2: Cumulative distribution
+        sorted_weights = np.sort(combined_values)[::-1]
+        cumulative = np.cumsum(sorted_weights) / np.sum(sorted_weights) if np.sum(sorted_weights) > 0 else np.zeros_like(sorted_weights)
+        x_vals = np.arange(1, len(cumulative) + 1)
+        
+        fig.add_trace(go.Scatter(
+            x=x_vals, y=cumulative, mode='lines+markers', name='Cumulative Weight',
+            line=dict(color=self.color_scheme['Combined'], width=4), marker=dict(size=8),
+            fill='tozeroy', fillcolor='rgba(153, 102, 255, 0.2)'
+        ), row=1, col=2)
+        
+        if len(cumulative) > 0 and np.sum(sorted_weights) > 0:
+            threshold_idx = np.where(cumulative >= 0.9)[0]
+            if len(threshold_idx) > 0:
+                fig.add_hline(y=0.9, line_dash="dash", line_color="red",
+                             annotation_text="90% threshold", row=1, col=2)
+                fig.add_vline(x=threshold_idx[0]+1, line_dash="dash", line_color="red", row=1, col=2)
+        
+        # Plot 3: Parameter weight analysis
+        param_means = [np.mean(l0_values), np.mean(fc_values), np.mean(rs_values), np.mean(c_bulk_values)]
+        param_names = ['L0', 'fc', 'rs', 'c_bulk']
+        param_colors = [self.color_scheme['L0'], self.color_scheme['fc'], 
+                       self.color_scheme['rs'], self.color_scheme['c_bulk']]
+        
+        fig.add_trace(go.Bar(
+            x=param_names, y=param_means, name='Mean Weight by Parameter',
+            marker_color=param_colors,
+            text=[f'{v:.3f}' for v in param_means], textposition='auto'
+        ), row=2, col=1)
+        
+        # Plot 4: Hybrid weight distribution
+        fig.add_trace(go.Scatter(
+            x=source_indices, y=combined_values, mode='markers+lines',
+            name='Combined Weight',
+            line=dict(color=self.color_scheme['Combined'], width=3),
+            marker=dict(size=15, color=self.color_scheme['Combined'],
+                       symbol='circle', line=dict(width=2, color='white')),
+            text=[f"S{i}: Combined={w:.3f}" for i, w in zip(source_indices, combined_values)]
+        ), row=2, col=2)
+        
+        fig.update_layout(
+            barmode='stack',
+            title=dict(
+                text=f'<b>HYBRID WEIGHT FORMULA ANALYSIS</b><br>' + 
+                     f'wᵢ = α(L0) × β(params) × γ(shape) × Attention<br>' + 
+                     f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
+                font=dict(family=self.font_config['family'], size=20,
+                         color=self.font_config['color'], weight='bold'),
+                x=0.5, y=0.98
+            ),
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
+                       font=dict(size=12)),
+            width=1400,
+            height=1000,
+            plot_bgcolor='white',
+            paper_bgcolor='white',
+            hovermode='closest'
+        )
+        
+        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Cumulative Weight", row=1, col=2, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Parameter", row=2, col=1, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Mean Weight", row=2, col=1, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Source Index", row=2, col=2, title_font=dict(size=14))
+        fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(size=14))
+        
+        return fig
 
 # =============================================
 # MEMORY-EFFICIENT TEMPORAL CACHE SYSTEM
@@ -375,7 +694,7 @@ class TemporalCacheEntry:
 
 
 class TemporalFieldManager:
-    """Three-tier temporal management system with hybrid weight quantification."""
+    """Three-tier temporal management system with hierarchical source filtering."""
     
     def __init__(self, interpolator, sources: List[Dict], target_params: Dict,
                  n_key_frames: int = 10, lru_size: int = 3,
@@ -587,6 +906,7 @@ class TemporalFieldManager:
             'key_frame_entries': len(self.key_frames)
         }
 
+
 # =============================================
 # ROBUST SOLUTION LOADER
 # =============================================
@@ -708,7 +1028,10 @@ class EnhancedSolutionLoader:
                 if 'meta' in data and isinstance(data['meta'], dict):
                     standardized['params'].update(data['meta'])
                 
-                if 'thickness_history_nm' in 
+                standardized['coords_nd'] = data.get('coords_nd', None)
+                standardized['diagnostics'] = data.get('diagnostics', [])
+                
+                if 'thickness_history_nm' in data:
                     thick_list = []
                     for entry in data['thickness_history_nm']:
                         if len(entry) >= 3:
@@ -753,7 +1076,6 @@ class EnhancedSolutionLoader:
                 params.setdefault('bc_type', params.get('bc_type', 'Neu'))
                 params.setdefault('use_edl', params.get('use_edl', False))
                 params.setdefault('mode', params.get('mode', '2D (planar)'))
-                params.setdefault('tau0_s', params.get('tau0_s', 1e-4))
                 
                 if not standardized['history']:
                     st.sidebar.warning(f"No snapshots in {os.path.basename(file_path)}")
@@ -789,6 +1111,7 @@ class EnhancedSolutionLoader:
         st.sidebar.success(f"Loaded {len(solutions)} solutions.")
         return solutions
 
+
 # =============================================
 # POSITIONAL ENCODING
 # =============================================
@@ -808,40 +1131,27 @@ class PositionalEncoding(nn.Module):
         pe[:, 1::2] = torch.cos(position * div_term)
         return x + pe.unsqueeze(0)
 
+
 # =============================================
-# CORE-SHELL INTERPOLATOR WITH HYBRID WEIGHTS
+# ENHANCED CORE‑SHELL INTERPOLATOR WITH HYBRID WEIGHTS
 # =============================================
 class CoreShellInterpolator:
     def __init__(self, d_model=64, nhead=8, num_layers=3,
                  param_sigma=None, temperature=1.0,
+                 gating_mode="Hierarchical: L0 → fc → rs → c_bulk",
                  lambda_shape=0.5, sigma_shape=0.15):
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
         
         if param_sigma is None:
-            param_sigma = {
-                'L0_nm': 0.10,
-                'fc': 0.20,
-                'rs': 0.30,
-                'c_bulk': 0.15
-            }
+            param_sigma = [0.15, 0.15, 0.15, 0.15]
         self.param_sigma = param_sigma
         
         self.temperature = temperature
+        self.gating_mode = gating_mode
         self.lambda_shape = lambda_shape
         self.sigma_shape = sigma_shape
-        
-        # Initialize hybrid weight quantifier
-        self.weight_quantifier = HybridWeightQuantifier(
-            param_sigmas=param_sigma,
-            param_weights={
-                'L0_nm': 1.0,
-                'fc': 0.7,
-                'rs': 0.3,
-                'c_bulk': 1.0
-            }
-        )
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -855,22 +1165,18 @@ class CoreShellInterpolator:
         self.pos_encoder = PositionalEncoding(d_model)
     
     def set_parameter_sigma(self, param_sigma):
-        if isinstance(param_sigma, list):
-            self.param_sigma = {
-                'fc': param_sigma[0],
-                'rs': param_sigma[1],
-                'c_bulk': param_sigma[2],
-                'L0_nm': param_sigma[3]
-            }
-        else:
-            self.param_sigma = param_sigma
-        self.weight_quantifier.param_sigmas = self.param_sigma
+        self.param_sigma = param_sigma
     
-    def set_temperature(self, temperature):
-        self.temperature = temperature
+    def set_gating_mode(self, gating_mode):
+        self.gating_mode = gating_mode
+    
+    def set_shape_params(self, lambda_shape, sigma_shape):
+        self.lambda_shape = lambda_shape
+        self.sigma_shape = sigma_shape
     
     def filter_sources_hierarchy(self, sources: List[Dict], target_params: Dict,
                               require_categorical_match: bool = False) -> Tuple[List[Dict], Dict]:
+        """Hierarchical Hard Masking with optional categorical checks."""
         valid_sources = []
         excluded_reasons = {'categorical': 0, 'L0_hard': 0, 'kept': 0}
         
@@ -906,6 +1212,112 @@ class CoreShellInterpolator:
             valid_sources = [sources[np.argmin(distances)]]
         
         return valid_sources, excluded_reasons
+    
+    def compute_alpha(self, source_params: List[Dict], target_L0: float,
+                     preference_tiers: Dict = None) -> np.ndarray:
+        """L0-proximity factor with configurable preference tiers."""
+        if preference_tiers is None:
+            preference_tiers = {
+                'preferred': (5.0, 1.0),
+                'acceptable': (15.0, 0.75),
+                'marginal': (30.0, 0.45),
+                'poor': (50.0, 0.15),
+                'exclude': (np.inf, 0.01)
+            }
+        
+        alphas = []
+        for src in source_params:
+            src_L0 = src.get('L0_nm', 20.0)
+            delta = abs(target_L0 - src_L0)
+            
+            if delta <= preference_tiers['preferred'][0]:
+                weight = preference_tiers['preferred'][1]
+            elif delta <= preference_tiers['acceptable'][0]:
+                t = (delta - 5.0) / (15.0 - 5.0)
+                weight = preference_tiers['preferred'][1] - t * (
+                    preference_tiers['preferred'][1] - preference_tiers['acceptable'][1])
+            elif delta <= preference_tiers['marginal'][0]:
+                t = (delta - 15.0) / (30.0 - 15.0)
+                weight = preference_tiers['acceptable'][1] - t * (
+                    preference_tiers['acceptable'][1] - preference_tiers['marginal'][1])
+            elif delta <= preference_tiers['poor'][0]:
+                t = (delta - 30.0) / (50.0 - 30.0)
+                weight = preference_tiers['marginal'][1] - t * (
+                    preference_tiers['marginal'][1] - preference_tiers['poor'][1])
+            else:
+                weight = preference_tiers['exclude'][1]
+            
+            alphas.append(weight)
+        
+        return np.array(alphas)
+    
+    def compute_beta(self, source_params: List[Dict], target_params: Dict) -> np.ndarray:
+        """
+        Parameter closeness factor for fc, rs, c_bulk with individual weight components.
+        Returns both combined beta and individual parameter weights.
+        """
+        weights = {'fc': 2.0, 'rs': 1.5, 'c_bulk': 3.0}
+        betas = []
+        individual_weights = {'fc': [], 'rs': [], 'c_bulk': []}
+        
+        for src in source_params:
+            sq_sum = 0.0
+            src_indiv_weights = {}
+            
+            for i, (pname, w) in enumerate(weights.items()):
+                norm_src = DepositionParameters.normalize(src.get(pname, 0.5), pname)
+                norm_tar = DepositionParameters.normalize(target_params.get(pname, 0.5), pname)
+                diff = norm_src - norm_tar
+                sigma_idx = ['fc', 'rs', 'c_bulk'].index(pname)
+                sigma = self.param_sigma[sigma_idx]
+                
+                # Individual parameter weight (Gaussian)
+                indiv_weight = np.exp(-0.5 * (diff / sigma) ** 2)
+                src_indiv_weights[pname] = indiv_weight
+                
+                sq_sum += w * (diff / sigma) ** 2
+            
+            beta = np.exp(-0.5 * sq_sum)
+            betas.append(beta)
+            
+            for pname in weights.keys():
+                individual_weights[pname].append(src_indiv_weights[pname])
+        
+        return np.array(betas), individual_weights
+    
+    def compute_gamma(self, source_fields: List[Dict], source_params: List[Dict],
+                     target_params: Dict, time_norm: float, beta_weights: np.ndarray) -> np.ndarray:
+        """Shape-similarity boost factor based on radial profile MSE."""
+        n_sources = len(source_fields)
+        if n_sources == 0:
+            return np.array([])
+        
+        profiles = []
+        radii_list = []
+        
+        for i, src in enumerate(source_params):
+            L0 = src.get('L0_nm', 20.0)
+            field = source_fields[i]['phi']
+            r_centers, profile = DepositionPhysics.compute_radial_profile(field, L0, n_bins=100)
+            profiles.append(profile)
+            radii_list.append(r_centers)
+        
+        max_radius = max([r[-1] for r in radii_list])
+        r_common = np.linspace(0, max_radius, 100)
+        
+        profiles_interp = []
+        for i in range(n_sources):
+            prof_interp = np.interp(r_common, radii_list[i], profiles[i], left=0, right=0)
+            profiles_interp.append(prof_interp)
+        profiles_interp = np.array(profiles_interp)
+        
+        beta_norm = beta_weights / (np.sum(beta_weights) + 1e-12)
+        ref_profile = np.sum(profiles_interp * beta_norm[:, None], axis=0)
+        
+        mse = np.mean((profiles_interp - ref_profile) ** 2, axis=1)
+        gamma = np.exp(-mse / self.sigma_shape)
+        
+        return gamma
     
     def encode_parameters(self, params_list: List[Dict]) -> torch.Tensor:
         features = []
@@ -946,14 +1358,8 @@ class CoreShellInterpolator:
             t_vals = np.array([s['t_nd'] for s in history])
             if t_target <= t_vals[0]:
                 snap = history[0]
-                phi = self._ensure_2d(snap['phi'])
-                c = self._ensure_2d(snap['c'])
-                psi = self._ensure_2d(snap['psi'])
             elif t_target >= t_vals[-1]:
                 snap = history[-1]
-                phi = self._ensure_2d(snap['phi'])
-                c = self._ensure_2d(snap['c'])
-                psi = self._ensure_2d(snap['psi'])
             else:
                 idx = np.searchsorted(t_vals, t_target) - 1
                 idx = max(0, min(idx, len(history)-2))
@@ -961,16 +1367,9 @@ class CoreShellInterpolator:
                 snap1, snap2 = history[idx], history[idx+1]
                 alpha = (t_target - t1) / (t2 - t1) if t2 > t1 else 0.0
                 
-                phi1 = self._ensure_2d(snap1['phi'])
-                phi2 = self._ensure_2d(snap2['phi'])
-                c1 = self._ensure_2d(snap1['c'])
-                c2 = self._ensure_2d(snap2['c'])
-                psi1 = self._ensure_2d(snap1['psi'])
-                psi2 = self._ensure_2d(snap2['psi'])
-                
-                phi = (1 - alpha) * phi1 + alpha * phi2
-                c = (1 - alpha) * c1 + alpha * c2
-                psi = (1 - alpha) * psi1 + alpha * psi2
+                phi = (1 - alpha) * self._ensure_2d(snap1['phi']) + alpha * self._ensure_2d(snap2['phi'])
+                c = (1 - alpha) * self._ensure_2d(snap1['c']) + alpha * self._ensure_2d(snap2['c'])
+                psi = (1 - alpha) * self._ensure_2d(snap1['psi']) + alpha * self._ensure_2d(snap2['psi'])
         
         if phi.shape != target_shape:
             factors = (target_shape[0]/phi.shape[0], target_shape[1]/phi.shape[1])
@@ -995,6 +1394,18 @@ class CoreShellInterpolator:
                           n_time_points: int = 100,
                           time_norm: Optional[float] = None,
                           require_categorical_match: bool = False):
+        """
+        Main interpolation method with HYBRID WEIGHT COMPUTATION.
+        
+        Weight Formula:
+        w_i = α(L0)_i × β(params)_i × γ(shape)_i × Attention_i
+        
+        Where:
+        - α(L0): L0 proximity weight (tiered preference)
+        - β(params): Parameter closeness (fc, rs, c_bulk)
+        - γ(shape): Radial profile similarity
+        - Attention: Learned transformer attention
+        """
         if not sources:
             return None
         
@@ -1002,6 +1413,15 @@ class CoreShellInterpolator:
             sources, target_params, require_categorical_match=require_categorical_match
         )
         active_sources = filtered_sources if filtered_sources else sources
+        
+        # Display L0 distribution diagnostics
+        if not require_categorical_match and len(active_sources) > 0:
+            l0_values = [src['params'].get('L0_nm', 20.0) for src in active_sources]
+            target_L0 = target_params.get('L0_nm', 20.0)
+            deltas = [abs(L0 - target_L0) for L0 in l0_values]
+            st.info(f"📊 L0 Distribution: target={target_L0}nm, "
+                   f"sources: min={min(l0_values):.1f}nm, max={max(l0_values):.1f}nm, "
+                   f"closest ΔL0={min(deltas):.1f}nm")
         
         source_params = []
         source_fields = []
@@ -1021,11 +1441,13 @@ class CoreShellInterpolator:
             params.setdefault('bc_type', params.get('bc_type', 'Neu'))
             params.setdefault('use_edl', params.get('use_edl', False))
             params.setdefault('mode', params.get('mode', '2D (planar)'))
-            params.setdefault('tau0_s', params.get('tau0_s', 1e-4))
             
             source_params.append(params)
             
-            t_req = 1.0 if time_norm is None else time_norm
+            if time_norm is None:
+                t_req = 1.0
+            else:
+                t_req = time_norm
             
             fields = self._get_fields_at_time(src, t_req, target_shape)
             source_fields.append(fields)
@@ -1057,7 +1479,23 @@ class CoreShellInterpolator:
             return None
         
         # ========== HYBRID WEIGHT COMPUTATION ==========
-        # 1. Transformer attention weights
+        target_L0 = target_params.get('L0_nm', 20.0)
+        
+        # 1. Alpha: L0 proximity weight
+        alpha = self.compute_alpha(source_params, target_L0)
+        
+        # 2. Beta: Parameter closeness (with individual components)
+        beta, individual_param_weights = self.compute_beta(source_params, target_params)
+        
+        # 3. Gamma: Shape similarity
+        beta_norm = beta / (np.sum(beta) + 1e-12)
+        gamma = self.compute_gamma(source_fields, source_params, target_params, 
+                                  t_req if t_req is not None else 1.0, beta_norm)
+        
+        # 4. Physics refinement factor
+        refinement_factor = alpha * beta * (1.0 + self.lambda_shape * gamma)
+        
+        # ========== TRANSFORMER ATTENTION ==========
         source_features = self.encode_parameters(source_params)
         target_features = self.encode_parameters([target_params])
         all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)
@@ -1072,32 +1510,46 @@ class CoreShellInterpolator:
         attn_scores = torch.matmul(target_rep.unsqueeze(1), 
                                   source_reps.transpose(1,2)).squeeze(1)
         attn_scores = attn_scores / np.sqrt(self.d_model) / self.temperature
-        attention_weights = torch.softmax(attn_scores, dim=-1).squeeze().detach().cpu().numpy()
         
-        # 2. Individual parameter weights
-        individual_weights = self.weight_quantifier.compute_individual_parameter_weights(
-            source_params, target_params
-        )
+        # ========== HYBRID WEIGHT COMBINATION ==========
+        final_scores = attn_scores * torch.FloatTensor(refinement_factor).unsqueeze(0)
+        final_weights = torch.softmax(final_scores, dim=-1).squeeze().detach().cpu().numpy()
         
-        # 3. Hybrid weights (combine attention + individual parameter weights)
-        hybrid_weights, weight_analysis = self.weight_quantifier.compute_hybrid_weights(
-            attention_weights, individual_weights, temperature=self.temperature
-        )
+        # Ensure final_weights is always a 1D array
+        if np.isscalar(final_weights):
+            final_weights = np.array([final_weights])
+        elif final_weights.ndim == 0:
+            final_weights = np.array([final_weights.item()])
+        elif final_weights.ndim > 1:
+            final_weights = final_weights.flatten()
         
-        # 4. Create weight breakdown dataframe for visualization
-        weight_df = self.weight_quantifier.create_weight_breakdown_dataframe(
-            source_params, individual_weights, attention_weights, hybrid_weights
-        )
+        if len(final_weights) != len(source_fields):
+            st.warning(f"Weight length mismatch: {len(final_weights)} vs {len(source_fields)}.")
+            if len(final_weights) > len(source_fields):
+                final_weights = final_weights[:len(source_fields)]
+            else:
+                final_weights = np.pad(final_weights, (0, len(source_fields)-len(final_weights)),
+                                      'constant', constant_values=0)
         
-        # ====== FIELD INTERPOLATION USING HYBRID WEIGHTS ======
+        # ========== WEIGHT DIAGNOSTICS ==========
+        eps = 1e-10
+        entropy = -np.sum(final_weights * np.log(final_weights + eps))
+        max_weight = np.max(final_weights)
+        effective_sources = np.sum(final_weights > 0.01)
+        
+        if max_weight < 0.2:
+            st.warning(f"⚠️ Moderate confidence: max weight={max_weight:.3f}, "
+                      f"effective sources={effective_sources}.")
+        
+        # ========== FIELD INTERPOLATION ==========
         interp = {'phi': np.zeros(target_shape),
                  'c': np.zeros(target_shape),
                  'psi': np.zeros(target_shape)}
         
         for i, fld in enumerate(source_fields):
-            interp['phi'] += hybrid_weights[i] * fld['phi']
-            interp['c'] += hybrid_weights[i] * fld['c']
-            interp['psi'] += hybrid_weights[i] * fld['psi']
+            interp['phi'] += final_weights[i] * fld['phi']
+            interp['c'] += final_weights[i] * fld['c']
+            interp['psi'] += final_weights[i] * fld['psi']
         
         interp['phi'] = gaussian_filter(interp['phi'], sigma=1.0)
         interp['c'] = gaussian_filter(interp['c'], sigma=1.0)
@@ -1119,16 +1571,20 @@ class CoreShellInterpolator:
         
         thickness_interp = np.zeros_like(common_t_norm)
         for i, curve in enumerate(thickness_curves):
-            thickness_interp += hybrid_weights[i] * curve
+            thickness_interp += final_weights[i] * curve
         
         # Time scaling
-        avg_tau0 = np.average(source_tau0, weights=hybrid_weights)
-        avg_t_max_nd = np.average(source_t_max_nd, weights=hybrid_weights)
+        avg_tau0 = np.average(source_tau0, weights=final_weights)
+        avg_t_max_nd = np.average(source_t_max_nd, weights=final_weights)
         if target_params.get('tau0_s') is not None:
             avg_tau0 = target_params['tau0_s']
         
         common_t_real = common_t_norm * avg_t_max_nd * avg_tau0
-        t_real = time_norm * avg_t_max_nd * avg_tau0 if time_norm is not None else avg_t_max_nd * avg_tau0
+        
+        if time_norm is not None:
+            t_real = time_norm * avg_t_max_nd * avg_tau0
+        else:
+            t_real = avg_t_max_nd * avg_tau0
         
         # Derived quantities
         material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'])
@@ -1143,12 +1599,48 @@ class CoreShellInterpolator:
         
         stats = DepositionPhysics.phase_stats(interp['phi'], interp['psi'], dx, dx, L0)
         
+        growth_rate = 0.0
+        if time_norm is not None and len(thickness_curves) > 0:
+            idx = int(time_norm * (len(common_t_norm) - 1))
+            if idx > 0:
+                dt_norm = common_t_norm[idx] - common_t_norm[idx-1]
+                dt_real = dt_norm * avg_t_max_nd * avg_tau0
+                dth = thickness_interp[idx] - thickness_interp[idx-1]
+                growth_rate = dth / dt_real if dt_real > 0 else 0.0
+        
+        # ========== PREPARE SOURCES DATA FOR VISUALIZATION ==========
+        sources_data = []
+        for i, (src_params, alpha_w, beta_w, gamma_w, indiv_weights, combined_w, attn_w) in enumerate(zip(
+            source_params, alpha, beta, gamma,
+            [dict(fc=individual_param_weights['fc'][i],
+                 rs=individual_param_weights['rs'][i],
+                 c_bulk=individual_param_weights['c_bulk'][i]) for i in range(len(source_params))],
+            final_weights, attn_scores.squeeze().detach().cpu().numpy()
+        )):
+            sources_data.append({
+                'source_index': i,
+                'L0_nm': src_params.get('L0_nm', 20.0),
+                'fc': src_params.get('fc', 0.18),
+                'rs': src_params.get('rs', 0.2),
+                'c_bulk': src_params.get('c_bulk', 0.5),
+                'l0_weight': float(alpha_w),
+                'fc_weight': float(indiv_weights['fc']),
+                'rs_weight': float(indiv_weights['rs']),
+                'c_bulk_weight': float(indiv_weights['c_bulk']),
+                'beta_weight': float(beta_w),
+                'gamma_weight': float(gamma_w),
+                'attention_weight': float(attn_w),
+                'physics_refinement': float(alpha_w * beta_w * (1.0 + self.lambda_shape * gamma_w)),
+                'combined_weight': float(combined_w)
+            })
+        
         result = {
             'fields': interp,
             'derived': {
                 'material': material,
                 'potential': potential,
                 'thickness_nm': thickness_nm,
+                'growth_rate': growth_rate,
                 'phase_stats': stats,
                 'thickness_time': {
                     't_norm': common_t_norm.tolist(),
@@ -1157,12 +1649,18 @@ class CoreShellInterpolator:
                 }
             },
             'weights': {
-                'hybrid': hybrid_weights.tolist(),
-                'attention': attention_weights.tolist(),
-                'individual': {k: v.tolist() for k, v in individual_weights.items()},
-                'weight_analysis': weight_analysis,
-                'weight_dataframe': weight_df
+                'combined': final_weights.tolist(),
+                'alpha': alpha.tolist(),
+                'beta': beta.tolist(),
+                'gamma': gamma.tolist(),
+                'individual_params': individual_param_weights,
+                'refinement_factor': refinement_factor.tolist(),
+                'attention': attn_scores.squeeze().detach().cpu().numpy().tolist(),
+                'entropy': float(entropy),
+                'max_weight': float(max_weight),
+                'effective_sources': int(effective_sources)
             },
+            'sources_data': sources_data,
             'target_params': target_params,
             'shape': target_shape,
             'num_sources': len(source_fields),
@@ -1176,8 +1674,9 @@ class CoreShellInterpolator:
         
         return result
 
+
 # =============================================
-# HEATMAP VISUALIZER
+# ENHANCED HEATMAP VISUALIZER
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
@@ -1186,17 +1685,34 @@ class HeatMapVisualizer:
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
     
+    def _is_material_proxy(self, field_data, colorbar_label, title):
+        unique_vals = np.unique(field_data)
+        is_discrete = np.all(np.isin(unique_vals, [0, 1, 2])) and len(unique_vals) <= 3
+        has_material_keyword = any(kw in colorbar_label.lower() or kw in title.lower()
+                                  for kw in ['material', 'proxy', 'phase', 'electrolyte', 'ag', 'cu'])
+        return is_discrete and has_material_keyword
+    
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
                            L0_nm=20.0, figsize=(10,8), colorbar_label="",
                            vmin=None, vmax=None, target_params=None, time_real_s=None):
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         extent = self._get_extent(L0_nm)
         
-        im = ax.imshow(field_data, cmap=cmap_name, vmin=vmin, vmax=vmax,
-                      extent=extent, aspect='equal', origin='lower')
-        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        if colorbar_label:
-            cbar.set_label(colorbar_label, fontsize=14, fontweight='bold')
+        is_material = self._is_material_proxy(field_data, colorbar_label, title)
+        
+        if is_material:
+            im = ax.imshow(field_data, cmap=MATERIAL_COLORMAP_MATPLOTLIB,
+                          norm=MATERIAL_BOUNDARY_NORM,
+                          extent=extent, aspect='equal', origin='lower')
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, ticks=[0, 1, 2])
+            cbar.ax.set_yticklabels(['Electrolyte', 'Ag', 'Cu'], fontsize=12)
+            cbar.set_label('Material Phase', fontsize=14, fontweight='bold')
+        else:
+            im = ax.imshow(field_data, cmap=cmap_name, vmin=vmin, vmax=vmax,
+                          extent=extent, aspect='equal', origin='lower')
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            if colorbar_label:
+                cbar.set_label(colorbar_label, fontsize=14, fontweight='bold')
         
         ax.set_xlabel('X (nm)', fontsize=14, fontweight='bold')
         ax.set_ylabel('Y (nm)', fontsize=14, fontweight='bold')
@@ -1214,11 +1730,73 @@ class HeatMapVisualizer:
         plt.tight_layout()
         return fig
 
+
+# =============================================
+# RESULTS MANAGER
+# =============================================
+class ResultsManager:
+    def __init__(self):
+        pass
+    
+    def prepare_export_data(self, interpolation_result, visualization_params):
+        res = interpolation_result.copy()
+        export = {
+            'metadata': {
+                'generated_at': datetime.now().isoformat(),
+                'interpolation_method': 'core_shell_hybrid_weight_transformer',
+                'visualization_params': visualization_params
+            },
+            'result': {
+                'target_params': res['target_params'],
+                'shape': res['shape'],
+                'num_sources': res['num_sources'],
+                'weights': res['weights'],
+                'sources_data': res.get('sources_data', []),
+                'time_norm': res.get('time_norm', 1.0),
+                'time_real_s': res.get('time_real_s', 0.0),
+                'growth_rate': res['derived'].get('growth_rate', 0.0)
+            }
+        }
+        
+        for fname, arr in res['fields'].items():
+            export['result'][f'{fname}_data'] = arr.tolist()
+        
+        for dname, val in res['derived'].items():
+            if isinstance(val, np.ndarray):
+                export['result'][f'{dname}_data'] = val.tolist()
+            elif isinstance(val, dict) and 'th_nm' in val:
+                export['result'][dname] = val
+            else:
+                export['result'][dname] = val
+        
+        return export
+    
+    def export_to_json(self, export_data, filename=None):
+        if filename is None:
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            p = export_data['result']['target_params']
+            fc = p.get('fc', 0); rs = p.get('rs', 0)
+            cb = p.get('c_bulk', 0)
+            t = export_data['result'].get('time_real_s', 0)
+            filename = f"temporal_interp_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_t{t:.3e}s_{ts}.json"
+        
+        json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
+        return json_str, filename
+    
+    def _json_serializer(self, obj):
+        if isinstance(obj, np.integer): return int(obj)
+        elif isinstance(obj, np.floating): return float(obj)
+        elif isinstance(obj, np.ndarray): return obj.tolist()
+        elif isinstance(obj, datetime): return obj.isoformat()
+        elif isinstance(obj, torch.Tensor): return obj.cpu().numpy().tolist()
+        else: return str(obj)
+
+
 # =============================================
 # MAIN STREAMLIT APP
 # =============================================
 def main():
-    st.set_page_config(page_title="Core-Shell: Hybrid Weight Interpolation",
+    st.set_page_config(page_title="Core‑Shell Deposition: Hybrid Weight Interpolation",
                       layout="wide", page_icon="🧪", initial_sidebar_state="expanded")
     
     st.markdown("""
@@ -1230,20 +1808,28 @@ def main():
         border-left: 6px solid #3B82F6; padding-left: 1.2rem; margin-top: 1.8rem; margin-bottom: 1.2rem; }
     .info-box { background-color: #F0F9FF; border-left: 5px solid #3B82F6; padding: 1.2rem;
         border-radius: 0.6rem; margin: 1.2rem 0; font-size: 1.1rem; }
+    .memory-stats { background-color: #FEF3C7; border-left: 5px solid #F59E0B; padding: 1.0rem;
+        border-radius: 0.4rem; margin: 0.8rem 0; font-size: 0.9rem; }
+    .weight-formula { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-left: 5px solid #3B82F6; padding: 1.5rem; border-radius: 10px;
+        margin: 1.5rem 0; font-family: 'Courier New', monospace; font-size: 1.1rem;
+        color: white; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🧪 Core-Shell: Hybrid Weight Interpolation</h1>',
+    st.markdown('<h1 class="main-header">🧪 Core‑Shell Deposition: Hybrid Weight Interpolation</h1>',
                unsafe_allow_html=True)
     
     st.markdown("""
-    <div class="info-box">
-    <strong>🎯 HYBRID WEIGHT QUANTIFICATION:</strong><br>
-    • Individual parameter weights (L₀, fc, rs, c_bulk) computed independently<br>
-    • Transformer attention weights (learned similarity)<br>
-    • Hybrid weights = attention × L₀ × fc × rs × c_bulk (normalized)<br>
-    • Highest net weight source most important, others reduced proportionally<br>
-    • Full weight distribution analysis with contribution percentages
+    <div class="weight-formula">
+    <strong>HYBRID WEIGHT FORMULA:</strong><br><br>
+    wᵢ = α(L0)ᵢ × β(params)ᵢ × γ(shape)ᵢ × Attentionᵢ<br><br>
+    <strong>Components:</strong><br>
+    • α(L0): L₀ proximity weight (tiered preference: 5/15/30/50nm)<br>
+    • β(params): Parameter closeness (fc, rs, c_bulk) with individual weights<br>
+    • γ(shape): Radial profile similarity boost<br>
+    • Attention: Learned transformer attention scores<br><br>
+    <strong>Result:</strong> Sources weighted proportionally by hybrid weight magnitude
     </div>
     """, unsafe_allow_html=True)
     
@@ -1256,6 +1842,10 @@ def main():
         st.session_state.interpolator = CoreShellInterpolator()
     if 'visualizer' not in st.session_state:
         st.session_state.visualizer = HeatMapVisualizer()
+    if 'weight_visualizer' not in st.session_state:
+        st.session_state.weight_visualizer = HybridWeightVisualizer()
+    if 'results_manager' not in st.session_state:
+        st.session_state.results_manager = ResultsManager()
     if 'temporal_manager' not in st.session_state:
         st.session_state.temporal_manager = None
     if 'current_time' not in st.session_state:
@@ -1278,6 +1868,10 @@ def main():
                 st.session_state.solutions = []
                 st.session_state.temporal_manager = None
                 st.session_state.last_target_hash = None
+                import shutil
+                if os.path.exists(TEMP_ANIMATION_DIR):
+                    shutil.rmtree(TEMP_ANIMATION_DIR)
+                os.makedirs(TEMP_ANIMATION_DIR, exist_ok=True)
                 st.success("All cleared")
         
         st.divider()
@@ -1285,62 +1879,45 @@ def main():
         st.markdown('<h2 class="section-header">🎯 Target Parameters</h2>', unsafe_allow_html=True)
         fc = st.slider("Core / L (fc)", 0.05, 0.45, 0.18, 0.01)
         rs = st.slider("Δr / r_core (rs)", 0.01, 0.6, 0.2, 0.01)
-        c_bulk = st.slider("c_bulk", 0.1, 1.0, 0.5, 0.05)
+        c_bulk = st.slider("c_bulk (C_Ag / C_Cu)", 0.1, 1.0, 0.5, 0.05)
         L0_nm = st.number_input("Domain length L0 (nm)", 10.0, 100.0, 60.0, 5.0)
         bc_type = st.selectbox("BC type", ["Neu", "Dir"], index=0)
         use_edl = st.checkbox("Use EDL catalyst", value=True)
         mode = st.selectbox("Mode", ["2D (planar)", "3D (spherical)"], index=0)
-        tau0_input = st.number_input("τ₀ (×10⁻⁴ s)", 1e-6, 1e6, 1.0) * 1e-4
         
         st.divider()
         
-        st.markdown('<h2 class="section-header">⚖️ Hybrid Weight Settings</h2>', unsafe_allow_html=True)
+        st.markdown('<h2 class="section-header">⚛️ Interpolation Settings</h2>', unsafe_allow_html=True)
+        sigma_fc = st.slider("Kernel σ (fc)", 0.05, 0.3, 0.15, 0.01)
+        sigma_rs = st.slider("Kernel σ (rs)", 0.05, 0.3, 0.15, 0.01)
+        sigma_c = st.slider("Kernel σ (c_bulk)", 0.05, 0.3, 0.15, 0.01)
+        sigma_L = st.slider("Kernel σ (L0_nm)", 0.05, 0.3, 0.15, 0.01)
+        temperature = st.slider("Attention temperature", 0.1, 10.0, 1.0, 0.1)
         
-        st.markdown("#### Parameter Sigmas (Tolerance)")
-        sigma_L0 = st.slider("σ (L0)", 0.05, 0.3, 0.10, 0.01)
-        sigma_fc = st.slider("σ (fc)", 0.05, 0.3, 0.20, 0.01)
-        sigma_rs = st.slider("σ (rs)", 0.05, 0.3, 0.30, 0.01)
-        sigma_c = st.slider("σ (c_bulk)", 0.05, 0.3, 0.15, 0.01)
-        
-        st.markdown("#### Parameter Weights (Importance)")
-        w_L0 = st.slider("Weight (L0)", 0.5, 2.0, 1.0, 0.1)
-        w_fc = st.slider("Weight (fc)", 0.3, 1.5, 0.7, 0.1)
-        w_rs = st.slider("Weight (rs)", 0.1, 0.8, 0.3, 0.05)
-        w_c = st.slider("Weight (c_bulk)", 0.5, 2.0, 1.0, 0.1)
-        
-        temperature = st.slider("Attention Temperature", 0.1, 10.0, 1.0, 0.1)
+        st.markdown("#### 🌀 Shape-Aware Refinement")
+        lambda_shape = st.slider("λ (shape boost weight)", 0.0, 1.0, 0.5, 0.05)
+        sigma_shape = st.slider("σ_shape (radial similarity)", 0.05, 0.5, 0.15, 0.01)
         
         n_key_frames = st.slider("Key frames", 1, 20, 5, 1)
         lru_cache_size = st.slider("LRU cache size", 1, 5, 3, 1)
         
         target = {
             'fc': fc, 'rs': rs, 'c_bulk': c_bulk, 'L0_nm': L0_nm,
-            'bc_type': bc_type, 'use_edl': use_edl, 'mode': mode,
-            'tau0_s': tau0_input
+            'bc_type': bc_type, 'use_edl': use_edl, 'mode': mode
         }
         target_hash = hashlib.md5(json.dumps(target, sort_keys=True).encode()).hexdigest()[:16]
         
         if target_hash != st.session_state.last_target_hash:
-            if st.button("🧠 Initialize Interpolation", type="primary",
+            if st.button("🧠 Initialize Temporal Interpolation", type="primary",
                         use_container_width=True):
                 if not st.session_state.solutions:
                     st.error("Please load solutions first!")
                 else:
-                    with st.spinner("Setting up hybrid weight interpolation..."):
-                        # Update weight quantifier settings
-                        st.session_state.interpolator.weight_quantifier.param_sigmas = {
-                            'L0_nm': sigma_L0,
-                            'fc': sigma_fc,
-                            'rs': sigma_rs,
-                            'c_bulk': sigma_c
-                        }
-                        st.session_state.interpolator.weight_quantifier.param_weights = {
-                            'L0_nm': w_L0,
-                            'fc': w_fc,
-                            'rs': w_rs,
-                            'c_bulk': w_c
-                        }
+                    with st.spinner("Setting up temporal interpolation..."):
+                        st.session_state.interpolator.set_parameter_sigma(
+                            [sigma_fc, sigma_rs, sigma_c, sigma_L])
                         st.session_state.interpolator.temperature = temperature
+                        st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
                         
                         st.session_state.temporal_manager = TemporalFieldManager(
                             st.session_state.interpolator,
@@ -1351,30 +1928,52 @@ def main():
                         )
                         st.session_state.last_target_hash = target_hash
                         st.session_state.current_time = 1.0
-                        st.success("Hybrid weight interpolation ready!")
+                        st.success("Temporal interpolation ready!")
+        
+        if st.session_state.temporal_manager:
+            with st.expander("💾 Memory Statistics"):
+                stats = st.session_state.temporal_manager.get_memory_stats()
+                st.markdown(f"""
+                <div class="memory-stats">
+                <strong>Memory Usage:</strong><br>
+                • Key frames: {stats['key_frame_entries']} ({stats['key_frames_mb']:.1f} MB)<br>
+                • LRU cache: {stats['lru_entries']} ({stats['lru_cache_mb']:.1f} MB)<br>
+                • <strong>Total: {stats['total_mb']:.1f} MB</strong>
+                </div>
+                """, unsafe_allow_html=True)
     
     # Main area
     if st.session_state.temporal_manager:
         mgr = st.session_state.temporal_manager
         
         st.markdown('<h2 class="section-header">⏱️ Temporal Control</h2>', unsafe_allow_html=True)
-        current_time_norm = st.slider("Normalized Time", 0.0, 1.0,
-                                     value=st.session_state.current_time, step=0.001)
-        st.session_state.current_time = current_time_norm
+        col_time1, col_time2, col_time3 = st.columns([3, 1, 1])
+        with col_time1:
+            current_time_norm = st.slider("Normalized Time", 0.0, 1.0,
+                                         value=st.session_state.current_time,
+                                         step=0.001, format="%.3f")
+            st.session_state.current_time = current_time_norm
+        with col_time2:
+            if st.button("⏮️ Start", use_container_width=True):
+                st.session_state.current_time = 0.0
+                st.rerun()
+        with col_time3:
+            if st.button("⏭️ End", use_container_width=True):
+                st.session_state.current_time = 1.0
+                st.rerun()
         
-        current_thickness = mgr.get_thickness_at_time(current_time_norm)
         current_time_real = mgr.get_time_real(current_time_norm)
+        current_thickness = mgr.get_thickness_at_time(current_time_norm)
         
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Thickness", f"{current_thickness:.3f} nm")
-        with col2:
+        col_info1, col_info2, col_info3 = st.columns(3)
+        with col_info1:
+            st.metric("Current Thickness", f"{current_thickness:.3f} nm")
+        with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
-        with col3:
-            st.metric("Sources", mgr.weights.get('effective_sources', 0) if mgr.weights else 0)
         
         # Tabs
-        tabs = st.tabs(["📊 Fields", "⚖️ Hybrid Weights", "📈 Thickness", "💾 Export"])
+        tabs = st.tabs(["📊 Field Visualization", "⚖️ Hybrid Weight Analysis",
+                       "📈 Thickness Evolution", "💾 Export"])
         
         with tabs[0]:
             st.markdown('<h2 class="section-header">📊 Field Visualization</h2>',
@@ -1382,149 +1981,176 @@ def main():
             fields = mgr.get_fields(current_time_norm, use_interpolation=True)
             
             field_choice = st.selectbox("Select field",
-                                       ['phi (shell)', 'c (concentration)', 'psi (core)'])
-            field_map = {'phi (shell)': 'phi', 'c (concentration)': 'c', 'psi (core)': 'psi'}
+                                       ['c (concentration)', 'phi (shell)', 'psi (core)',
+                                        'material proxy'],
+                                       key='field_choice')
+            field_map = {'c (concentration)': 'c', 'phi (shell)': 'phi',
+                        'psi (core)': 'psi', 'material proxy': 'material'}
             field_key = field_map[field_choice]
-            field_data = fields[field_key]
+            
+            if field_key == 'material':
+                field_data = DepositionPhysics.material_proxy(fields['phi'], fields['psi'])
+            else:
+                field_data = fields[field_key]
             
             cmap = st.selectbox("Colormap", COLORMAP_OPTIONS['Sequential'], index=0)
             
             fig = st.session_state.visualizer.create_field_heatmap(
-                field_data, title=f"Interpolated {field_choice}",
-                cmap_name=cmap, L0_nm=L0_nm, target_params=target,
+                field_data,
+                title=f"Interpolated {field_choice}",
+                cmap_name=cmap,
+                L0_nm=L0_nm,
+                target_params=target,
                 time_real_s=current_time_real
             )
             st.pyplot(fig)
         
         with tabs[1]:
-            st.markdown('<h2 class="section-header">⚖️ Hybrid Weight Quantification</h2>',
+            st.markdown('<h2 class="section-header">⚖️ Hybrid Weight Analysis</h2>',
                        unsafe_allow_html=True)
             
             weights = mgr.weights
             
-            if weights and 'weight_dataframe' in weights:
-                df = weights['weight_dataframe']
+            # Display weight formula
+            st.markdown("""
+            <div class="info-box">
+            <strong>Weight Quantification:</strong> Each source receives multiple weight components
+            that are combined into a hybrid weight. The source with highest net weight contributes
+            most to the interpolation, others contribute proportionally.
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Weight visualization tabs
+            weight_tabs = st.tabs(["📊 Sankey Diagram", "🔗 Chord Diagram",
+                                  "🕸️ Radar Chart", "📈 Breakdown"])
+            
+            if 'sources_data' in mgr.weights or (hasattr(mgr, 'weights') and mgr.weights and 'sources_data' in 
+                st.session_state.interpolator.interpolate_fields(
+                    st.session_state.solutions, target, target_shape=(256,256),
+                    n_time_points=100, time_norm=current_time_norm
+                )):
+                # Get sources data from interpolation result
+                interp_res = st.session_state.interpolator.interpolate_fields(
+                    st.session_state.solutions, target, target_shape=(256,256),
+                    n_time_points=100, time_norm=current_time_norm
+                )
+                sources_data = interp_res.get('sources_data', [])
                 
-                st.markdown("#### 📋 Weight Component Breakdown")
-                st.dataframe(df.style.format({
-                    'L0_nm': '{:.1f}', 'fc': '{:.2f}', 'rs': '{:.2f}', 'c_bulk': '{:.2f}',
-                    'w_attention': '{:.4f}', 'w_L0': '{:.4f}', 'w_fc': '{:.4f}',
-                    'w_rs': '{:.4f}', 'w_c_bulk': '{:.4f}', 'w_hybrid': '{:.4f}',
-                    'attention_%': '{:.1f}', 'L0_%': '{:.1f}', 'fc_%': '{:.1f}',
-                    'rs_%': '{:.1f}', 'c_bulk_%': '{:.1f}', 'hybrid_%': '{:.1f}'
-                }))
+                with weight_tabs[0]:
+                    st.markdown("#### 📊 Enhanced Sankey Diagram")
+                    st.markdown("Shows flow from individual parameter weights → combined hybrid weight")
+                    if sources_data:
+                        fig_sankey = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
+                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                        )
+                        st.plotly_chart(fig_sankey, use_container_width=True)
                 
-                st.markdown("#### 📊 Weight Distribution Analysis")
-                analysis = weights.get('weight_analysis', {})
+                with weight_tabs[1]:
+                    st.markdown("#### 🔗 Enhanced Chord Diagram")
+                    st.markdown("Circular layout with target at center, sources weighted by hybrid weight")
+                    if sources_data:
+                        fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
+                            sources_data, target
+                        )
+                        st.plotly_chart(fig_chord, use_container_width=True)
                 
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Entropy", f"{analysis.get('entropy', 0):.3f}",
-                             help="Higher = more uniform distribution")
-                with col2:
-                    st.metric("Max Weight", f"{analysis.get('max_weight', 0):.3f}",
-                             help="Highest hybrid weight")
-                with col3:
-                    st.metric("Effective Sources", int(analysis.get('effective_sources', 0)),
+                with weight_tabs[2]:
+                    st.markdown("#### 🕸️ Hierarchical Radar Chart")
+                    st.markdown("Angular variation of different weight components")
+                    if sources_data:
+                        fig_radar = st.session_state.weight_visualizer.create_hierarchical_radar_chart(
+                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                        )
+                        st.plotly_chart(fig_radar, use_container_width=True)
+                
+                with weight_tabs[3]:
+                    st.markdown("#### 📈 Weight Formula Breakdown")
+                    st.markdown("Comprehensive analysis of all weight components")
+                    if sources_data:
+                        fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
+                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                        )
+                        st.plotly_chart(fig_breakdown, use_container_width=True)
+                
+                # Weight diagnostics
+                st.markdown("#### 📋 Weight Diagnostics")
+                col_w1, col_w2, col_w3 = st.columns(3)
+                with col_w1:
+                    st.metric("Weight Entropy", f"{weights.get('entropy', 0):.4f}",
+                             help="Higher = more uncertain")
+                with col_w2:
+                    st.metric("Max Weight", f"{weights.get('max_weight', 0):.4f}",
+                             help="Lower = less confident")
+                with col_w3:
+                    st.metric("Effective Sources", weights.get('effective_sources', 0),
                              help="Sources with weight > 0.01")
-                with col4:
-                    st.metric("Total Sources", len(df))
                 
-                # Weight contribution pie chart
-                st.markdown("#### 🥧 Relative Weight Contributions")
-                contrib_cols = st.columns(5)
-                contributions = {
-                    'Attention': analysis.get('attention_contribution', np.zeros(len(df))).sum() * 100,
-                    'L₀': analysis.get('L0_contribution', np.zeros(len(df))).sum() * 100,
-                    'fc': analysis.get('fc_contribution', np.zeros(len(df))).sum() * 100,
-                    'rs': analysis.get('rs_contribution', np.zeros(len(df))).sum() * 100,
-                    'c_bulk': analysis.get('c_bulk_contribution', np.zeros(len(df))).sum() * 100
-                }
-                
-                fig_pie, ax_pie = plt.subplots(figsize=(10, 8))
-                colors = ['#36A2EB', '#FF6384', '#FFCE56', '#4BC0C0', '#9966FF']
-                ax_pie.pie(contributions.values(), labels=contributions.keys(),
-                          autopct='%1.1f%%', colors=colors, startangle=90)
-                ax_pie.set_title('Weight Component Contributions', fontsize=16, fontweight='bold')
-                st.pyplot(fig_pie)
-                
-                # Weight comparison bar chart
-                st.markdown("#### 📊 Source Weight Comparison")
-                fig_bar, ax_bar = plt.subplots(figsize=(12, 6))
-                x = np.arange(len(df))
-                width = 0.15
-                
-                ax_bar.bar(x - 2*width, df['w_attention'], width, label='Attention', alpha=0.8)
-                ax_bar.bar(x - width, df['w_L0'], width, label='L₀', alpha=0.8)
-                ax_bar.bar(x, df['w_fc'], width, label='fc', alpha=0.8)
-                ax_bar.bar(x + width, df['w_rs'], width, label='rs', alpha=0.8)
-                ax_bar.bar(x + 2*width, df['w_c_bulk'], width, label='c_bulk', alpha=0.8)
-                
-                ax_bar.set_xlabel('Source Index')
-                ax_bar.set_ylabel('Weight')
-                ax_bar.set_title('Individual Weight Components by Source', fontsize=16, fontweight='bold')
-                ax_bar.legend()
-                ax_bar.grid(True, alpha=0.3)
-                st.pyplot(fig_bar)
-                
-                # Hybrid weight visualization
-                st.markdown("#### 🎯 Hybrid Weight Distribution")
-                fig_hybrid, ax_hybrid = plt.subplots(figsize=(12, 6))
-                ax_hybrid.bar(df.index, df['w_hybrid'], color='#9966FF', alpha=0.8)
-                ax_hybrid.axhline(y=1.0/len(df), color='r', linestyle='--', 
-                                 label=f'Uniform ({1.0/len(df):.3f})')
-                ax_hybrid.set_xlabel('Source Index (sorted by hybrid weight)')
-                ax_hybrid.set_ylabel('Hybrid Weight')
-                ax_hybrid.set_title('Final Hybrid Weights (Highest Net Weight Most Important)', 
-                                   fontsize=16, fontweight='bold')
-                ax_hybrid.legend()
-                ax_hybrid.grid(True, alpha=0.3)
-                st.pyplot(fig_hybrid)
-                
-                st.markdown("""
-                <div class="info-box">
-                <strong>💡 KEY INSIGHTS:</strong><br>
-                • <strong>Highest hybrid weight source</strong> contributes most to interpolation<br>
-                • <strong>Other sources</strong> reduced proportionally based on parameter mismatch<br>
-                • <strong>Weight entropy</strong> indicates confidence (low = confident, high = uncertain)<br>
-                • <strong>Effective sources</strong> shows how many sources meaningfully contribute
-                </div>
-                """, unsafe_allow_html=True)
+                # Weight table
+                if sources_data:
+                    st.markdown("#### 📋 Source Weight Table")
+                    df_weights = pd.DataFrame(sources_data)
+                    st.dataframe(
+                        df_weights[['source_index', 'L0_nm', 'fc', 'l0_weight', 'fc_weight',
+                                   'beta_weight', 'attention_weight', 'combined_weight']].style
+                        .format({
+                            'L0_nm': '{:.0f}',
+                            'fc': '{:.2f}',
+                            'l0_weight': '{:.4f}',
+                            'fc_weight': '{:.4f}',
+                            'beta_weight': '{:.4f}',
+                            'attention_weight': '{:.4f}',
+                            'combined_weight': '{:.4f}'
+                        })
+                    )
+            else:
+                st.info("Run interpolation to see weight analysis")
         
         with tabs[2]:
             st.markdown('<h2 class="section-header">📈 Thickness Evolution</h2>',
                        unsafe_allow_html=True)
             thickness_time = mgr.thickness_time
             
+            fig_th = plt.figure(figsize=(10, 6), dpi=300)
+            t_arr = np.array(thickness_time['t_real_s']) if 't_real_s' in thickness_time else np.array(thickness_time['t_norm'])
             th_arr = np.array(thickness_time['th_nm'])
-            t_arr = np.array(thickness_time['t_real_s'])
-            
-            fig, ax = plt.subplots(figsize=(12, 6))
-            ax.plot(t_arr, th_arr, 'b-', linewidth=3, label='Interpolated')
-            ax.set_xlabel('Time (s)')
-            ax.set_ylabel('Thickness (nm)')
-            ax.set_title('Shell Thickness Evolution', fontsize=16, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-            ax.legend()
-            st.pyplot(fig)
+            plt.plot(t_arr, th_arr, 'b-', linewidth=3, label='Interpolated')
+            plt.xlabel("Time (s)" if 't_real_s' in thickness_time else "Normalized Time")
+            plt.ylabel("Thickness (nm)")
+            plt.title(f"Shell Thickness Evolution")
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            st.pyplot(fig_th)
         
         with tabs[3]:
             st.markdown('<h2 class="section-header">💾 Export Data</h2>',
                        unsafe_allow_html=True)
-            st.info("Export functionality available - JSON/CSV formats supported")
+            col_exp1, col_exp2 = st.columns(2)
+            with col_exp1:
+                if st.button("📊 Export Current State (JSON)", use_container_width=True):
+                    res = st.session_state.interpolator.interpolate_fields(
+                        st.session_state.solutions, target, target_shape=(256,256),
+                        n_time_points=100, time_norm=current_time_norm
+                    )
+                    if res:
+                        export_data = st.session_state.results_manager.prepare_export_data(
+                            res, {'time_norm': current_time_norm, 'time_real_s': current_time_real}
+                        )
+                        json_str, fname = st.session_state.results_manager.export_to_json(export_data)
+                        st.download_button("⬇️ Download JSON", json_str, fname, "application/json")
     
     else:
         st.info("""
         👈 **Get Started:**
         1. Load solutions using the sidebar
-        2. Configure target parameters and hybrid weight settings
-        3. Click **"Initialize Interpolation"**
+        2. Set target parameters
+        3. Click **"Initialize Temporal Interpolation"**
         
         **Hybrid Weight Features:**
-        • Individual parameter weights (L₀, fc, rs, c_bulk)
-        • Transformer attention weights (learned)
-        • Hybrid combination with proportional source employment
-        • Full weight distribution analysis
+        • Individual parameter weights (L0, fc, rs, c_bulk)
+        • Physics refinement factors (α, β, γ)
+        • Transformer attention scores
+        • Combined hybrid weights for proportional source weighting
+        • Comprehensive weight visualization (Sankey, Chord, Radar, Breakdown)
         """)
 
 
