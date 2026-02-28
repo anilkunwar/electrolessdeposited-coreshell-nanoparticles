@@ -375,8 +375,7 @@ class HybridWeightVisualizer:
                 font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
                          color='white'),  # removed weight
                 bgcolor='rgba(44, 62, 80, 0.9)',
-                bordercolor='white',
-                pad=dict(l=10, r=10, t=5, b=5)
+                bordercolor='white'
             )
         )
         
