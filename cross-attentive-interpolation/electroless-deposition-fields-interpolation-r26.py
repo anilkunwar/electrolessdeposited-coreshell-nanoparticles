@@ -12,7 +12,7 @@ KEY ENHANCEMENTS IN THIS VERSION:
 5. PHYSICS REFINEMENT FACTORS - Alpha (L0), Beta (params), Gamma (shape) refinement
 6. TRANSFORMER ATTENTION - Learned attention scores combined with physics priors
 7. WEIGHT DIAGNOSTICS - Entropy, max weight, effective sources for uncertainty quantification
-8. BUG FIX - Fixed UnboundLocalError in _get_fields_at_time by ensuring phi, c, psi always initialized
+8. BUG FIX - Fixed SyntaxError on line 1037: Completed 'if thickness_history_nm in data:' statement
 """
 import streamlit as st
 import numpy as np
@@ -1034,6 +1034,7 @@ class EnhancedSolutionLoader:
                 standardized['coords_nd'] = data.get('coords_nd', None)
                 standardized['diagnostics'] = data.get('diagnostics', [])
                 
+                # ✅ SYNTAX ERROR FIX: Complete the 'in' statement with 'data:'
                 if 'thickness_history_nm' in 
                     thick_list = []
                     for entry in data['thickness_history_nm']:
@@ -1332,11 +1333,6 @@ class CoreShellInterpolator:
         return torch.FloatTensor(features)
     
     def _get_fields_at_time(self, source: Dict, time_norm: float, target_shape: Tuple[int, int]):
-        """
-        FIXED: Ensure phi, c, psi are always initialized before use.
-        This fixes the UnboundLocalError.
-        """
-        # Initialize with default zeros to prevent UnboundLocalError
         phi = np.zeros(target_shape)
         c = np.zeros(target_shape)
         psi = np.zeros(target_shape)
@@ -1378,16 +1374,9 @@ class CoreShellInterpolator:
                     snap1, snap2 = history[idx], history[idx+1]
                     alpha = (t_target - t1) / (t2 - t1) if t2 > t1 else 0.0
                     
-                    phi1 = self._ensure_2d(snap1['phi'])
-                    phi2 = self._ensure_2d(snap2['phi'])
-                    c1 = self._ensure_2d(snap1['c'])
-                    c2 = self._ensure_2d(snap2['c'])
-                    psi1 = self._ensure_2d(snap1['psi'])
-                    psi2 = self._ensure_2d(snap2['psi'])
-                    
-                    phi = (1 - alpha) * phi1 + alpha * phi2
-                    c = (1 - alpha) * c1 + alpha * c2
-                    psi = (1 - alpha) * psi1 + alpha * psi2
+                    phi = (1 - alpha) * self._ensure_2d(snap1['phi']) + alpha * self._ensure_2d(snap2['phi'])
+                    c = (1 - alpha) * self._ensure_2d(snap1['c']) + alpha * self._ensure_2d(snap2['c'])
+                    psi = (1 - alpha) * self._ensure_2d(snap1['psi']) + alpha * self._ensure_2d(snap2['psi'])
             
             if phi.shape != target_shape:
                 factors = (target_shape[0]/phi.shape[0], target_shape[1]/phi.shape[1])
@@ -1604,7 +1593,6 @@ class CoreShellInterpolator:
                 dth = thickness_interp[idx] - thickness_interp[idx-1]
                 growth_rate = dth / dt_real if dt_real > 0 else 0.0
         
-        # Prepare sources data for visualization
         sources_data = []
         for i, (src_params, alpha_w, beta_w, gamma_w, indiv_weights, combined_w, attn_w) in enumerate(zip(
             source_params, alpha, beta, gamma,
@@ -2014,72 +2002,83 @@ def main():
             weight_tabs = st.tabs(["📊 Sankey Diagram", "🔗 Chord Diagram",
                                   "🕸️ Radar Chart", "📈 Breakdown"])
             
-            interp_res = st.session_state.interpolator.interpolate_fields(
-                st.session_state.solutions, target, target_shape=(256,256),
-                n_time_points=100, time_norm=current_time_norm
-            )
-            sources_data = interp_res.get('sources_data', []) if interp_res else []
-            
-            with weight_tabs[0]:
-                st.markdown("#### 📊 Enhanced Sankey Diagram")
-                if sources_
-                    fig_sankey = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
-                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
-                    )
-                    st.plotly_chart(fig_sankey, use_container_width=True)
-            
-            with weight_tabs[1]:
-                st.markdown("#### 🔗 Enhanced Chord Diagram")
-                if sources_
-                    fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
-                        sources_data, target
-                    )
-                    st.plotly_chart(fig_chord, use_container_width=True)
-            
-            with weight_tabs[2]:
-                st.markdown("#### 🕸️ Hierarchical Radar Chart")
-                if sources_
-                    fig_radar = st.session_state.weight_visualizer.create_hierarchical_radar_chart(
-                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
-                    )
-                    st.plotly_chart(fig_radar, use_container_width=True)
-            
-            with weight_tabs[3]:
-                st.markdown("#### 📈 Weight Formula Breakdown")
-                if sources_
-                    fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
-                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
-                    )
-                    st.plotly_chart(fig_breakdown, use_container_width=True)
-            
-            st.markdown("#### 📋 Weight Diagnostics")
-            col_w1, col_w2, col_w3 = st.columns(3)
-            with col_w1:
-                st.metric("Weight Entropy", f"{weights.get('entropy', 0):.4f}",
-                         help="Higher = more uncertain")
-            with col_w2:
-                st.metric("Max Weight", f"{weights.get('max_weight', 0):.4f}",
-                         help="Lower = less confident")
-            with col_w3:
-                st.metric("Effective Sources", weights.get('effective_sources', 0),
-                         help="Sources with weight > 0.01")
-            
-            if sources_
-                st.markdown("#### 📋 Source Weight Table")
-                df_weights = pd.DataFrame(sources_data)
-                st.dataframe(
-                    df_weights[['source_index', 'L0_nm', 'fc', 'l0_weight', 'fc_weight',
-                               'beta_weight', 'attention_weight', 'combined_weight']].style
-                    .format({
-                        'L0_nm': '{:.0f}',
-                        'fc': '{:.2f}',
-                        'l0_weight': '{:.4f}',
-                        'fc_weight': '{:.4f}',
-                        'beta_weight': '{:.4f}',
-                        'attention_weight': '{:.4f}',
-                        'combined_weight': '{:.4f}'
-                    })
+            if 'sources_data' in mgr.weights or (hasattr(mgr, 'weights') and mgr.weights and 'sources_data' in 
+                st.session_state.interpolator.interpolate_fields(
+                    st.session_state.solutions, target, target_shape=(256,256),
+                    n_time_points=100, time_norm=current_time_norm
+                )):
+                interp_res = st.session_state.interpolator.interpolate_fields(
+                    st.session_state.solutions, target, target_shape=(256,256),
+                    n_time_points=100, time_norm=current_time_norm
                 )
+                sources_data = interp_res.get('sources_data', [])
+                
+                with weight_tabs[0]:
+                    st.markdown("#### 📊 Enhanced Sankey Diagram")
+                    st.markdown("Shows flow from individual parameter weights → combined hybrid weight")
+                    if sources_
+                        fig_sankey = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
+                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                        )
+                        st.plotly_chart(fig_sankey, use_container_width=True)
+                
+                with weight_tabs[1]:
+                    st.markdown("#### 🔗 Enhanced Chord Diagram")
+                    st.markdown("Circular layout with target at center, sources weighted by hybrid weight")
+                    if sources_
+                        fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
+                            sources_data, target
+                        )
+                        st.plotly_chart(fig_chord, use_container_width=True)
+                
+                with weight_tabs[2]:
+                    st.markdown("#### 🕸️ Hierarchical Radar Chart")
+                    st.markdown("Angular variation of different weight components")
+                    if sources_
+                        fig_radar = st.session_state.weight_visualizer.create_hierarchical_radar_chart(
+                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                        )
+                        st.plotly_chart(fig_radar, use_container_width=True)
+                
+                with weight_tabs[3]:
+                    st.markdown("#### 📈 Weight Formula Breakdown")
+                    st.markdown("Comprehensive analysis of all weight components")
+                    if sources_
+                        fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
+                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                        )
+                        st.plotly_chart(fig_breakdown, use_container_width=True)
+                
+                st.markdown("#### 📋 Weight Diagnostics")
+                col_w1, col_w2, col_w3 = st.columns(3)
+                with col_w1:
+                    st.metric("Weight Entropy", f"{weights.get('entropy', 0):.4f}",
+                             help="Higher = more uncertain")
+                with col_w2:
+                    st.metric("Max Weight", f"{weights.get('max_weight', 0):.4f}",
+                             help="Lower = less confident")
+                with col_w3:
+                    st.metric("Effective Sources", weights.get('effective_sources', 0),
+                             help="Sources with weight > 0.01")
+                
+                if sources_
+                    st.markdown("#### 📋 Source Weight Table")
+                    df_weights = pd.DataFrame(sources_data)
+                    st.dataframe(
+                        df_weights[['source_index', 'L0_nm', 'fc', 'l0_weight', 'fc_weight',
+                                   'beta_weight', 'attention_weight', 'combined_weight']].style
+                        .format({
+                            'L0_nm': '{:.0f}',
+                            'fc': '{:.2f}',
+                            'l0_weight': '{:.4f}',
+                            'fc_weight': '{:.4f}',
+                            'beta_weight': '{:.4f}',
+                            'attention_weight': '{:.4f}',
+                            'combined_weight': '{:.4f}'
+                        })
+                    )
+            else:
+                st.info("Run interpolation to see weight analysis")
         
         with tabs[2]:
             st.markdown('<h2 class="section-header">📈 Thickness Evolution</h2>',
