@@ -12,7 +12,7 @@ KEY ENHANCEMENTS IN THIS VERSION:
 5. PHYSICS REFINEMENT FACTORS - Alpha (L0), Beta (params), Gamma (shape) refinement
 6. TRANSFORMER ATTENTION - Learned attention scores combined with physics priors
 7. WEIGHT DIAGNOSTICS - Entropy, max weight, effective sources for uncertainty quantification
-8. BUG FIX - Fixed SyntaxError on line 1037: Completed 'if thickness_history_nm in data:' statement
+8. BUG FIX - Fixed UnboundLocalError in _get_fields_at_time by ensuring phi, c, psi always initialized
 """
 import streamlit as st
 import numpy as np
@@ -215,7 +215,7 @@ class DepositionPhysics:
         return r_centers, profile
 
 # =============================================
-# HYBRID WEIGHT VISUALIZER
+# HYBRID WEIGHT VISUALIZER (CORRECTED)
 # =============================================
 class HybridWeightVisualizer:
     """
@@ -240,8 +240,7 @@ class HybridWeightVisualizer:
             'size_title': 24,
             'size_labels': 18,
             'size_ticks': 14,
-            'color': '#2C3E50',
-            'weight': 'bold'
+            'color': '#2C3E50'
         }
     
     def get_colormap(self, cmap_name, n_colors=10):
@@ -274,40 +273,54 @@ class HybridWeightVisualizer:
         
         color_palette = self.get_colormap('viridis', len(sources_data) + 7)
         
+        # Node colors: target, sources, then components
+        node_colors = ["#FF6B6B"]  # target
+        combined_weights = [s['combined_weight'] for s in sources_data]
+        for w in combined_weights:
+            node_colors.append(f'rgba(153,102,255,{w:.2f})')  # source nodes opacity = weight
+        node_colors.extend(["#FF6B6B", "#4ECDC4", "#95E1D3", "#FFD93D", "#9D4EDD", "#36A2EB", "#9966FF"])
+        
         for i, source in enumerate(sources_data):
             source_idx = i + 1
             source_color = color_palette[i % len(color_palette)]
             
+            # L0 weight
             source_indices.append(source_idx)
             target_indices.append(component_start)
             values.append(source['l0_weight'] * 100)
             colors.append(f'rgba(255, 107, 107, 0.8)')
             
+            # fc weight
             source_indices.append(source_idx)
             target_indices.append(component_start + 1)
             values.append(source['fc_weight'] * 100)
             colors.append(f'rgba(78, 205, 196, 0.8)')
             
+            # rs weight
             source_indices.append(source_idx)
             target_indices.append(component_start + 2)
             values.append(source['rs_weight'] * 100)
             colors.append(f'rgba(149, 225, 211, 0.8)')
             
+            # c_bulk weight
             source_indices.append(source_idx)
             target_indices.append(component_start + 3)
             values.append(source['c_bulk_weight'] * 100)
             colors.append(f'rgba(255, 217, 61, 0.8)')
             
+            # Attention
             source_indices.append(source_idx)
             target_indices.append(component_start + 4)
             values.append(source['attention_weight'] * 100)
             colors.append(f'rgba(157, 78, 221, 0.8)')
             
+            # Physics Refinement
             source_indices.append(source_idx)
             target_indices.append(component_start + 5)
             values.append(source['physics_refinement'] * 100)
             colors.append(f'rgba(54, 162, 235, 0.8)')
             
+            # Combined Weight
             source_indices.append(source_idx)
             target_indices.append(component_start + 6)
             values.append(source['combined_weight'] * 100)
@@ -327,9 +340,7 @@ class HybridWeightVisualizer:
                 thickness=30,
                 line=dict(color="black", width=2),
                 label=labels,
-                color=["#FF6B6B"] + 
-                      [color_palette[i % len(color_palette)] for i in range(len(sources_data))] + 
-                      ["#FF6B6B", "#4ECDC4", "#95E1D3", "#FFD93D", "#9D4EDD", "#36A2EB", "#9966FF"],
+                color=node_colors,
                 hovertemplate='<b>%{label}</b><br>Value: %{value:.2f}<extra></extra>'
             ),
             link=dict(
@@ -348,8 +359,9 @@ class HybridWeightVisualizer:
                 text=f'<b>SANKEY DIAGRAM: HYBRID WEIGHT COMPONENT FLOW</b><br>' + 
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
-                         color=self.font_config['color'], weight='bold'),
-                x=0.5, y=0.95, xanchor='center', yanchor='top'
+                         color=self.font_config['color']),
+                x=0.5, y=0.95, xanchor='center', yanchor='top',
+                pad=dict(b=20)
             ),
             font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
                      color=self.font_config['color']),
@@ -363,6 +375,7 @@ class HybridWeightVisualizer:
                          color='white'),
                 bgcolor='rgba(44, 62, 80, 0.9)',
                 bordercolor='white'
+                # pad removed – not a valid property
             )
         )
         
@@ -390,14 +403,16 @@ class HybridWeightVisualizer:
                        symbol='star', line=dict(width=3, color='white')),
             text=[f'Target\nL0={target_params.get("L0_nm", 20):.0f}nm\nfc={target_params.get("fc", 0.18):.2f}'],
             textposition="middle center",
-            textfont=dict(size=16, color='white', weight='bold'),
-            hoverinfo='text'
+            textfont=dict(size=16, color='white', family=self.font_config['family']),
+            hoverinfo='text',
+            hovertemplate='<b>Target</b><br>L0=%{text}<extra></extra>'
         ))
         
         source_x = []
         source_y = []
         source_colors = []
         source_sizes = []
+        combined_weights = [s['combined_weight'] for s in sources_data]
         
         for i, source in enumerate(sources_data):
             x, y = source_positions[i]
@@ -415,10 +430,12 @@ class HybridWeightVisualizer:
                        line=dict(width=2, color='white')),
             text=[f"S{i}" for i in range(n_sources)],
             textposition="top center",
-            textfont=dict(size=12, color='white', weight='bold'),
-            hoverinfo='text'
+            textfont=dict(size=12, color='white', family=self.font_config['family']),
+            hoverinfo='text',
+            hovertemplate='<b>Source %{text}</b><br>Combined weight: %{marker.size:.1f}<extra></extra>'
         ))
         
+        # Draw curved links with thickness scaled by combined weight
         for i, source in enumerate(sources_data):
             sx, sy = source_positions[i]
             cx = (sx + center_x) / 2
@@ -437,12 +454,15 @@ class HybridWeightVisualizer:
             combined_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx - nx*1.0) + t**2 * center_x
             combined_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy - ny*1.0) + t**2 * center_y
             combined_width = max(2, source['combined_weight'] * 20)
+            # Color based on weight (using colormap)
+            weight_norm = source['combined_weight'] / max(combined_weights) if max(combined_weights) > 0 else 0.5
+            line_color = px.colors.sample_colorscale('viridis', weight_norm)[0]
             
             fig.add_trace(go.Scatter(
                 x=combined_curve_x, y=combined_curve_y,
                 mode='lines',
                 name=f'Source {i} - Combined',
-                line=dict(width=combined_width, color='rgba(153, 102, 255, 0.8)', dash='solid'),
+                line=dict(width=combined_width, color=line_color, dash='solid'),
                 hoverinfo='text',
                 hovertext=f"Combined Weight: {source['combined_weight']:.3f}",
                 showlegend=False
@@ -453,98 +473,143 @@ class HybridWeightVisualizer:
                 text=f'<b>ENHANCED CHORD DIAGRAM: HYBRID WEIGHT VISUALIZATION</b><br>' + 
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
-                         color=self.font_config['color'], weight='bold'),
-                x=0.5, y=0.95
+                         color=self.font_config['color']),
+                x=0.5, y=0.95,
+                pad=dict(b=20)
             ),
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                       font=dict(size=self.font_config['size_labels'], family=self.font_config['family']),
-                       bgcolor='rgba(255, 255, 255, 0.8)', bordercolor='black', borderwidth=1),
+                       font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
+                                color=self.font_config['color']),
+                       bgcolor='rgba(255, 255, 255, 0.8)', bordercolor='black', borderwidth=1,
+                       itemwidth=50, tracegroupgap=10),
             width=1200,
             height=1000,
             plot_bgcolor='rgba(240, 240, 245, 0.9)',
             paper_bgcolor='white',
             hovermode='closest',
+            margin=dict(l=100, r=100, t=150, b=100),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-2.5, 2.5]),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-2.5, 2.5])
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[-2.5, 2.5]),
+            hoverlabel=dict(
+                font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
+                         color='white'),
+                bgcolor='rgba(44, 62, 80, 0.9)',
+                bordercolor='white'
+                # pad removed – not a valid property
+            )
         )
         
         return fig
     
-    def create_hierarchical_radar_chart(self, sources_data, target_params, param_sigmas):
-        fig = go.Figure()
-        
-        angles = [s['source_index'] * 60 for s in sources_data]
-        
-        l0_weights = [s['l0_weight'] for s in sources_data]
-        fc_weights = [s['fc_weight'] for s in sources_data]
-        rs_weights = [s['rs_weight'] for s in sources_data]
-        c_bulk_weights = [s['c_bulk_weight'] for s in sources_data]
-        attention_weights = [s['attention_weight'] for s in sources_data]
-        combined_weights = [s['combined_weight'] for s in sources_data]
-        
-        max_weight = max(max(l0_weights), max(fc_weights), max(rs_weights), 
-                        max(c_bulk_weights), max(attention_weights), max(combined_weights), 1e-6)
-        
-        l0_norm = [w/max_weight for w in l0_weights]
-        fc_norm = [w/max_weight for w in fc_weights]
-        rs_norm = [w/max_weight for w in rs_weights]
-        c_bulk_norm = [w/max_weight for w in c_bulk_weights]
-        attention_norm = [w/max_weight for w in attention_weights]
-        combined_norm = [w/max_weight for w in combined_weights]
-        
-        fig.add_trace(go.Scatterpolar(
-            r=l0_norm, theta=angles, mode='lines+markers',
-            name='L0 Weight', line=dict(color=self.color_scheme['L0'], width=3, dash='dash'),
-            marker=dict(size=10, color=self.color_scheme['L0']),
-            hoverinfo='text',
-            text=[f'L0 Weight: {w:.3f}' for w in l0_weights]
-        ))
-        
-        fig.add_trace(go.Scatterpolar(
-            r=fc_norm, theta=angles, mode='lines+markers',
-            name='fc Weight', line=dict(color=self.color_scheme['fc'], width=3, dash='dot'),
-            marker=dict(size=10, color=self.color_scheme['fc']),
-            hoverinfo='text',
-            text=[f'fc Weight: {w:.3f}' for w in fc_weights]
-        ))
-        
-        fig.add_trace(go.Scatterpolar(
-            r=combined_norm, theta=angles, mode='lines+markers',
-            name='Combined Weight', line=dict(color=self.color_scheme['Combined'], width=4),
-            marker=dict(size=12, color=self.color_scheme['Combined']),
-            hoverinfo='text',
-            text=[f'Combined: {w:.3f}' for w in combined_weights]
-        ))
-        
-        fig.update_layout(
-            polar=dict(
-                radialaxis=dict(visible=True, range=[0, 1.1],
-                               tickfont=dict(size=14, family=self.font_config['family']),
-                               title=dict(text='Normalized Weight',
-                                         font=dict(size=16, family=self.font_config['family'], weight='bold'))),
-                angularaxis=dict(direction='clockwise', rotation=90,
-                                tickfont=dict(size=14, family=self.font_config['family'])),
-                bgcolor='rgba(240, 240, 245, 0.5)'
-            ),
-            title=dict(
-                text=f'<b>HIERARCHICAL RADAR CHART</b><br>Target: L0={target_params.get("L0_nm", 20):.0f}nm',
-                font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
-                         color=self.font_config['color'], weight='bold'),
-                x=0.5
-            ),
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                       font=dict(size=self.font_config['size_labels'], family=self.font_config['family'])),
-            width=1200,
-            height=900,
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            hovermode='closest'
-        )
-        
-        return fig
-    
+    # NEW: Parameter‑based radar charts
+    def create_parameter_radar_charts(self, sources_data, target_params, param_sigmas):
+        """
+        Returns a list of four Plotly figures, each with angles based on
+        a different source parameter (L0_nm, fc, rs, c_bulk).
+        """
+        param_keys = ['L0_nm', 'fc', 'rs', 'c_bulk']
+        param_names = ['L0 (nm)', 'fc', 'rs', 'c_bulk']
+        figs = []
+
+        for pkey, pname in zip(param_keys, param_names):
+            # Sort sources by this parameter to get smooth angular progression
+            sorted_idx = np.argsort([s[pkey] for s in sources_data])
+            sorted_sources = [sources_data[i] for i in sorted_idx]
+
+            # Extract weights in sorted order
+            l0_weights = [s['l0_weight'] for s in sorted_sources]
+            fc_weights = [s['fc_weight'] for s in sorted_sources]
+            rs_weights = [s['rs_weight'] for s in sorted_sources]
+            c_weights = [s['c_bulk_weight'] for s in sorted_sources]
+            attn_weights = [s['attention_weight'] for s in sorted_sources]
+            combined_weights = [s['combined_weight'] for s in sorted_sources]
+
+            # Normalize weights for radial axis (scale to 0-1)
+            max_w = max(combined_weights) if combined_weights else 1
+            l0_norm = [w / max_w for w in l0_weights]
+            fc_norm = [w / max_w for w in fc_weights]
+            rs_norm = [w / max_w for w in rs_weights]
+            c_norm = [w / max_w for w in c_weights]
+            attn_norm = [w / max_w for w in attn_weights]
+            combined_norm = [w / max_w for w in combined_weights]
+
+            # Map sorted parameter values to angles (0 to 360)
+            p_vals = np.array([s[pkey] for s in sorted_sources])
+            min_p, max_p = p_vals.min(), p_vals.max()
+            if max_p == min_p:
+                angles = np.linspace(0, 360, len(p_vals), endpoint=False)  # fallback
+            else:
+                angles = 360 * (p_vals - min_p) / (max_p - min_p)
+
+            # Build figure
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(
+                r=l0_norm, theta=angles, mode='lines+markers',
+                name='α (L0)', line=dict(color=self.color_scheme['L0'], width=3),
+                marker=dict(size=8, color=self.color_scheme['L0']),
+                hovertemplate='<b>L0 Weight</b>: %{r:.3f}<br>Parameter: %{theta:.1f}°<extra></extra>'
+            ))
+            fig.add_trace(go.Scatterpolar(
+                r=fc_norm, theta=angles, mode='lines+markers',
+                name='β_fc', line=dict(color=self.color_scheme['fc'], width=3, dash='dot'),
+                marker=dict(size=8, color=self.color_scheme['fc']),
+                hovertemplate='<b>fc Weight</b>: %{r:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatterpolar(
+                r=rs_norm, theta=angles, mode='lines+markers',
+                name='β_rs', line=dict(color=self.color_scheme['rs'], width=3, dash='dash'),
+                marker=dict(size=8, color=self.color_scheme['rs']),
+                hovertemplate='<b>rs Weight</b>: %{r:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatterpolar(
+                r=c_norm, theta=angles, mode='lines+markers',
+                name='β_c', line=dict(color=self.color_scheme['c_bulk'], width=3, dash='longdash'),
+                marker=dict(size=8, color=self.color_scheme['c_bulk']),
+                hovertemplate='<b>c_bulk Weight</b>: %{r:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatterpolar(
+                r=attn_norm, theta=angles, mode='lines+markers',
+                name='Attention', line=dict(color=self.color_scheme['Attention'], width=3, dash='dot'),
+                marker=dict(size=8, color=self.color_scheme['Attention']),
+                hovertemplate='<b>Attention</b>: %{r:.3f}<extra></extra>'
+            ))
+            fig.add_trace(go.Scatterpolar(
+                r=combined_norm, theta=angles, mode='lines+markers',
+                name='Hybrid Weight', line=dict(color=self.color_scheme['Combined'], width=4),
+                marker=dict(size=10, color=self.color_scheme['Combined']),
+                hovertemplate='<b>Hybrid Weight</b>: %{r:.3f}<extra></extra>'
+            ))
+
+            fig.update_layout(
+                title=dict(
+                    text=f'Radar by {pname}',
+                    x=0.5,
+                    font=dict(family=self.font_config['family'], size=18, color=self.font_config['color']),
+                    pad=dict(t=20, b=20)
+                ),
+                polar=dict(
+                    radialaxis=dict(range=[0, 1.05], tickfont=dict(size=12, family=self.font_config['family']),
+                                   gridwidth=2, linecolor='gray', linewidth=1),
+                    angularaxis=dict(
+                        showticklabels=False,           # remove degree ticks
+                        gridcolor='lightgray',
+                        linecolor='gray',
+                        gridwidth=2
+                    ),
+                    bgcolor='rgba(240, 240, 245, 0.5)'
+                ),
+                legend=dict(orientation='h', yanchor='bottom', y=-0.2, xanchor='center', x=0.5,
+                           font=dict(family=self.font_config['family'], size=12, color=self.font_config['color']),
+                           itemwidth=60, tracegroupgap=15),
+                width=600,
+                height=500,
+                margin=dict(l=60, r=60, t=80, b=60)
+            )
+            figs.append(fig)
+
+        return figs
+
     def create_weight_formula_breakdown(self, sources_data, target_params, param_sigmas):
         fig = make_subplots(
             rows=2, cols=2,
@@ -554,8 +619,8 @@ class HybridWeightVisualizer:
                 '<b>Parameter Weight Analysis</b>',
                 '<b>Hybrid Weight Distribution</b>'
             ),
-            vertical_spacing=0.15,
-            horizontal_spacing=0.1
+            vertical_spacing=0.2,    # increased spacing
+            horizontal_spacing=0.15   # increased spacing
         )
         
         sources_data = sorted(sources_data, key=lambda x: x['source_index'])
@@ -571,19 +636,20 @@ class HybridWeightVisualizer:
         fig.add_trace(go.Bar(
             x=source_indices, y=l0_values, name='L0 Weight',
             marker_color=self.color_scheme['L0'],
-            text=[f'{v:.3f}' for v in l0_values], textposition='outside', textfont=dict(size=10)
+            text=[f'{v:.3f}' for v in l0_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family']),
+            hovertemplate='<b>Source %{x}</b><br>L0 Weight: %{y:.3f}<extra></extra>'
         ), row=1, col=1)
         
         fig.add_trace(go.Bar(
             x=source_indices, y=fc_values, name='fc Weight',
             marker_color=self.color_scheme['fc'],
-            text=[f'{v:.3f}' for v in fc_values], textposition='outside', textfont=dict(size=10)
+            text=[f'{v:.3f}' for v in fc_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family'])
         ), row=1, col=1)
         
         fig.add_trace(go.Bar(
             x=source_indices, y=attention_values, name='Attention',
             marker_color=self.color_scheme['Attention'],
-            text=[f'{v:.3f}' for v in attention_values], textposition='outside', textfont=dict(size=10)
+            text=[f'{v:.3f}' for v in attention_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family'])
         ), row=1, col=1)
         
         sorted_weights = np.sort(combined_values)[::-1]
@@ -593,7 +659,8 @@ class HybridWeightVisualizer:
         fig.add_trace(go.Scatter(
             x=x_vals, y=cumulative, mode='lines+markers', name='Cumulative Weight',
             line=dict(color=self.color_scheme['Combined'], width=4), marker=dict(size=8),
-            fill='tozeroy', fillcolor='rgba(153, 102, 255, 0.2)'
+            fill='tozeroy', fillcolor='rgba(153, 102, 255, 0.2)',
+            hovertemplate='Top %{x} sources: %{y:.1%}<extra></extra>'
         ), row=1, col=2)
         
         if len(cumulative) > 0 and np.sum(sorted_weights) > 0:
@@ -611,7 +678,9 @@ class HybridWeightVisualizer:
         fig.add_trace(go.Bar(
             x=param_names, y=param_means, name='Mean Weight by Parameter',
             marker_color=param_colors,
-            text=[f'{v:.3f}' for v in param_means], textposition='auto'
+            text=[f'{v:.3f}' for v in param_means], textposition='auto',
+            textfont=dict(family=self.font_config['family']),
+            hovertemplate='<b>%{x}</b><br>Mean weight: %{y:.3f}<extra></extra>'
         ), row=2, col=1)
         
         fig.add_trace(go.Scatter(
@@ -620,7 +689,9 @@ class HybridWeightVisualizer:
             line=dict(color=self.color_scheme['Combined'], width=3),
             marker=dict(size=15, color=self.color_scheme['Combined'],
                        symbol='circle', line=dict(width=2, color='white')),
-            text=[f"S{i}: Combined={w:.3f}" for i, w in zip(source_indices, combined_values)]
+            text=[f"S{i}: Combined={w:.3f}" for i, w in zip(source_indices, combined_values)],
+            textfont=dict(family=self.font_config['family']),
+            hovertemplate='<b>Source %{x}</b><br>Combined Weight: %{y:.3f}<extra></extra>'
         ), row=2, col=2)
         
         fig.update_layout(
@@ -630,27 +701,30 @@ class HybridWeightVisualizer:
                      f'wᵢ = α(L0) × β(params) × γ(shape) × Attention<br>' + 
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=20,
-                         color=self.font_config['color'], weight='bold'),
-                x=0.5, y=0.98
+                         color=self.font_config['color']),
+                x=0.5, y=0.98,
+                pad=dict(t=20, b=20)
             ),
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                       font=dict(size=12)),
+                       font=dict(family=self.font_config['family'], size=12, color=self.font_config['color']),
+                       itemwidth=50, tracegroupgap=10),
             width=1400,
             height=1000,
             plot_bgcolor='white',
             paper_bgcolor='white',
-            hovermode='closest'
+            hovermode='closest',
+            margin=dict(l=100, r=100, t=150, b=100)
         )
         
-        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(size=14))
-        fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Cumulative Weight", row=1, col=2, title_font=dict(size=14))
-        fig.update_xaxes(title_text="Parameter", row=2, col=1, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Mean Weight", row=2, col=1, title_font=dict(size=14))
-        fig.update_xaxes(title_text="Source Index", row=2, col=2, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Cumulative Weight", row=1, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_xaxes(title_text="Parameter", row=2, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Mean Weight", row=2, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_xaxes(title_text="Source Index", row=2, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
         
         return fig
 
@@ -1034,8 +1108,7 @@ class EnhancedSolutionLoader:
                 standardized['coords_nd'] = data.get('coords_nd', None)
                 standardized['diagnostics'] = data.get('diagnostics', [])
                 
-                # ✅ SYNTAX ERROR FIX: Complete the 'in' statement with 'data:'
-                if 'thickness_history_nm' in 
+                if 'thickness_history_nm' in data:
                     thick_list = []
                     for entry in data['thickness_history_nm']:
                         if len(entry) >= 3:
@@ -1333,6 +1406,11 @@ class CoreShellInterpolator:
         return torch.FloatTensor(features)
     
     def _get_fields_at_time(self, source: Dict, time_norm: float, target_shape: Tuple[int, int]):
+        """
+        FIXED: Ensure phi, c, psi are always initialized before use.
+        This fixes the UnboundLocalError.
+        """
+        # Initialize with default zeros to prevent UnboundLocalError
         phi = np.zeros(target_shape)
         c = np.zeros(target_shape)
         psi = np.zeros(target_shape)
@@ -1374,9 +1452,16 @@ class CoreShellInterpolator:
                     snap1, snap2 = history[idx], history[idx+1]
                     alpha = (t_target - t1) / (t2 - t1) if t2 > t1 else 0.0
                     
-                    phi = (1 - alpha) * self._ensure_2d(snap1['phi']) + alpha * self._ensure_2d(snap2['phi'])
-                    c = (1 - alpha) * self._ensure_2d(snap1['c']) + alpha * self._ensure_2d(snap2['c'])
-                    psi = (1 - alpha) * self._ensure_2d(snap1['psi']) + alpha * self._ensure_2d(snap2['psi'])
+                    phi1 = self._ensure_2d(snap1['phi'])
+                    phi2 = self._ensure_2d(snap2['phi'])
+                    c1 = self._ensure_2d(snap1['c'])
+                    c2 = self._ensure_2d(snap2['c'])
+                    psi1 = self._ensure_2d(snap1['psi'])
+                    psi2 = self._ensure_2d(snap2['psi'])
+                    
+                    phi = (1 - alpha) * phi1 + alpha * phi2
+                    c = (1 - alpha) * c1 + alpha * c2
+                    psi = (1 - alpha) * psi1 + alpha * psi2
             
             if phi.shape != target_shape:
                 factors = (target_shape[0]/phi.shape[0], target_shape[1]/phi.shape[1])
@@ -1593,6 +1678,7 @@ class CoreShellInterpolator:
                 dth = thickness_interp[idx] - thickness_interp[idx-1]
                 growth_rate = dth / dt_real if dt_real > 0 else 0.0
         
+        # Prepare sources data for visualization
         sources_data = []
         for i, (src_params, alpha_w, beta_w, gamma_w, indiv_weights, combined_w, attn_w) in enumerate(zip(
             source_params, alpha, beta, gamma,
@@ -1839,6 +1925,16 @@ def main():
     with st.sidebar:
         st.markdown('<h2 class="section-header">⚙️ Configuration</h2>', unsafe_allow_html=True)
         
+        # Add beta explanation expander
+        with st.expander("ℹ️ What is β (beta)?"):
+            st.markdown("""
+            **β (parameter closeness)**  
+            Measures similarity in `fc`, `rs`, `c_bulk` using a weighted Gaussian kernel.  
+            - Weighted combination: fc (2.0), rs (1.5), c_bulk (3.0) – c_bulk is most important.  
+            - Kernel width controlled by sliders σ_fc, σ_rs, σ_c.  
+            - Higher β → better parameter match.  
+            """)
+        
         st.markdown("#### 📁 Data Management")
         col1, col2 = st.columns(2)
         with col1:
@@ -2000,85 +2096,105 @@ def main():
             """, unsafe_allow_html=True)
             
             weight_tabs = st.tabs(["📊 Sankey Diagram", "🔗 Chord Diagram",
-                                  "🕸️ Radar Chart", "📈 Breakdown"])
+                                  "🕸️ Parameter Radar Charts", "📈 Breakdown"])
             
-            if 'sources_data' in mgr.weights or (hasattr(mgr, 'weights') and mgr.weights and 'sources_data' in 
-                st.session_state.interpolator.interpolate_fields(
-                    st.session_state.solutions, target, target_shape=(256,256),
-                    n_time_points=100, time_norm=current_time_norm
-                )):
-                interp_res = st.session_state.interpolator.interpolate_fields(
-                    st.session_state.solutions, target, target_shape=(256,256),
-                    n_time_points=100, time_norm=current_time_norm
-                )
-                sources_data = interp_res.get('sources_data', [])
-                
-                with weight_tabs[0]:
-                    st.markdown("#### 📊 Enhanced Sankey Diagram")
-                    st.markdown("Shows flow from individual parameter weights → combined hybrid weight")
-                    if sources_
-                        fig_sankey = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
-                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
-                        )
-                        st.plotly_chart(fig_sankey, use_container_width=True)
-                
-                with weight_tabs[1]:
-                    st.markdown("#### 🔗 Enhanced Chord Diagram")
-                    st.markdown("Circular layout with target at center, sources weighted by hybrid weight")
-                    if sources_
-                        fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
-                            sources_data, target
-                        )
-                        st.plotly_chart(fig_chord, use_container_width=True)
-                
-                with weight_tabs[2]:
-                    st.markdown("#### 🕸️ Hierarchical Radar Chart")
-                    st.markdown("Angular variation of different weight components")
-                    if sources_
-                        fig_radar = st.session_state.weight_visualizer.create_hierarchical_radar_chart(
-                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
-                        )
-                        st.plotly_chart(fig_radar, use_container_width=True)
-                
-                with weight_tabs[3]:
-                    st.markdown("#### 📈 Weight Formula Breakdown")
-                    st.markdown("Comprehensive analysis of all weight components")
-                    if sources_
-                        fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
-                            sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
-                        )
-                        st.plotly_chart(fig_breakdown, use_container_width=True)
-                
-                st.markdown("#### 📋 Weight Diagnostics")
-                col_w1, col_w2, col_w3 = st.columns(3)
-                with col_w1:
-                    st.metric("Weight Entropy", f"{weights.get('entropy', 0):.4f}",
-                             help="Higher = more uncertain")
-                with col_w2:
-                    st.metric("Max Weight", f"{weights.get('max_weight', 0):.4f}",
-                             help="Lower = less confident")
-                with col_w3:
-                    st.metric("Effective Sources", weights.get('effective_sources', 0),
-                             help="Sources with weight > 0.01")
-                
-                if sources_
-                    st.markdown("#### 📋 Source Weight Table")
-                    df_weights = pd.DataFrame(sources_data)
-                    st.dataframe(
-                        df_weights[['source_index', 'L0_nm', 'fc', 'l0_weight', 'fc_weight',
-                                   'beta_weight', 'attention_weight', 'combined_weight']].style
-                        .format({
-                            'L0_nm': '{:.0f}',
-                            'fc': '{:.2f}',
-                            'l0_weight': '{:.4f}',
-                            'fc_weight': '{:.4f}',
-                            'beta_weight': '{:.4f}',
-                            'attention_weight': '{:.4f}',
-                            'combined_weight': '{:.4f}'
-                        })
+            interp_res = st.session_state.interpolator.interpolate_fields(
+                st.session_state.solutions, target, target_shape=(256,256),
+                n_time_points=100, time_norm=current_time_norm
+            )
+            sources_data = interp_res.get('sources_data', []) if interp_res else []
+            
+            with weight_tabs[0]:
+                st.markdown("#### 📊 Enhanced Sankey Diagram")
+                if sources_data:
+                    fig_sankey = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
+                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
                     )
-            else:
-                st.info("Run interpolation to see weight analysis")
+                    st.plotly_chart(fig_sankey, use_container_width=True)
+            
+            with weight_tabs[1]:
+                st.markdown("#### 🔗 Enhanced Chord Diagram")
+                if sources_data:
+                    fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
+                        sources_data, target
+                    )
+                    st.plotly_chart(fig_chord, use_container_width=True)
+            
+            with weight_tabs[2]:
+                st.markdown("#### 🕸️ Parameter‑Based Radar Charts")
+                if sources_data:
+                    radar_figs = st.session_state.weight_visualizer.create_parameter_radar_charts(
+                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                    )
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.plotly_chart(radar_figs[0], use_container_width=True)  # L0
+                        st.plotly_chart(radar_figs[2], use_container_width=True)  # rs
+                    with col2:
+                        st.plotly_chart(radar_figs[1], use_container_width=True)  # fc
+                        st.plotly_chart(radar_figs[3], use_container_width=True)  # c_bulk
+                else:
+                    st.info("No source data available.")
+            
+            with weight_tabs[3]:
+                st.markdown("#### 📈 Weight Formula Breakdown")
+                if sources_data:
+                    fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
+                        sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
+                    )
+                    st.plotly_chart(fig_breakdown, use_container_width=True)
+            
+            st.markdown("#### 📋 Weight Diagnostics")
+            col_w1, col_w2, col_w3 = st.columns(3)
+            with col_w1:
+                st.metric("Weight Entropy", f"{weights.get('entropy', 0):.4f}",
+                         help="Higher = more uncertain")
+            with col_w2:
+                st.metric("Max Weight", f"{weights.get('max_weight', 0):.4f}",
+                         help="Lower = less confident")
+            with col_w3:
+                st.metric("Effective Sources", weights.get('effective_sources', 0),
+                         help="Sources with weight > 0.01")
+            
+            if sources_data:
+                st.markdown("#### 📋 Source Weight Table (Expanded)")
+                df_weights = pd.DataFrame(sources_data)
+                columns_to_show = [
+                    'source_index', 'L0_nm', 'fc', 'rs', 'c_bulk',
+                    'l0_weight', 'fc_weight', 'rs_weight', 'c_bulk_weight',
+                    'beta_weight', 'gamma_weight', 'physics_refinement',
+                    'attention_weight', 'combined_weight'
+                ]
+                df_display = df_weights[columns_to_show].copy()
+                df_display.rename(columns={
+                    'l0_weight': 'α (L0)',
+                    'fc_weight': 'β_fc',
+                    'rs_weight': 'β_rs',
+                    'c_bulk_weight': 'β_c',
+                    'beta_weight': 'β_total',
+                    'gamma_weight': 'γ (shape)',
+                    'physics_refinement': 'α·β·(1+λγ)',
+                    'attention_weight': 'Attention',
+                    'combined_weight': 'Hybrid Weight'
+                }, inplace=True)
+                
+                styled = df_display.style.format({
+                    'L0_nm': '{:.0f}',
+                    'fc': '{:.3f}',
+                    'rs': '{:.3f}',
+                    'c_bulk': '{:.2f}',
+                    'α (L0)': '{:.4f}',
+                    'β_fc': '{:.4f}',
+                    'β_rs': '{:.4f}',
+                    'β_c': '{:.4f}',
+                    'β_total': '{:.4f}',
+                    'γ (shape)': '{:.4f}',
+                    'α·β·(1+λγ)': '{:.4f}',
+                    'Attention': '{:.4f}',
+                    'Hybrid Weight': '{:.4f}'
+                }).background_gradient(subset=['Hybrid Weight'], cmap='viridis')
+                
+                st.dataframe(styled, use_container_width=True)
         
         with tabs[2]:
             st.markdown('<h2 class="section-header">📈 Thickness Evolution</h2>',
