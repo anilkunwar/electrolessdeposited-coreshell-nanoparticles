@@ -215,7 +215,7 @@ class DepositionPhysics:
         return r_centers, profile
 
 # =============================================
-# HYBRID WEIGHT VISUALIZER
+# HYBRID WEIGHT VISUALIZER (CORRECTED)
 # =============================================
 class HybridWeightVisualizer:
     """
@@ -240,8 +240,8 @@ class HybridWeightVisualizer:
             'size_title': 24,
             'size_labels': 18,
             'size_ticks': 14,
-            'color': '#2C3E50',
-            'weight': 'bold'
+            'color': '#2C3E50'
+            # weight removed – use HTML <b> tags in title strings instead
         }
     
     def get_colormap(self, cmap_name, n_colors=10):
@@ -360,12 +360,12 @@ class HybridWeightVisualizer:
                 text=f'<b>SANKEY DIAGRAM: HYBRID WEIGHT COMPONENT FLOW</b><br>' + 
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
-                         color=self.font_config['color'], weight='bold'),
+                         color=self.font_config['color']),  # removed weight
                 x=0.5, y=0.95, xanchor='center', yanchor='top',
                 pad=dict(b=20)
             ),
             font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
-                     color=self.font_config['color']),
+                     color=self.font_config['color']),  # removed weight
             width=1400,
             height=900,
             plot_bgcolor='rgba(240, 240, 245, 0.9)',
@@ -373,7 +373,7 @@ class HybridWeightVisualizer:
             margin=dict(t=100, l=50, r=50, b=50),
             hoverlabel=dict(
                 font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
-                         color='white'),
+                         color='white'),  # removed weight
                 bgcolor='rgba(44, 62, 80, 0.9)',
                 bordercolor='white',
                 pad=dict(l=10, r=10, t=5, b=5)
@@ -404,7 +404,7 @@ class HybridWeightVisualizer:
                        symbol='star', line=dict(width=3, color='white')),
             text=[f'Target\nL0={target_params.get("L0_nm", 20):.0f}nm\nfc={target_params.get("fc", 0.18):.2f}'],
             textposition="middle center",
-            textfont=dict(size=16, color='white', weight='bold'),
+            textfont=dict(size=16, color='white', family=self.font_config['family']),
             hoverinfo='text',
             hovertemplate='<b>Target</b><br>L0=%{text}<extra></extra>'
         ))
@@ -431,7 +431,7 @@ class HybridWeightVisualizer:
                        line=dict(width=2, color='white')),
             text=[f"S{i}" for i in range(n_sources)],
             textposition="top center",
-            textfont=dict(size=12, color='white', weight='bold'),
+            textfont=dict(size=12, color='white', family=self.font_config['family']),
             hoverinfo='text',
             hovertemplate='<b>Source %{text}</b><br>Combined weight: %{marker.size:.1f}<extra></extra>'
         ))
@@ -474,13 +474,14 @@ class HybridWeightVisualizer:
                 text=f'<b>ENHANCED CHORD DIAGRAM: HYBRID WEIGHT VISUALIZATION</b><br>' + 
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
-                         color=self.font_config['color'], weight='bold'),
+                         color=self.font_config['color']),  # removed weight
                 x=0.5, y=0.95,
                 pad=dict(b=20)
             ),
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                       font=dict(size=self.font_config['size_labels'], family=self.font_config['family']),
+                       font=dict(family=self.font_config['family'], size=self.font_config['size_labels'],
+                                color=self.font_config['color']),  # removed weight
                        bgcolor='rgba(255, 255, 255, 0.8)', bordercolor='black', borderwidth=1,
                        itemwidth=50, tracegroupgap=10),
             width=1200,
@@ -582,7 +583,7 @@ class HybridWeightVisualizer:
                     pad=dict(t=20, b=20)
                 ),
                 polar=dict(
-                    radialaxis=dict(range=[0, 1.05], tickfont=dict(size=12),
+                    radialaxis=dict(range=[0, 1.05], tickfont=dict(size=12, family=self.font_config['family']),
                                    gridwidth=2, linecolor='gray', linewidth=1),
                     angularaxis=dict(
                         showticklabels=False,           # remove degree ticks
@@ -593,7 +594,8 @@ class HybridWeightVisualizer:
                     bgcolor='rgba(240, 240, 245, 0.5)'
                 ),
                 legend=dict(orientation='h', yanchor='bottom', y=-0.2, xanchor='center', x=0.5,
-                           font=dict(size=12), itemwidth=60, tracegroupgap=15),
+                           font=dict(family=self.font_config['family'], size=12, color=self.font_config['color']),
+                           itemwidth=60, tracegroupgap=15),
                 width=600,
                 height=500,
                 margin=dict(l=60, r=60, t=80, b=60)
@@ -628,20 +630,20 @@ class HybridWeightVisualizer:
         fig.add_trace(go.Bar(
             x=source_indices, y=l0_values, name='L0 Weight',
             marker_color=self.color_scheme['L0'],
-            text=[f'{v:.3f}' for v in l0_values], textposition='outside', textfont=dict(size=10),
+            text=[f'{v:.3f}' for v in l0_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family']),
             hovertemplate='<b>Source %{x}</b><br>L0 Weight: %{y:.3f}<extra></extra>'
         ), row=1, col=1)
         
         fig.add_trace(go.Bar(
             x=source_indices, y=fc_values, name='fc Weight',
             marker_color=self.color_scheme['fc'],
-            text=[f'{v:.3f}' for v in fc_values], textposition='outside', textfont=dict(size=10)
+            text=[f'{v:.3f}' for v in fc_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family'])
         ), row=1, col=1)
         
         fig.add_trace(go.Bar(
             x=source_indices, y=attention_values, name='Attention',
             marker_color=self.color_scheme['Attention'],
-            text=[f'{v:.3f}' for v in attention_values], textposition='outside', textfont=dict(size=10)
+            text=[f'{v:.3f}' for v in attention_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family'])
         ), row=1, col=1)
         
         sorted_weights = np.sort(combined_values)[::-1]
@@ -671,6 +673,7 @@ class HybridWeightVisualizer:
             x=param_names, y=param_means, name='Mean Weight by Parameter',
             marker_color=param_colors,
             text=[f'{v:.3f}' for v in param_means], textposition='auto',
+            textfont=dict(family=self.font_config['family']),
             hovertemplate='<b>%{x}</b><br>Mean weight: %{y:.3f}<extra></extra>'
         ), row=2, col=1)
         
@@ -681,6 +684,7 @@ class HybridWeightVisualizer:
             marker=dict(size=15, color=self.color_scheme['Combined'],
                        symbol='circle', line=dict(width=2, color='white')),
             text=[f"S{i}: Combined={w:.3f}" for i, w in zip(source_indices, combined_values)],
+            textfont=dict(family=self.font_config['family']),
             hovertemplate='<b>Source %{x}</b><br>Combined Weight: %{y:.3f}<extra></extra>'
         ), row=2, col=2)
         
@@ -691,13 +695,14 @@ class HybridWeightVisualizer:
                      f'wᵢ = α(L0) × β(params) × γ(shape) × Attention<br>' + 
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=20,
-                         color=self.font_config['color'], weight='bold'),
+                         color=self.font_config['color']),  # removed weight
                 x=0.5, y=0.98,
                 pad=dict(t=20, b=20)
             ),
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5,
-                       font=dict(size=12), itemwidth=50, tracegroupgap=10),
+                       font=dict(family=self.font_config['family'], size=12, color=self.font_config['color']),
+                       itemwidth=50, tracegroupgap=10),
             width=1400,
             height=1000,
             plot_bgcolor='white',
@@ -706,14 +711,14 @@ class HybridWeightVisualizer:
             margin=dict(l=100, r=100, t=150, b=100)
         )
         
-        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(size=14))
-        fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Cumulative Weight", row=1, col=2, title_font=dict(size=14))
-        fig.update_xaxes(title_text="Parameter", row=2, col=1, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Mean Weight", row=2, col=1, title_font=dict(size=14))
-        fig.update_xaxes(title_text="Source Index", row=2, col=2, title_font=dict(size=14))
-        fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(size=14))
+        fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Cumulative Weight", row=1, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_xaxes(title_text="Parameter", row=2, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Mean Weight", row=2, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_xaxes(title_text="Source Index", row=2, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
+        fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
         
         return fig
 
