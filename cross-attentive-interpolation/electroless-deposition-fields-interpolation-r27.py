@@ -2080,10 +2080,20 @@ def main():
             'xtick.color': font_color,
             'ytick.color': font_color
         })
-        # Update visualizer font config
-        st.session_state.weight_visualizer.font_config['family'] = font_family
-        st.session_state.weight_visualizer.font_config['size_labels'] = font_size
-        st.session_state.weight_visualizer.font_config['color'] = font_color
+        # Safely update visualizer font config (handle older sessions)
+        if hasattr(st.session_state.weight_visualizer, 'font_config'):
+            st.session_state.weight_visualizer.font_config['family'] = font_family
+            st.session_state.weight_visualizer.font_config['size_labels'] = font_size
+            st.session_state.weight_visualizer.font_config['color'] = font_color
+        else:
+            # Reinitialize if missing (should not happen, but just in case)
+            st.session_state.weight_visualizer.font_config = {
+                'family': font_family,
+                'size_title': 24,
+                'size_labels': font_size,
+                'size_ticks': 14,
+                'color': font_color
+            }
         st.divider()
         
         st.markdown('<h2 class="section-header">🎯 Target Parameters</h2>', unsafe_allow_html=True)
