@@ -128,14 +128,14 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi23-streamlit-red)](https://electroless-deposition-fields-interpolation23.streamlit.app/) (more advanced r21 version, with Sankey diagram)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi24-streamlit-red)](https://electroless-deposition-fields-interpolation24.streamlit.app/) (r21 and r22 integrated with Sankey diagram)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi24-streamlit-red)](https://electroless-deposition-fields-interpolation24.streamlit.app/) (r21 and r22 integrated with Sankey diagram, Robust code for interpolation)
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi25-streamlit-red)](https://electroless-deposition-fields-interpolation25.streamlit.app/) (r22 expanded with expanded source weight table to consist of w for L0, c_bulk, fc and rs, and parameter radar charts)
 
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi26-streamlit-red)](https://electroless-deposition-fields-interpolation26.streamlit.app/) (r22 expanded with expanded source weight table to consist of w for L0, c_bulk, fc and rs, and parameter radar charts)
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi27-streamlit-red)](https://electroless-deposition-fields-interpolation27.streamlit.app/) (r22 expanded with expanded source weight table to consist of w for L0, c_bulk, fc and rs, and parameter radar charts, radar chart labelled)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi27-streamlit-red)](https://electroless-deposition-fields-interpolation27.streamlit.app/) (Robust code for weight visualization, r22 expanded with expanded source weight table to consist of w for L0, c_bulk, fc and rs, and parameter radar charts, radar chart labelled)
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi28-streamlit-red)](https://electroless-deposition-fields-interpolation28.streamlit.app/) (r22 and r24 integrated)
 
