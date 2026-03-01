@@ -1,6 +1,3 @@
- Here is the complete corrected code with the syntax error fixed on line 1038 (now properly completed as `if 'thickness_history_nm' in data:`):
-
-```python
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -2134,4 +2131,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
