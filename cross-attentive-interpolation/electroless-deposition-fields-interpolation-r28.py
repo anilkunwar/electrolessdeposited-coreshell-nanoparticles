@@ -9,6 +9,7 @@ ENHANCEMENTS IN THIS EXPANDED VERSION:
 - Multiple prediction comparison: save/load predictions, compare thickness, parameter maps, radar metrics
 - Ground truth selection sorted by hybrid weight with clear labeling
 - Physical coordinate alignment and radial profile comparison retained
+- BUG FIX: Handle single source case in attention scores (scalar to array conversion)
 """
 import streamlit as st
 import numpy as np
@@ -279,7 +280,7 @@ class TemporalFieldManager:
         self.avg_t_max_nd = None
         self.thickness_time: Optional[Dict] = None
         self.weights: Optional[Dict] = None
-        self.sources_data: Optional[List] = None  # NEW: store per-source details
+        self.sources_data: Optional[List] = None
         self._compute_thickness_curve()
         
         self.key_times: np.ndarray = np.linspace(0, 1, n_key_frames)
@@ -1092,6 +1093,16 @@ class CoreShellInterpolator:
         elif final_weights.ndim > 1:
             final_weights = final_weights.flatten()
         
+        # ----- FIX: Ensure attention scores are a 1D array (not scalar) -----
+        attn_np = attn_scores.squeeze().detach().cpu().numpy()
+        if np.isscalar(attn_np):
+            attn_np = np.array([attn_np])
+        elif attn_np.ndim == 0:
+            attn_np = np.array([attn_np.item()])
+        elif attn_np.ndim > 1:
+            attn_np = attn_np.flatten()
+        # --------------------------------------------------------------------
+        
         if len(final_weights) != len(source_fields):
             st.warning(f"Weight length mismatch: {len(final_weights)} vs {len(source_fields)}. Truncating/padding.")
             if len(final_weights) > len(source_fields):
@@ -1172,14 +1183,14 @@ class CoreShellInterpolator:
                 dth = thickness_interp[idx] - thickness_interp[idx-1]
                 growth_rate = dth / dt_real if dt_real > 0 else 0.0
         
-        # Build sources_data for visualization
+        # Build sources_data for visualization (now attn_np is guaranteed 1D)
         sources_data = []
         for i, (src_params, alpha_w, beta_w, gamma_w, indiv_weights, combined_w, attn_w) in enumerate(zip(
             source_params, alpha, beta, gamma,
             [dict(fc=individual_param_weights['fc'][i],
                  rs=individual_param_weights['rs'][i],
                  c_bulk=individual_param_weights['c_bulk'][i]) for i in range(len(source_params))],
-            final_weights, attn_scores.squeeze().detach().cpu().numpy()
+            final_weights, attn_np
         )):
             sources_data.append({
                 'source_index': i,
@@ -1219,7 +1230,7 @@ class CoreShellInterpolator:
                 'gamma': gamma.tolist(),
                 'individual_params': individual_param_weights,
                 'refinement_factor': refinement_factor.tolist(),
-                'attention': attn_scores.squeeze().detach().cpu().numpy().tolist(),
+                'attention': attn_np.tolist(),
                 'entropy': float(entropy),
                 'max_weight': float(max_weight),
                 'effective_sources': int(effective_sources)
@@ -1797,7 +1808,6 @@ class MultiPredictionVisualizer:
                 else:
                     val = pred['derived'].get(m, 0)
                 values.append(val)
-            # Normalize values for radar (optional)
             fig.add_trace(go.Scatterpolar(
                 r=values,
                 theta=metrics,
@@ -1813,21 +1823,18 @@ class MultiPredictionVisualizer:
     @staticmethod
     def weight_sunburst(predictions, labels):
         """Sunburst chart showing weight component breakdown across predictions."""
-        # Prepare hierarchical data: root -> prediction -> component -> weight
         ids = ['all']
         labels_all = ['All Predictions']
         parents = ['']
-        values = [0]  # root value placeholder
+        values = [0]
         
         for i, (pred, label) in enumerate(zip(predictions, labels)):
             pred_id = f"pred_{i}"
             ids.append(pred_id)
-            labels_all.append(label[:20])  # truncate long labels
+            labels_all.append(label[:20])
             parents.append('all')
-            # Sum of combined weights for this prediction (should be 1, but we'll use 1)
             values.append(1)
             
-            # Add components
             weights = pred['weights']
             comp_names = ['alpha', 'beta', 'gamma', 'attention']
             comp_labels = ['α (L0)', 'β (params)', 'γ (shape)', 'Attention']
@@ -1836,7 +1843,6 @@ class MultiPredictionVisualizer:
                 ids.append(comp_id)
                 labels_all.append(comp_label)
                 parents.append(pred_id)
-                # Average weight of this component across sources (weighted by combined? we'll use mean)
                 comp_vals = weights.get(comp, [0])
                 if isinstance(comp_vals, list) and len(comp_vals) > 0:
                     val = np.mean(comp_vals)
@@ -1856,7 +1862,7 @@ class MultiPredictionVisualizer:
 
 
 # =============================================
-# ENHANCED HEATMAP VISUALIZER (unchanged from Code 24)
+# ENHANCED HEATMAP VISUALIZER
 # =============================================
 class HeatMapVisualizer:
     def __init__(self):
@@ -2873,18 +2879,6 @@ def main():
                 # Use sources_data to get hybrid weights and sort
                 sources_data = mgr.sources_data if mgr.sources_data else []
                 if sources_data:
-                    # Sort sources by combined_weight descending
-                    sorted_sources = sorted(sources_data, key=lambda x: x['combined_weight'], reverse=True)
-                    gt_options = []
-                    gt_indices = []
-                    for src in sorted_sources:
-                        idx = src['source_index']
-                        # Get the actual solution index (might be different if sources were filtered)
-                        # We need the original index in st.session_state.solutions
-                        # sources_data stores index within filtered list, not original.
-                        # We'll need to map back: sources_data 'source_index' is position in filtered list.
-                        # Better: we have mgr.sources which are the actual source dicts used.
-                        # Let's use mgr.sources directly and compute weight for each.
                     # Recompute sorted list with weights from mgr.weights['combined']
                     if mgr.sources:
                         weights_combined = mgr.weights['combined']
@@ -3086,7 +3080,6 @@ def main():
                         st.plotly_chart(fig, use_container_width=True)
                     
                     elif plot_type == "Parameter Map":
-                        # Need at least 3 predictions for contour
                         param_x = st.selectbox("X parameter", ['L0_nm', 'fc', 'rs', 'c_bulk'])
                         param_y = st.selectbox("Y parameter", ['fc', 'rs', 'c_bulk', 'L0_nm'], index=1)
                         metric = st.selectbox("Metric", ['thickness_nm', 'growth_rate', 'entropy'])
