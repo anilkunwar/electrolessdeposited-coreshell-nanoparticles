@@ -10,6 +10,7 @@ ENHANCEMENTS IN THIS EXPANDED VERSION:
 - Ground truth selection sorted by hybrid weight with clear labeling
 - Physical coordinate alignment and radial profile comparison retained
 - BUG FIX: Handle single source case in attention scores (scalar to array conversion)
+- BUG FIX: Fixed ternary expression syntax error on line 1021 (added else 0.0)
 - ENHANCED: 3D Thickness Evolution with Plotly and 50+ colormaps
 - ENHANCED: Functional Parameter Map with contour/scatter options
 - ENHANCED: Interactive Weight Sunburst with hierarchical breakdown
@@ -393,7 +394,7 @@ class TemporalFieldManager:
         self.avg_t_max_nd = None
         self.thickness_time: Optional[Dict] = None
         self.weights: Optional[Dict] = None
-        self.sources_data: Optional[List] = None
+        self.sources_ Optional[List] = None
         
         self._compute_thickness_curve()
         
@@ -1018,7 +1019,8 @@ class CoreShellInterpolator:
             
             feat.append(1.0 if p.get('bc_type', 'Neu') == 'Dir' else 0.0)
             feat.append(1.0 if p.get('use_edl', False) else 0.0)
-            feat.append(1.0 if p.get('mode', '2D (planar)') != '2D (planar)')
+            # FIX: Added else 0.0 to complete ternary expression (was missing before)
+            feat.append(1.0 if p.get('mode', '2D (planar)') != '2D (planar)' else 0.0)
             feat.append(1.0 if 'B' in p.get('growth_model', 'Model A') else 0.0)
             
             while len(feat) < 12:
@@ -1410,7 +1412,7 @@ class HybridWeightVisualizer:
     
     def create_enhanced_sankey_diagram(self, sources_data, target_params, param_sigmas):
         labels = ['Target']
-        for source in sources_data:
+        for source in sources_
             idx = source['source_index']
             l0 = source['L0_nm']
             fc = source['fc']
@@ -2959,7 +2961,7 @@ def main():
             
             with weight_tabs[1]:
                 st.markdown("#### 🔗 Enhanced Chord Diagram")
-                if sources_data:
+                if sources_
                     fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
                         sources_data, target
                     )
@@ -2969,7 +2971,7 @@ def main():
             
             with weight_tabs[2]:
                 st.markdown("#### 🕸️ Parameter‑Based Radar Charts")
-                if sources_data:
+                if sources_
                     radar_figs = st.session_state.weight_visualizer.create_parameter_radar_charts(
                         sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
                     )
@@ -2985,7 +2987,7 @@ def main():
             
             with weight_tabs[3]:
                 st.markdown("#### 📈 Weight Formula Breakdown")
-                if sources_data:
+                if sources_
                     fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
                         sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
                     )
@@ -3018,7 +3020,7 @@ def main():
                 else:
                     st.error("Failed to save prediction.")
             
-            if sources_data:
+            if sources_
                 st.markdown("#### 📋 Source Weight Table (Expanded)")
                 df_weights = pd.DataFrame(sources_data)
                 columns_to_show = [
@@ -3122,7 +3124,7 @@ def main():
                 target = mgr.target_params
                 sources_data = mgr.sources_data if mgr.sources_data else []
                 
-                if sources_data:
+                if sources_
                     if mgr.sources:
                         weights_combined = mgr.weights['combined']
                         source_list = list(enumerate(mgr.sources))
