@@ -394,7 +394,7 @@ class TemporalFieldManager:
         self.avg_t_max_nd = None
         self.thickness_time: Optional[Dict] = None
         self.weights: Optional[Dict] = None
-        self.sources_ Optional[List] = None
+        self.sources_: Optional[List] = None  # FIXED: added colon for type hint
         
         self._compute_thickness_curve()
         
@@ -1412,7 +1412,7 @@ class HybridWeightVisualizer:
     
     def create_enhanced_sankey_diagram(self, sources_data, target_params, param_sigmas):
         labels = ['Target']
-        for source in sources_
+        for source in sources_data:  # FIXED: changed 'sources_' to 'sources_data' and added colon
             idx = source['source_index']
             l0 = source['L0_nm']
             fc = source['fc']
@@ -2951,7 +2951,7 @@ def main():
             
             with weight_tabs[0]:
                 st.markdown("#### 📊 Enhanced Sankey Diagram")
-                if sources_data:
+                if sources_data:  # FIXED: changed 'sources_' to 'sources_data'
                     fig_sankey = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
                         sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
                     )
@@ -2961,7 +2961,7 @@ def main():
             
             with weight_tabs[1]:
                 st.markdown("#### 🔗 Enhanced Chord Diagram")
-                if sources_
+                if sources_data:  # FIXED: changed 'sources_' to 'sources_data'
                     fig_chord = st.session_state.weight_visualizer.create_enhanced_chord_diagram(
                         sources_data, target
                     )
@@ -2971,7 +2971,7 @@ def main():
             
             with weight_tabs[2]:
                 st.markdown("#### 🕸️ Parameter‑Based Radar Charts")
-                if sources_
+                if sources_data:  # FIXED: changed 'sources_' to 'sources_data'
                     radar_figs = st.session_state.weight_visualizer.create_parameter_radar_charts(
                         sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
                     )
@@ -2987,7 +2987,7 @@ def main():
             
             with weight_tabs[3]:
                 st.markdown("#### 📈 Weight Formula Breakdown")
-                if sources_
+                if sources_data:  # FIXED: changed 'sources_' to 'sources_data'
                     fig_breakdown = st.session_state.weight_visualizer.create_weight_formula_breakdown(
                         sources_data, target, [sigma_fc, sigma_rs, sigma_c, sigma_L]
                     )
@@ -3020,7 +3020,7 @@ def main():
                 else:
                     st.error("Failed to save prediction.")
             
-            if sources_
+            if sources_data:
                 st.markdown("#### 📋 Source Weight Table (Expanded)")
                 df_weights = pd.DataFrame(sources_data)
                 columns_to_show = [
@@ -3124,7 +3124,7 @@ def main():
                 target = mgr.target_params
                 sources_data = mgr.sources_data if mgr.sources_data else []
                 
-                if sources_
+                if sources_data:  # FIXED: changed 'sources_' to 'sources_data'
                     if mgr.sources:
                         weights_combined = mgr.weights['combined']
                         source_list = list(enumerate(mgr.sources))
