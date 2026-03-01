@@ -14,6 +14,7 @@ ENHANCEMENTS IN THIS EXPANDED VERSION:
     * 3D Thickness Evolution (Plotly) with fourth parameter as colorscale, supporting 50+ colormaps
     * Interactive Parameter Map with contour option and metric selection
     * Enhanced Weight Sunburst with colormap and branchvalues='total'
+- FIX: Display very small thickness and growth rate values using scientific notation to avoid zero rounding
 """
 import streamlit as st
 import numpy as np
@@ -2355,6 +2356,17 @@ def compute_errors(gt_field, interp_field):
 
 
 # =============================================
+# HELPER FOR SCIENTIFIC NOTATION OF SMALL NUMBERS
+# =============================================
+def format_small_number(val: float, threshold: float = 0.001, decimals: int = 3) -> str:
+    """Return scientific notation if |val| < threshold, else fixed-point with given decimals."""
+    if abs(val) < threshold:
+        return f"{val:.3e}"
+    else:
+        return f"{val:.{decimals}f}"
+
+
+# =============================================
 # MAIN STREAMLIT APP
 # =============================================
 def main():
@@ -2565,7 +2577,8 @@ def main():
         
         col_info1, col_info2, col_info3 = st.columns(3)
         with col_info1:
-            st.metric("Current Thickness", f"{current_thickness:.3f} nm")
+            # Use scientific notation for very small thickness
+            st.metric("Current Thickness", format_small_number(current_thickness) + " nm")
         with col_info3:
             st.metric("Time", f"{current_time_real:.3e} s")
         
@@ -2655,13 +2668,14 @@ def main():
             
             stats_cols = st.columns(4)
             with stats_cols[0]:
-                st.metric("Final Thickness", f"{th_arr[-1]:.3f} nm")
+                val = th_arr[-1]
+                st.metric("Final Thickness", format_small_number(val) + " nm")
             with stats_cols[1]:
-                st.metric("Initial Growth Rate",
-                         f"{(th_arr[1]-th_arr[0])/(t_arr[1]-t_arr[0]):.3f} nm/s")
+                rate = (th_arr[1]-th_arr[0])/(t_arr[1]-t_arr[0])
+                st.metric("Initial Growth Rate", format_small_number(rate) + " nm/s")
             with stats_cols[2]:
                 avg_rate = (th_arr[-1] - th_arr[0]) / (t_arr[-1] - t_arr[0])
-                st.metric("Avg Growth Rate", f"{avg_rate:.3f} nm/s")
+                st.metric("Avg Growth Rate", format_small_number(avg_rate) + " nm/s")
             with stats_cols[3]:
                 idx_50 = np.argmin(np.abs(th_arr - 0.5*th_arr[-1]))
                 st.metric("Time to 50% thickness", f"{t_arr[idx_50]:.3e} s")
@@ -2741,10 +2755,11 @@ def main():
             if res:
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Shell thickness (nm)", f"{res['derived']['thickness_nm']:.3f}")
+                    val = res['derived']['thickness_nm']
+                    st.metric("Shell thickness (nm)", format_small_number(val))
                 with col2:
-                    st.metric("Growth rate (nm/s)",
-                             f"{res['derived'].get('growth_rate', 0):.3f}")
+                    val = res['derived'].get('growth_rate', 0)
+                    st.metric("Growth rate (nm/s)", format_small_number(val))
                 with col3:
                     st.metric("Sources used", res['num_sources'])
                 
