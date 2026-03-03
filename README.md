@@ -143,6 +143,9 @@ Transformer Inspired Attention Codes:
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi30-streamlit-red)](https://electroless-deposition-fields-interpolation30.streamlit.app/) (r22 and r24 integrated, thickness in harmony with phase field postprocessed results, multiple prediction results can be compared)
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi31-streamlit-red)](https://electroless-deposition-fields-interpolation31.streamlit.app/) (r22 and r24 integrated, thickness in harmony with phase field postprocessed results, robust multiple prediction results for comparison)
+
+
 
 
 
