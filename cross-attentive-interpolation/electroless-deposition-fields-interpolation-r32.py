@@ -1,13 +1,3 @@
-We have corrected the parallel coordinates error by converting categorical labels to numeric IDs and using a qualitative colorscale. Additionally, we enhanced the multi‑prediction tab with:
-
-- Shorter, more readable prediction labels (e.g., `P0: L0=60 fc=0.18`).
-- A note about interactive features (hover, zoom, pan).
-- The parallel coordinates plot now displays correctly, with each prediction in a distinct colour.
-- The 3D parameter scatter now scales marker sizes proportionally and includes full parameter info in hover text.
-
-Below is the **complete, corrected, and enhanced code**. All previous functionality is preserved; only the multi‑prediction comparison tab has been refined as requested.
-
-```python
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
@@ -3485,4 +3475,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
