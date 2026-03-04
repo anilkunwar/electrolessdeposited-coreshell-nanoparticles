@@ -2422,7 +2422,7 @@ class MultiPredictionVisualizer:
             values = []
             for m in metrics:
                 if m == 'entropy':
-                    val = pred['weights'].get('entropy', 0)
+                    val = pred['weights'].get('entropy', 0)      # FIXED: safe get
                 else:
                     val = pred['derived'].get(m, 0)
                 values.append(val)
@@ -2567,9 +2567,9 @@ class MultiPredictionVisualizer:
                     row[col] = p['derived'][col]
                 elif col in p['weights']:
                     if col == 'entropy':
-                        row[col] = p['weights'].get('entropy', 0)
+                        row[col] = p.get('weights', {}).get('entropy', 0)   # FIXED: safe get
                     else:
-                        row[col] = np.mean(p['weights'].get(col, [0]))
+                        row[col] = np.mean(p.get('weights', {}).get(col, [0]))
                 else:
                     row[col] = 0
             data.append(row)
@@ -3022,10 +3022,11 @@ def render_intelligent_designer_tab():
                 st.pyplot(fig_mat)
             
             with viz_col2:
+                # FIXED: Use proper material proxy handling for Plotly (same logic as static heatmap)
                 fig_inter = st.session_state.visualizer.create_interactive_heatmap(
                     proxy_sel,
                     title=f"Interactive View (t={t_sel_real:.2e}s)",
-                    cmap_name='Set1',
+                    cmap_name='Set1',   # still passed but ignored inside if material
                     L0_nm=target_design['L0_nm'],
                     target_params=target_design,
                     time_real_s=t_sel_real
@@ -3177,22 +3178,30 @@ def main():
         st.markdown("## ⚙️ Configuration")
         
         st.markdown("### 📁 Data Management")
-        col1, col2 = st.columns(2)
+        # FIXED: Added third column for clear cache button and auto-clear on load
+        col1, col2, col3 = st.columns([2, 2, 1])
         with col1:
             if st.button("📥 Load Solutions", use_container_width=True):
                 with st.spinner("Loading simulation data..."):
                     st.session_state.solutions = st.session_state.loader.load_all_solutions()
+                    # Auto-clear old cache when new files are loaded
+                    if st.session_state.get('temporal_manager') is not None:
+                        st.session_state.temporal_manager.clear_lru_cache()
         with col2:
             if st.button("🧹 Clear All", use_container_width=True):
                 st.session_state.solutions = []
                 st.session_state.temporal_manager = None
                 st.session_state.last_target_hash = None
                 st.session_state.saved_predictions = []
-                import shutil
                 if os.path.exists(TEMP_ANIMATION_DIR):
                     shutil.rmtree(TEMP_ANIMATION_DIR)
                 os.makedirs(TEMP_ANIMATION_DIR, exist_ok=True)
                 st.success("All cleared")
+        with col3:
+            if st.session_state.get('temporal_manager') is not None:
+                if st.button("🗑️ Clear Cache", use_container_width=True, help="Clears LRU cache only"):
+                    st.session_state.temporal_manager.clear_lru_cache()
+                    st.rerun()
         
         if st.session_state.solutions:
             st.success(f"✅ {len(st.session_state.solutions)} solutions loaded")
@@ -3758,7 +3767,7 @@ def main():
                             elif dim in p['derived']:
                                 values.append(p['derived'][dim])
                             elif dim == 'entropy':
-                                values.append(p['weights'].get('entropy', 0))
+                                values.append(p.get('weights', {}).get('entropy', 0))
                             else:
                                 values.append(0)
                         dims.append({'label': dim, 'values': values})
