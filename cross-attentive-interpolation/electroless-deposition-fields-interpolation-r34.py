@@ -1237,7 +1237,7 @@ class HeatMapVisualizer:
         fig, ax = plt.subplots(figsize=figsize, dpi=150)
         extent = self._get_extent(L0_nm)
         
-        is_material = self._is_material_proxy(field_data, colorbar_label, title)
+        is_material = self._is_material_proxy(field_data)
         
         if is_material:
             im = ax.imshow(field_data, cmap=MATERIAL_COLORMAP_MATPLOTLIB,
@@ -1270,12 +1270,10 @@ class HeatMapVisualizer:
         plt.tight_layout()
         return fig
     
-    def _is_material_proxy(self, field_data, colorbar_label, title):
+    def _is_material_proxy(self, field_data):
         unique_vals = np.unique(field_data)
-        is_discrete = np.all(np.isin(unique_vals, [0, 1, 2])) and len(unique_vals) <= 3
-        has_material_keyword = any(kw in colorbar_label.lower() or kw in title.lower()
-                                  for kw in ['material', 'proxy', 'phase', 'electrolyte', 'ag', 'cu'])
-        return is_discrete and has_material_keyword
+        # Material proxy is exactly 0, 1, 2 (discrete)
+        return np.all(np.isin(unique_vals, [0, 1, 2])) and len(unique_vals) <= 3
     
     def create_interactive_heatmap(self, field_data, title, cmap_name='viridis',
                                  L0_nm=20.0, width=800, height=700,
@@ -1284,7 +1282,7 @@ class HeatMapVisualizer:
         x = np.linspace(0, L0_nm, nx)
         y = np.linspace(0, L0_nm, ny)
         
-        is_material = self._is_material_proxy(field_data, "", title)
+        is_material = self._is_material_proxy(field_data)
         
         if is_material:
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
@@ -1341,7 +1339,7 @@ def format_small_number(val: float, threshold: float = 0.001, decimals: int = 3)
 # MAIN STREAMLIT APP
 # =============================================
 def initialize_session_state():
-    """Initialize all session state variables following Streamlit best practices [^1^][^22^]."""
+    """Initialize all session state variables following Streamlit best practices."""
     defaults = {
         'solutions': [],
         'loader': None,
@@ -1585,7 +1583,7 @@ def render_intelligent_designer_tab():
                 fig_mat = st.session_state.visualizer.create_field_heatmap(
                     proxy_sel,
                     title=f"Material Proxy (t={t_sel_real:.2e}s)",
-                    cmap_name='Set1',
+                    cmap_name='Set1',  # Not used for material proxy
                     L0_nm=target_design['L0_nm'],
                     target_params=target_design,
                     time_real_s=t_sel_real
@@ -1596,7 +1594,7 @@ def render_intelligent_designer_tab():
                 fig_inter = st.session_state.visualizer.create_interactive_heatmap(
                     proxy_sel,
                     title=f"Interactive View (t={t_sel_real:.2e}s)",
-                    cmap_name='Set1',
+                    cmap_name='Set1',  # Not used for material proxy
                     L0_nm=target_design['L0_nm'],
                     target_params=target_design,
                     time_real_s=t_sel_real
@@ -1724,7 +1722,7 @@ def main():
     st.markdown('<h1 class="main-header">🧪 Intelligent Core-Shell Deposition Designer</h1>',
                unsafe_allow_html=True)
     
-    # Initialize session state (singleton pattern) [^1^][^22^]
+    # Initialize session state (singleton pattern)
     initialize_session_state()
     
     # Sidebar controls
