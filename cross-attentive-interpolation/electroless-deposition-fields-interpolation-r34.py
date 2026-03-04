@@ -1334,6 +1334,14 @@ def format_small_number(val: float, threshold: float = 0.001, decimals: int = 3)
     else:
         return f"{val:.{decimals}f}"
 
+# ----------------------------------------------------------------------
+# Helper for Quick Template buttons (callback fix for Streamlit crash)
+# ----------------------------------------------------------------------
+def set_template(text: str):
+    """Callback for template buttons – sets the text area value safely."""
+    st.session_state.designer_input = text
+    # No st.rerun() needed; Streamlit automatically reruns after callback
+
 
 # =============================================
 # MAIN STREAMLIT APP
@@ -1404,15 +1412,19 @@ def render_intelligent_designer_tab():
         )
     with col_input2:
         st.markdown("**Quick Templates:**")
-        if st.button("🔬 Thin Shell", use_container_width=True):
-            st.session_state.designer_input = "Thin Ag shell with L0=40nm, fc=0.2, c_bulk=0.15, time=5e-4s"
-            st.rerun()
-        if st.button("📏 Thick Shell", use_container_width=True):
-            st.session_state.designer_input = "Thick Ag shell with L0=80nm, fc=0.15, c_bulk=0.8, time=2e-3s"
-            st.rerun()
-        if st.button("⚡ Fast Growth", use_container_width=True):
-            st.session_state.designer_input = "Fast deposition with L0=50nm, fc=0.25, c_bulk=0.6, high concentration"
-            st.rerun()
+        # Fixed: using on_click callbacks (no st.rerun())
+        if st.button("🔬 Thin Shell", use_container_width=True,
+                     on_click=set_template,
+                     args=("Thin Ag shell with L0=40nm, fc=0.2, c_bulk=0.15, time=5e-4s",)):
+            pass
+        if st.button("📏 Thick Shell", use_container_width=True,
+                     on_click=set_template,
+                     args=("Thick Ag shell with L0=80nm, fc=0.15, c_bulk=0.8, time=2e-3s",)):
+            pass
+        if st.button("⚡ Fast Growth", use_container_width=True,
+                     on_click=set_template,
+                     args=("Fast deposition with L0=50nm, fc=0.25, c_bulk=0.6, high concentration",)):
+            pass
     
     # Control buttons
     col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
