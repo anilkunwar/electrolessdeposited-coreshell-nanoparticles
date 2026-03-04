@@ -3177,9 +3177,22 @@ def main():
         st.markdown("## ⚙️ Configuration")
         
         st.markdown("### 📁 Data Management")
-        if st.button("📥 Load Solutions", use_container_width=True):
-            with st.spinner("Loading simulation data..."):
-                st.session_state.solutions = st.session_state.loader.load_all_solutions()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📥 Load Solutions", use_container_width=True):
+                with st.spinner("Loading simulation data..."):
+                    st.session_state.solutions = st.session_state.loader.load_all_solutions()
+        with col2:
+            if st.button("🧹 Clear All", use_container_width=True):
+                st.session_state.solutions = []
+                st.session_state.temporal_manager = None
+                st.session_state.last_target_hash = None
+                st.session_state.saved_predictions = []
+                import shutil
+                if os.path.exists(TEMP_ANIMATION_DIR):
+                    shutil.rmtree(TEMP_ANIMATION_DIR)
+                os.makedirs(TEMP_ANIMATION_DIR, exist_ok=True)
+                st.success("All cleared")
         
         if st.session_state.solutions:
             st.success(f"✅ {len(st.session_state.solutions)} solutions loaded")
@@ -3203,7 +3216,7 @@ def main():
         sigma_shape = st.slider("σ_shape (radial similarity)", 0.05, 0.5, 0.15, 0.01)
         require_categorical_match = st.checkbox("Require exact categorical match", value=False)
         n_key_frames = st.slider("Key frames", 1, 20, 5, 1)
-        lru_cache_size = st.slider("LRU cache size", 1, 5, 3, 1)
+        lru_cache_size = st.slider("LRU cache size", 1, 5, 2, 1)
         
         # Update interpolator with current settings
         st.session_state.interpolator.set_parameter_sigma([sigma_fc, sigma_rs, sigma_c, sigma_L])
@@ -3211,7 +3224,7 @@ def main():
         st.session_state.interpolator.set_gating_mode(gating_mode)
         st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
         
-        # --- CACHE MANAGEMENT SECTION (NEW) ---
+        # --- CACHE MANAGEMENT SECTION ---
         st.markdown("---")
         st.markdown("### 🗑️ Cache Management")
         if st.session_state.get('temporal_manager') is not None:
