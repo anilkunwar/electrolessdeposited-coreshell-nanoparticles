@@ -1016,6 +1016,22 @@ class TemporalFieldManager:
             'lru_entries': len(self.lru_cache),
             'key_frame_entries': len(self.key_frames)
         }
+    
+    # ========== NEW CACHE MANAGEMENT METHODS ==========
+    def clear_lru_cache(self):
+        """Clear only the LRU cache, keep key frames."""
+        self.lru_cache.clear()
+        st.sidebar.info("LRU cache cleared.")
+    
+    def recompute_key_frames(self):
+        """Recompute all key frames (useful after hyperparameter changes)."""
+        st.sidebar.info("Recomputing key frames...")
+        self.key_frames.clear()
+        self.key_thickness.clear()
+        self.key_time_real.clear()
+        self._precompute_key_frames()
+        st.sidebar.success("Key frames recomputed.")
+    # ===================================================
 
 # =============================================
 # ROBUST SOLUTION LOADER
@@ -3194,6 +3210,33 @@ def main():
         st.session_state.interpolator.temperature = temperature
         st.session_state.interpolator.set_gating_mode(gating_mode)
         st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
+        
+        # --- CACHE MANAGEMENT SECTION (NEW) ---
+        st.markdown("---")
+        st.markdown("### 🗑️ Cache Management")
+        if st.session_state.get('temporal_manager') is not None:
+            col_clear1, col_clear2 = st.columns(2)
+            with col_clear1:
+                if st.button("Clear LRU Cache", use_container_width=True):
+                    st.session_state.temporal_manager.clear_lru_cache()
+            with col_clear2:
+                if st.button("Recompute Key Frames", use_container_width=True):
+                    with st.spinner("Recomputing..."):
+                        st.session_state.temporal_manager.recompute_key_frames()
+            
+            # Show memory stats
+            mem_stats = st.session_state.temporal_manager.get_memory_stats()
+            st.markdown(f"""
+            <div class="memory-stats">
+            <strong>📊 Cache Memory</strong><br>
+            Key frames: {mem_stats['key_frames_mb']:.2f} MB<br>
+            LRU cache: {mem_stats['lru_cache_mb']:.2f} MB<br>
+            Total: {mem_stats['total_mb']:.2f} MB
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("No active temporal manager. Run a design first.")
+        # ---------------------------------------
     
     # Main tabs – include all from second code plus the Intelligent Designer
     tabs = st.tabs([
