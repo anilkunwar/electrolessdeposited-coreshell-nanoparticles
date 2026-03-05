@@ -8,6 +8,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - All enhanced visualizations: Sankey, chord, radar, 3D thickness, ground‑truth comparison, etc.
 - Temporal caching, animation streaming, and memory‑efficient key frames
 - **Enhanced time interpolation (progress‑based)** and **phi shell tracking diagnostics**
+- FIX: Strictly increasing thickness for spline construction (solves "x must be strictly increasing" error)
 """
 
 import streamlit as st
@@ -581,6 +582,14 @@ class CoreShellInterpolator:
                 th_vals.append(th_nm)
                 t_vals_nd.append(t_norm * t_max_nd)
             
+            # ---------- FIX: ensure strictly increasing thickness ----------
+            th_vals = np.array(th_vals, dtype=float)
+            if len(th_vals) > 1:
+                # Force non-decreasing (cumulative max) and then strictly increasing (+ tiny epsilon)
+                th_vals = np.maximum.accumulate(th_vals)
+                th_vals += np.arange(len(th_vals)) * 1e-14
+            t_vals_nd = np.array(t_vals_nd)   # also ensure array
+            
             source_thickness.append({
                 't_norm': common_t_norm,
                 'th_nm': th_vals,
@@ -891,16 +900,26 @@ class TemporalFieldManager:
                 )
                 th_nm = th_nd * params.get('L0_nm', 20.0)
                 th_vals.append(th_nm)
-            th_vals = np.array(th_vals)
+            
+            # ---------- FIX: ensure strictly increasing thickness ----------
+            th_vals = np.array(th_vals, dtype=float)
+            if len(th_vals) > 1:
+                # Force non-decreasing (cumulative max) and then strictly increasing (+ tiny epsilon)
+                th_vals = np.maximum.accumulate(th_vals)
+                th_vals += np.arange(len(th_vals)) * 1e-14
+
             max_th = th_vals[-1] if len(th_vals) > 0 else 1.0
+            self.max_thickness_per_source.append(max_th)
             if max_th > 1e-9:
                 progress = th_vals / max_th
                 # Spline: progress -> t_norm
-                spl = CubicSpline(progress, common_t_norm, extrapolate=True, bc_type='natural')
+                if len(np.unique(progress)) >= 2:
+                    spl = CubicSpline(progress, common_t_norm, extrapolate=True, bc_type='natural')
+                else:
+                    spl = None
             else:
                 spl = None
             self.progress_splines.append(spl)
-            self.max_thickness_per_source.append(max_th)
     
     def _precompute_key_frames(self):
         st.info(f"Pre-computing {self.n_key_frames} key frames using progress‑based time...")
