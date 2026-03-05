@@ -1609,6 +1609,42 @@ class CompletionAnalyzer:
 # ENHANCED HEATMAP VISUALIZER
 # =============================================
 class HeatMapVisualizer:
+    # Mapping from Matplotlib colormap names to Plotly-compatible names
+    MATPLOTLIB_TO_PLOTLY = {
+        'viridis': 'Viridis', 'plasma': 'Plasma', 'inferno': 'Inferno',
+        'magma': 'Magma', 'cividis': 'Cividis', 'Greys': 'Greys',
+        'Blues': 'Blues', 'Reds': 'Reds', 'Greens': 'Greens',
+        'Oranges': 'Oranges', 'Purples': 'Purples', 'YlOrBr': 'YlOrBr',
+        'YlOrRd': 'YlOrRd', 'OrRd': 'OrRd', 'PuRd': 'PuRd',
+        'RdPu': 'RdPu', 'BuPu': 'BuPu', 'GnBu': 'GnBu',
+        'PuBu': 'PuBu', 'YlGnBu': 'YlGnBu', 'PuBuGn': 'PuBuGn',
+        'BuGn': 'BuGn', 'YlGn': 'YlGn', 'binary': 'Greys',  # approximate
+        'gist_yarg': 'Greys_r', 'gist_gray': 'Gray', 'gray': 'Gray',
+        'bone': 'bone', 'pink': 'pink', 'spring': 'spring',
+        'summer': 'summer', 'autumn': 'autumn', 'winter': 'winter',
+        'cool': 'cool', 'Wistia': 'Wistia', 'hot': 'hot',
+        'afmhot': 'hot', 'gist_heat': 'hot', 'copper': 'copper',
+        'PiYG': 'PiYG', 'PRGn': 'PRGn', 'BrBG': 'BrBG',
+        'PuOr': 'PuOr', 'RdGy': 'RdGy', 'RdBu': 'RdBu',
+        'RdYlBu': 'RdYlBu', 'RdYlGn': 'RdYlGn', 'Spectral': 'Spectral',
+        'coolwarm': 'RdBu', 'bwr': 'RdBu', 'seismic': 'RdBu',
+        'twilight': 'twilight', 'twilight_shifted': 'twilight',
+        'hsv': 'HSV', 'jet': 'Jet', 'turbo': 'Turbo',
+        'rainbow': 'Rainbow', 'gist_rainbow': 'Rainbow',
+        'gist_ncar': 'nipy_spectral', 'nipy_spectral': 'nipy_spectral',
+        'gist_stern': 'gnuplot', 'gnuplot': 'gnuplot', 'gnuplot2': 'gnuplot2',
+        'CMRmap': 'CMRmap', 'cubehelix': 'Cubehelix', 'brg': 'brg',
+        'gist_earth': 'Earth', 'terrain': 'Terrain', 'ocean': 'Ocean',
+        'gist_water': 'Blues', 'flag': 'flag', 'prism': 'Prism',
+        'tab10': 'Set1',  # approximate
+        'tab20': 'Set3',  # approximate
+        'tab20b': 'Set2', # approximate
+        'tab20c': 'Set2', # approximate
+        'Set1': 'Set1', 'Set2': 'Set2', 'Set3': 'Set3',
+        'Pastel1': 'Pastel1', 'Pastel2': 'Pastel2',
+        'Paired': 'Paired', 'Accent': 'Accent', 'Dark2': 'Dark2'
+    }
+
     def __init__(self):
         self.colormaps = COLORMAP_OPTIONS
     
@@ -1617,10 +1653,11 @@ class HeatMapVisualizer:
     
     def _is_material_proxy(self, field_data, colorbar_label, title):
         unique_vals = np.unique(field_data)
-        is_discrete = np.all(np.isin(unique_vals, [0, 1, 2])) and len(unique_vals) <= 3
-        has_material_keyword = any(kw in colorbar_label.lower() or kw in title.lower()
-                                  for kw in ['material', 'proxy', 'phase', 'electrolyte', 'ag', 'cu'])
-        return is_discrete and has_material_keyword
+        # Robust check: if values are exactly 0, 1, 2 (allowing for floats)
+        valid_material_values = {0.0, 1.0, 2.0}
+        is_discrete = set(unique_vals).issubset(valid_material_values) and len(unique_vals) <= 3
+        # Optional keyword check as a fallback, but data values are primary
+        return is_discrete
     
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
                            L0_nm=20.0, figsize=(10,8), colorbar_label="",
@@ -1685,8 +1722,10 @@ class HeatMapVisualizer:
         else:
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Value={field_data[i,j]:.4f}"
                      for j in range(nx)] for i in range(ny)]
+            # Map Matplotlib colormap name to a Plotly-compatible one
+            plotly_cmap = self.MATPLOTLIB_TO_PLOTLY.get(cmap_name, 'Viridis')
             fig = go.Figure(data=go.Heatmap(
-                z=field_data, x=x, y=y, colorscale=cmap_name,
+                z=field_data, x=x, y=y, colorscale=plotly_cmap,
                 hoverinfo='text', text=hover,
                 colorbar=dict(title=dict(text="Value", font=dict(size=14)))
             ))
@@ -2923,6 +2962,10 @@ def render_intelligent_designer_tab():
             st.info("👈 Go to the sidebar and click 'Load Solutions' to import your numerical simulation data.")
             return
         
+        # Clean up previous animation temp files before creating new manager
+        if st.session_state.get('temporal_manager') is not None:
+            st.session_state.temporal_manager.cleanup_animation()
+        
         with st.spinner("⚙️ Initializing simulation environment..."):
             try:
                 design_manager = TemporalFieldManager(
@@ -2993,10 +3036,15 @@ def render_intelligent_designer_tab():
         else:
             default_idx = len(times_norm) - 1
         
+        # Build the slider format string safely
+        if times_real:
+            slider_format = f"Step %d (t={times_real[0]:.2e}s to {times_real[-1]:.2e}s)"
+        else:
+            slider_format = "Step %d"
         selected_idx = st.slider(
             "Evolution Time Point",
             0, len(times_norm) - 1, default_idx,
-            format=f"Step %d (t={times_real[0]:.2e}s to {times_real[-1]:.2e}s)"
+            format=slider_format
         )
         
         t_sel_norm = times_norm[selected_idx]
@@ -3022,11 +3070,10 @@ def render_intelligent_designer_tab():
                 st.pyplot(fig_mat)
             
             with viz_col2:
-                # FIXED: Use proper material proxy handling for Plotly (same logic as static heatmap)
                 fig_inter = st.session_state.visualizer.create_interactive_heatmap(
                     proxy_sel,
                     title=f"Interactive View (t={t_sel_real:.2e}s)",
-                    cmap_name='Set1',   # still passed but ignored inside if material
+                    cmap_name='Set1',   # will be mapped inside the method
                     L0_nm=target_design['L0_nm'],
                     target_params=target_design,
                     time_real_s=t_sel_real
