@@ -1043,6 +1043,7 @@ class EnhancedSolutionLoader:
     
     def __init__(self, solutions_dir: str = SOLUTIONS_DIR):
         self.solutions_dir = solutions_dir
+        self.cache = {}
         self._ensure_directory()
     
     def _ensure_directory(self):
@@ -1244,13 +1245,38 @@ class EnhancedSolutionLoader:
         except Exception as e:
             st.sidebar.error(f"Error loading {os.path.basename(file_path)}: {e}")
             return None
+    
+    def load_all_solutions(self, use_cache=True, max_files=None):
+        solutions = []
+        file_info = self.scan_solutions()
+        if max_files:
+            file_info = file_info[:max_files]
+        
+        if not file_info:
+            st.sidebar.warning("No PKL files found in numerical_solutions directory.")
+            return solutions
+        
+        for item in file_info:
+            cache_key = item['filename']
+            if use_cache and cache_key in self.cache:
+                solutions.append(self.cache[cache_key])
+                continue
+            
+            sol = self.read_simulation_file(item['path'])
+            if sol:
+                self.cache[cache_key] = sol
+                solutions.append(sol)
+        
+        st.sidebar.success(f"Loaded {len(solutions)} solutions.")
+        return solutions
 
 # ----------------------------------------------------------------------
 # Cached solution loading to avoid repeated I/O
 # ----------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def cached_load_all_solutions(loader: EnhancedSolutionLoader, max_files: Optional[int] = None) -> List[Dict]:
-    """Cached version of load_all_solutions using Streamlit's cache."""
+def cached_load_all_solutions(solutions_dir: str, max_files: Optional[int] = None) -> List[Dict]:
+    """Cached version of load_all_solutions using directory path (hashable)."""
+    loader = EnhancedSolutionLoader(solutions_dir)
     return loader.load_all_solutions(use_cache=True, max_files=max_files)
 
 # =============================================
@@ -3237,8 +3263,8 @@ def main():
         with col1:
             if st.button("📥 Load Solutions", use_container_width=True):
                 with st.spinner("Loading simulation data..."):
-                    # Use cached loading
-                    st.session_state.solutions = cached_load_all_solutions(st.session_state.loader)
+                    # FIXED: Pass directory path instead of loader object
+                    st.session_state.solutions = cached_load_all_solutions(SOLUTIONS_DIR)
         with col2:
             if st.button("🧹 Clear All", use_container_width=True):
                 st.session_state.solutions = []
