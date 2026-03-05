@@ -813,6 +813,10 @@ class TemporalFieldManager:
         self.lru_size = lru_size
         self.require_categorical_match = require_categorical_match
         
+        # Guard against empty sources
+        if not sources:
+            raise ValueError("No sources provided to TemporalFieldManager")
+        
         self.sources, self.filter_stats = interpolator.filter_sources_hierarchy(
             sources, target_params, require_categorical_match=require_categorical_match
         )
@@ -828,7 +832,7 @@ class TemporalFieldManager:
                 st.warning("⚠️ No compatible sources found. Using nearest neighbor fallback.")
                 self._use_fallback = True
             else:
-                st.success(f"✅ {total} sources compatible.")
+                st.success(f"✅ {kept} sources compatible.")
         
         if not self.sources:
             self.sources = sources
@@ -1017,7 +1021,6 @@ class TemporalFieldManager:
             'key_frame_entries': len(self.key_frames)
         }
     
-    # ========== NEW CACHE MANAGEMENT METHODS ==========
     def clear_lru_cache(self):
         """Clear only the LRU cache, keep key frames."""
         self.lru_cache.clear()
@@ -1031,7 +1034,6 @@ class TemporalFieldManager:
         self.key_time_real.clear()
         self._precompute_key_frames()
         st.sidebar.success("Key frames recomputed.")
-    # ===================================================
 
 # =============================================
 # ROBUST SOLUTION LOADER
@@ -1042,7 +1044,6 @@ class EnhancedSolutionLoader:
     def __init__(self, solutions_dir: str = SOLUTIONS_DIR):
         self.solutions_dir = solutions_dir
         self._ensure_directory()
-        self.cache = {}
     
     def _ensure_directory(self):
         os.makedirs(self.solutions_dir, exist_ok=True)
@@ -1243,30 +1244,14 @@ class EnhancedSolutionLoader:
         except Exception as e:
             st.sidebar.error(f"Error loading {os.path.basename(file_path)}: {e}")
             return None
-    
-    def load_all_solutions(self, use_cache=True, max_files=None):
-        solutions = []
-        file_info = self.scan_solutions()
-        if max_files:
-            file_info = file_info[:max_files]
-        
-        if not file_info:
-            st.sidebar.warning("No PKL files found in numerical_solutions directory.")
-            return solutions
-        
-        for item in file_info:
-            cache_key = item['filename']
-            if use_cache and cache_key in self.cache:
-                solutions.append(self.cache[cache_key])
-                continue
-            
-            sol = self.read_simulation_file(item['path'])
-            if sol:
-                self.cache[cache_key] = sol
-                solutions.append(sol)
-        
-        st.sidebar.success(f"Loaded {len(solutions)} solutions.")
-        return solutions
+
+# ----------------------------------------------------------------------
+# Cached solution loading to avoid repeated I/O
+# ----------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def cached_load_all_solutions(loader: EnhancedSolutionLoader, max_files: Optional[int] = None) -> List[Dict]:
+    """Cached version of load_all_solutions using Streamlit's cache."""
+    return loader.load_all_solutions(use_cache=True, max_files=max_files)
 
 # =============================================
 # INTELLIGENT DESIGNER MODULES (NLP INTERFACE)
@@ -1668,6 +1653,31 @@ class HeatMapVisualizer:
         y = np.linspace(0, L0_nm, ny)
         
         is_material = self._is_material_proxy(field_data, "", title)
+        
+        # Validate colormap for Plotly
+        valid_cmaps = ['Viridis', 'Plasma', 'Inferno', 'Magma', 'Cividis', 
+                       'Blues', 'Reds', 'Greens', 'Greys', 'RdBu', 'Jet', 
+                       'Hot', 'Earth', 'Electric', 'Portland', 'Picnic',
+                       'aggrnyl', 'agsunset', 'algae', 'amp', 'armyrose', 
+                       'balance', 'blackbody', 'bluered', 'blues', 'blugrn',
+                       'bluyl', 'brbg', 'brwnyl', 'bugn', 'bupu', 'burg',
+                       'burgyl', 'cividis', 'curl', 'darkmint', 'deep',
+                       'delta', 'dense', 'earth', 'edge', 'electric',
+                       'emrld', 'fall', 'geyser', 'gnbu', 'gray', 'greens',
+                       'greys', 'haline', 'hot', 'hsv', 'ice', 'icefire',
+                       'inferno', 'jet', 'magenta', 'magma', 'matter',
+                       'mint', 'mrybm', 'mygbm', 'oranges', 'orrd', 'oryel',
+                       'oxy', 'peach', 'phase', 'picnic', 'pinkyl', 'piyg',
+                       'plasma', 'plotly3', 'portland', 'prgn', 'pubu',
+                       'pubugn', 'puor', 'purd', 'purp', 'purples', 'purpor',
+                       'rainbow', 'rdbu', 'rdgy', 'rdpu', 'rdylbu', 'rdylgn',
+                       'redor', 'reds', 'solar', 'spectral', 'speed', 'sunset',
+                       'sunsetdark', 'teal', 'tealgrn', 'tealrose', 'tempo',
+                       'temps', 'thermal', 'turbid', 'turbo', 'twilight',
+                       'viridis', 'ylgn', 'ylgnbu', 'ylorbr', 'ylorrd']
+        
+        if not is_material and cmap_name not in valid_cmaps:
+            cmap_name = 'Viridis'  # Safe fallback
         
         if is_material:
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
@@ -2786,6 +2796,22 @@ def set_template(text: str):
     st.session_state.designer_input = text
 
 # =============================================
+# VALIDATION FUNCTION FOR TARGET PARAMETERS
+# =============================================
+def validate_target_params(params: Dict) -> bool:
+    """Check if target parameters are within physical ranges."""
+    errors = []
+    for p in ['fc', 'rs', 'c_bulk', 'L0_nm']:
+        low, high = DepositionParameters.RANGES[p]
+        val = params.get(p, 0.0)
+        if not (low <= val <= high):
+            errors.append(f"{p} must be between {low} and {high} (got {val:.3f})")
+    if errors:
+        st.error("❌ Invalid parameters:\n" + "\n".join(errors))
+        return False
+    return True
+
+# =============================================
 # INITIALIZE SESSION STATE
 # =============================================
 def initialize_session_state():
@@ -2923,6 +2949,10 @@ def render_intelligent_designer_tab():
             st.info("👈 Go to the sidebar and click 'Load Solutions' to import your numerical simulation data.")
             return
         
+        # Validate parameters
+        if not validate_target_params(target_design):
+            return
+        
         with st.spinner("⚙️ Initializing simulation environment..."):
             try:
                 design_manager = TemporalFieldManager(
@@ -3003,10 +3033,11 @@ def render_intelligent_designer_tab():
             # ensure index is within bounds
             default_idx = max(0, min(default_idx, len(times_norm)-1))
             
+            # Improved slider with format_func to show actual time
             selected_idx = st.slider(
                 "Evolution Time Point",
                 0, len(times_norm) - 1, default_idx,
-                format=f"Step %d (t={times_real[0]:.2e}s to {times_real[-1]:.2e}s)"
+                format_func=lambda idx: f"Step {idx} (t={times_real[idx]:.2e}s)"
             )
             
             t_sel_norm = times_norm[selected_idx]
@@ -3072,10 +3103,22 @@ def render_intelligent_designer_tab():
                     )
                     
                     if res_design:
-                        res_design['design_name'] = design_name
-                        res_design['input_text'] = user_input
-                        res_design['relevance_score'] = relevance
-                        st.session_state.saved_predictions.append(res_design)
+                        # Store lightweight version without large field arrays to save memory
+                        lightweight_pred = {
+                            'design_name': design_name,
+                            'input_text': user_input,
+                            'relevance_score': relevance,
+                            'target_params': res_design['target_params'].copy(),
+                            'derived': res_design['derived'].copy(),
+                            'weights': res_design['weights'].copy(),
+                            'sources_data': res_design.get('sources_data', []),
+                            'time_norm': res_design.get('time_norm'),
+                            'time_real_s': res_design.get('time_real_s'),
+                            'num_sources': res_design['num_sources']
+                        }
+                        # Remove large arrays from derived if any (thickness_time is already a dict of lists)
+                        # Ensure thickness_time remains as dict of lists
+                        st.session_state.saved_predictions.append(lightweight_pred)
                         st.success(f"✅ Design '{design_name}' saved! Total saved: {len(st.session_state.saved_predictions)}")
                     else:
                         st.error("❌ Failed to save design.")
@@ -3194,7 +3237,8 @@ def main():
         with col1:
             if st.button("📥 Load Solutions", use_container_width=True):
                 with st.spinner("Loading simulation data..."):
-                    st.session_state.solutions = st.session_state.loader.load_all_solutions()
+                    # Use cached loading
+                    st.session_state.solutions = cached_load_all_solutions(st.session_state.loader)
         with col2:
             if st.button("🧹 Clear All", use_container_width=True):
                 st.session_state.solutions = []
@@ -3208,8 +3252,10 @@ def main():
                 st.success("All cleared")
         with col3:
             if st.button("🗑️ Clear Cache", use_container_width=True):
+                # Clear Streamlit cache
+                st.cache_data.clear()
                 if st.session_state.loader:
-                    st.session_state.loader.cache.clear()
+                    st.session_state.loader = EnhancedSolutionLoader(SOLUTIONS_DIR)  # reset internal cache
                     st.success("Loader cache cleared")
                 else:
                     st.warning("Loader not initialized")
@@ -3269,7 +3315,6 @@ def main():
             """, unsafe_allow_html=True)
         else:
             st.info("No active temporal manager. Run a design first.")
-        # ---------------------------------------
     
     # Main tabs – include all from second code plus the Intelligent Designer
     tabs = st.tabs([
