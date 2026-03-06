@@ -12,6 +12,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - **FIXED**: GPT‑2 integration – robust JSON extraction, better prompts, fallback mechanisms
 - **FIXED**: Shell completeness detection – median radial profile, coverage capping, softer threshold
 - **NEW**: Hybrid (regex + GPT‑2) parameter extraction with confidence merging and ensemble voting
+- **FIXED**: NameError in render_intelligent_designer_tab – added missing use_gpt2_complete checkbox
 """
 
 import streamlit as st
@@ -3313,7 +3314,7 @@ def load_gpt2_model():
         return tokenizer, model
 
 # =============================================
-# RENDER INTELLIGENT DESIGNER TAB
+# RENDER INTELLIGENT DESIGNER TAB (FIXED)
 # =============================================
 def render_intelligent_designer_tab():
     st.markdown('<h2 class="section-header">🤖 Intelligent Designer</h2>', unsafe_allow_html=True)
@@ -3369,7 +3370,7 @@ def render_intelligent_designer_tab():
                 st.session_state.active_tab = "Multi-Prediction Comparison"
                 st.rerun()
     
-    # NEW: GPT-2 toggles
+    # NEW: GPT-2 toggles – three columns for parse, completeness, ensemble
     gpt2_available = st.session_state.gpt2_available
     col_gpt1, col_gpt2, col_gpt3 = st.columns(3)
     with col_gpt1:
@@ -3377,10 +3378,13 @@ def render_intelligent_designer_tab():
                                       value=False, disabled=not gpt2_available,
                                       help="Combine regex and GPT-2 with confidence")
     with col_gpt2:
+        use_gpt2_complete = st.checkbox("Use GPT-2 for completeness inference (experimental)",
+                                         value=False, disabled=not gpt2_available,
+                                         help="GPT-2 will analyze shell quality and provide explanations")
+    with col_gpt3:
         use_gpt2_ensemble = st.checkbox("Use GPT-2 ensemble (slower)", 
                                          value=False, disabled=not gpt2_available,
                                          help="Run multiple generations and average")
-    with col_gpt3:
         if use_gpt2_ensemble:
             ensemble_runs = st.number_input("Ensemble runs", min_value=2, max_value=10, value=3, step=1)
         else:
