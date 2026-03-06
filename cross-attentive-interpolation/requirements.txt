@@ -22,3 +22,4 @@ s3fs
 cmasher
 einops
 sentence-transformers
+transformers
