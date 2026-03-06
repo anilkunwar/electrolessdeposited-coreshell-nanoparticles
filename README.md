@@ -159,7 +159,13 @@ Intelligent Materials Designer using NLP
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi36-streamlit-red)](https://electroless-deposition-fields-interpolation36.streamlit.app/)  (more robust, temporally inconsistent)
 
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi37-streamlit-red)](https://electroless-deposition-fields-interpolation37.streamlit.app/)  (more robust, temporally consistent but for final time 1.0e-3 s)
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi37-streamlit-red)](https://electroless-deposition-fields-interpolation37.streamlit.app/)  (more robust, temporally consistent but for final time 1.0e-3 s, regex for pattern based term extraction)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi38-streamlit-red)](https://electroless-deposition-fields-interpolation38.streamlit.app/)  (more robust, temporally consistent for different time points)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi39-streamlit-red)](https://electroless-deposition-fields-interpolation39.streamlit.app/)  (more robust, temporally consistent, gpt-2 )
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi40-streamlit-red)](https://electroless-deposition-fields-interpolation40.streamlit.app/)  (more robust, temporally consistent, gpt-2 )
 
 
 
