@@ -167,7 +167,10 @@ Intelligent Materials Designer using NLP
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/cuatagphi40-streamlit-red)](https://electroless-deposition-fields-interpolation40.streamlit.app/)  (more robust, temporally consistent, gpt-2 implemented and parsing succeeds for designated expamples but fails for new parameters )
 
-[![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt1-streamlit-red)](https://coreshellgpt1.streamlit.app/)  (more robust, temporally consistent, gpt-2 implemented and parsing succeeds  )
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt1-streamlit-red)](https://coreshellgpt1.streamlit.app/)  (more robust, temporally consistent, gpt-2 implemented and parsing succeeds, completeness insight is working )
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt2-streamlit-red)](https://coreshellgpt2.streamlit.app/)  (more robust, temporally consistent, gpt-2 and other LLM implemented and parsing succeeds, need for improvement in completeness insight  )
+
 
 
 
