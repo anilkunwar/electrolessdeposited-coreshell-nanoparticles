@@ -171,6 +171,8 @@ Intelligent Materials Designer using NLP
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt2-streamlit-red)](https://coreshellgpt2.streamlit.app/)  (more robust, temporally consistent, gpt-2 and other LLM implemented and parsing succeeds, need for improvement in completeness insight  )
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt3-streamlit-red)](https://coreshellgpt3.streamlit.app/)  (more robust, temporally consistent, gpt-2 and other LLM implemented and parsing succeeds, completeness insight is working in this  )
+
 
 
 
