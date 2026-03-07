@@ -13,7 +13,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - **FIXED**: Shell completeness detection – median radial profile, coverage capping, softer threshold
 - **NEW**: Hybrid (regex + GPT‑2/Qwen) parameter extraction with confidence merging and ensemble voting
 - **NEW**: Model selection dropdown (GPT‑2, Qwen2‑0.5B‑Instruct, Qwen2.5‑0.5B‑Instruct)
-- **FIXED**: NameError in render_intelligent_designer_tab – added missing use_gpt2_complete checkbox
+- **FIXED**: Session state conflict with widget key – separate loaded backend from widget value
 """
 
 import streamlit as st
@@ -1436,7 +1436,7 @@ class NLParser:
         if not text:
             return self.defaults.copy()
         
-        backend = st.session_state.get('llm_backend', 'GPT-2 (default, fastest startup)')
+        backend = st.session_state.get('llm_backend_loaded', 'GPT-2 (default, fastest startup)')
         if temperature is None:
             temperature = 0.0 if "Qwen" in backend else 0.1
         
@@ -1916,7 +1916,7 @@ class CompletionAnalyzer:
     @staticmethod
     def llm_infer_completeness(desc: str, tokenizer, model) -> Tuple[bool, Optional[float], Optional[float], str]:
         """Use LLM (GPT‑2 or Qwen) to infer completeness from a textual description of shell metrics."""
-        backend = st.session_state.get('llm_backend', 'GPT-2 (default, fastest startup)')
+        backend = st.session_state.get('llm_backend_loaded', 'GPT-2 (default, fastest startup)')
         temp = 0.05 if "Qwen" in backend else 0.1
         
         system = "You are a materials scientist. Always reply with valid JSON only."
@@ -3311,7 +3311,8 @@ def initialize_session_state():
         # NEW: LLM model and tokenizer (unified)
         'llm_tokenizer': None,
         'llm_model': None,
-        'llm_backend': "GPT-2 (default, fastest startup)",
+        # FIXED: separate key for loaded backend (widget key is 'llm_backend')
+        'llm_backend_loaded': "GPT-2 (default, fastest startup)",
         'llm_available': TRANSFORMERS_AVAILABLE,
     }
     
@@ -3393,7 +3394,7 @@ def render_intelligent_designer_tab():
                 st.session_state.active_tab = "Multi-Prediction Comparison"
                 st.rerun()
     
-    # NEW: Model selection dropdown
+    # NEW: Model selection dropdown – widget key is 'llm_backend'
     model_choice = st.selectbox(
         "🧠 LLM Backend for Parsing & Completeness",
         options=["GPT-2 (default, fastest startup)", 
@@ -3403,16 +3404,16 @@ def render_intelligent_designer_tab():
         key="llm_backend"
     )
     
-    # Unified loader
+    # Unified loader – store loaded backend in separate key
     if st.session_state.llm_available:
         tokenizer, model, active_backend = load_llm(model_choice)
         st.session_state.llm_tokenizer = tokenizer
         st.session_state.llm_model = model
-        st.session_state.llm_backend = active_backend
+        st.session_state.llm_backend_loaded = active_backend  # FIXED: separate key
         # Show current backend in UI
-        st.caption(f"Current backend: **{st.session_state.llm_backend}** — Qwen models give cleaner JSON")
+        st.caption(f"Current backend: **{st.session_state.llm_backend_loaded}** — Qwen models give cleaner JSON")
     
-    # GPT‑2 toggles (now use unified llm)
+    # LLM toggles (use loaded backend)
     llm_available = st.session_state.llm_available and st.session_state.llm_tokenizer is not None
     col_gpt1, col_gpt2, col_gpt3 = st.columns(3)
     with col_gpt1:
