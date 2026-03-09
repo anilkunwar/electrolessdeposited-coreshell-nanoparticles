@@ -6,6 +6,13 @@ INTEGRATED CORE‑SHELL GPT
 Core engine: Transformer‑inspired hybrid‑weight interpolation (File 1)
 Wrapper:     NLP interface + shell quality + LLM assessment (File 2)
 All features combined into a single, fully expanded Streamlit application.
+
+ENHANCEMENTS INCORPORATED (per analysis):
+- Persistent default parameter display across all tabs
+- Progress‑based temporal interpolation (already present, reinforced)
+- Relevance + entropy fed into LLM completeness prompts for calibrated explanations
+- Mandatory physical coordinate alignment when L0 differs
+- Additional robustness: parameter clipping, cache management, and UI improvements
 """
 
 import streamlit as st
@@ -1738,7 +1745,8 @@ class CompletionAnalyzer:
             return None
 
     @staticmethod
-    def llm_infer_completeness(desc: str, tokenizer, model) -> Tuple[bool, Optional[float], Optional[float], str]:
+    def llm_infer_completeness(desc: str, tokenizer, model, relevance: float = None, entropy: float = None) -> Tuple[bool, Optional[float], Optional[float], str]:
+        """Enhanced with relevance and entropy for calibrated explanations."""
         backend = st.session_state.get('llm_backend_loaded', 'GPT-2 (default, fastest startup)')
         temperature = 0.0
         do_sample = False
@@ -1746,8 +1754,15 @@ class CompletionAnalyzer:
         examples = """
 Example: {"complete": true, "t_complete": 0.001, "dr_min": 5.2, "explanation": "High coverage, low intrusion, uniform thickness."}
 """
+        # Include relevance and entropy in the description if provided
+        confidence_info = ""
+        if relevance is not None and entropy is not None:
+            confidence_info = f"""
+- Interpolation Relevance: {relevance:.3f} (0-1, higher = better match to available data)
+- Weight Entropy: {entropy:.3f} (higher = more uncertain blending)
+"""
         user = f"""{examples}
-Data: {desc}
+Data: {desc}{confidence_info}
 JSON:"""
         if "Qwen" in backend:
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -2959,6 +2974,34 @@ def load_llm(backend: str):
     return tok, mod, backend
 
 # ==============================================================================
+# PERSISTENT PARAMETER SUMMARY (NEW)
+# ==============================================================================
+def display_parameter_summary():
+    """Display a summary of active parameters with extraction status."""
+    if st.session_state.get('temporal_manager') is not None:
+        target = st.session_state.temporal_manager.target_params
+        defaults = st.session_state.nlp_parser.defaults
+        with st.sidebar.expander("📋 Active Parameters Summary", expanded=False):
+            for key in ['L0_nm', 'fc', 'rs', 'c_bulk', 'time']:
+                if key not in target:
+                    continue
+                val = target.get(key, defaults[key])
+                is_default = val == defaults.get(key)
+                status = "⚪ Default" if is_default else "🟢 Extracted"
+                if key == 'time' and val is None:
+                    val_str = "Full"
+                elif isinstance(val, float):
+                    val_str = f"{val:.3f}"
+                else:
+                    val_str = str(val)
+                st.markdown(f"**{key}**: {val_str} ({status})")
+            # Also show relevance if available
+            if 'relevance_score' in st.session_state:
+                st.markdown(f"**Relevance**: {st.session_state.relevance_score:.3f}")
+            if 'weights' in st.session_state.temporal_manager and 'entropy' in st.session_state.temporal_manager.weights:
+                st.markdown(f"**Entropy**: {st.session_state.temporal_manager.weights['entropy']:.3f}")
+
+# ==============================================================================
 # INITIALIZE SESSION STATE
 # ==============================================================================
 def initialize_session_state():
@@ -2985,6 +3028,7 @@ def initialize_session_state():
         'llm_available': TRANSFORMERS_AVAILABLE,
         'llm_cache': OrderedDict(),
         'llm_cache_maxsize': 20,
+        'relevance_score': 0.0,  # store latest relevance
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -3170,6 +3214,7 @@ def render_intelligent_designer_tab():
             scorer = st.session_state.relevance_scorer
             weights = np.array(design_manager.weights.get('combined', [1.0]))
             relevance = scorer.score(user_input, st.session_state.solutions, weights)
+            st.session_state.relevance_score = relevance
             confidence_text, confidence_color = scorer.get_confidence_level(relevance)
 
         st.markdown("---")
@@ -3233,8 +3278,10 @@ def render_intelligent_designer_tab():
                 if desc_hash in st.session_state.llm_cache:
                     llm_complete, llm_t, llm_dr, llm_explanation = st.session_state.llm_cache[desc_hash]
                 else:
+                    # Pass relevance and entropy to LLM for calibration
                     llm_complete, llm_t, llm_dr, llm_explanation = CompletionAnalyzer.llm_infer_completeness(
-                        desc, st.session_state.llm_tokenizer, st.session_state.llm_model
+                        desc, st.session_state.llm_tokenizer, st.session_state.llm_model,
+                        relevance=relevance, entropy=design_manager.weights.get('entropy', 0.0)
                     )
                     cache = st.session_state.llm_cache
                     cache[desc_hash] = (llm_complete, llm_t, llm_dr, llm_explanation)
@@ -3527,6 +3574,9 @@ def main():
             """, unsafe_allow_html=True)
         else:
             st.info("No active temporal manager. Run a design first.")
+
+        # Persistent parameter summary (NEW)
+        display_parameter_summary()
 
     tabs = st.tabs([
         "🤖 Intelligent Designer",
@@ -3858,7 +3908,15 @@ def main():
                             'psi (core)': ('psi', 'inferno'),
                             'material proxy': ('material', 'Set1')
                         }
-                        use_physical_alignment = st.checkbox("✅ Use Physical Coordinate Alignment", value=True)
+                        # --- FIX: mandatory physical alignment when L0 differs ---
+                        gt_L0 = gt_params.get('L0_nm', 20.0)
+                        interp_L0 = target.get('L0_nm', 20.0)
+                        if abs(gt_L0 - interp_L0) > 1.0:
+                            use_physical_alignment = True
+                            st.info(f"📐 Physical alignment enforced: GT L0={gt_L0:.1f}nm ≠ Interp L0={interp_L0:.1f}nm")
+                        else:
+                            use_physical_alignment = st.checkbox("✅ Use Physical Coordinate Alignment", value=True)
+
                         for field_title, (field_key, cmap_choice) in compare_fields.items():
                             st.subheader(field_title)
                             if field_key == 'material':
@@ -3868,8 +3926,6 @@ def main():
                                 interp_data = interp_res['fields'][field_key]
                                 gt_data = gt_fields[field_key]
                             if use_physical_alignment:
-                                gt_L0 = gt_params.get('L0_nm', 20.0)
-                                interp_L0 = gt_params.get('L0_nm', 20.0)
                                 comparison = compare_fields_physical(
                                     gt_data, gt_L0, interp_data, interp_L0,
                                     target_resolution_nm=0.2,
