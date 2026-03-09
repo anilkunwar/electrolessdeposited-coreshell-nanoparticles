@@ -15,8 +15,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - **NEW**: Model selection dropdown (GPT‑2, Qwen2‑0.5B‑Instruct, Qwen2.5‑0.5B‑Instruct)
 - **FIXED**: Session state conflict with widget key – separate loaded backend from widget value
 - **NEW**: Dynamic completeness analysis – updates when time slider moves (rule‑based and LLM)
-- **FIXED**: LLM completeness caching to prevent overload on slider changes
-- **FIXED**: Recommendations now respect LLM completeness verdict and show discrepancy notes
+- **FIXED**: UnhashableParamError in LLM caching – manual cache via session_state (LRU)
 """
 
 import streamlit as st
@@ -3352,15 +3351,7 @@ def load_llm(backend: str):
     return tok, mod, backend
 
 # =============================================
-# ADDED: Cached LLM completeness inference to avoid recomputation on slider moves
-# =============================================
-@st.cache_data(show_spinner=False, ttl=3600)   # cache for 1 hour
-def cached_llm_inference(description: str, tokenizer, model) -> tuple:
-    """Run LLM completeness inference on a fixed description string (cached)."""
-    return CompletionAnalyzer.llm_infer_completeness(description, tokenizer, model)
-
-# =============================================
-# INITIALIZE SESSION STATE
+# INITIALIZE SESSION STATE (with manual LLM cache)
 # =============================================
 def initialize_session_state():
     defaults = {
@@ -3386,6 +3377,9 @@ def initialize_session_state():
         # FIXED: separate key for loaded backend (widget key is 'llm_backend')
         'llm_backend_loaded': "GPT-2 (default, fastest startup)",
         'llm_available': TRANSFORMERS_AVAILABLE,
+        # ADDED: manual LLM cache (OrderedDict for LRU)
+        'llm_cache': OrderedDict(),
+        'llm_cache_maxsize': 20,
     }
     
     for key, value in defaults.items():
@@ -3410,7 +3404,7 @@ def initialize_session_state():
         st.session_state.completion_analyzer = CompletionAnalyzer()
 
 # =============================================
-# RENDER INTELLIGENT DESIGNER TAB (UPDATED WITH DYNAMIC COMPLETENESS AND LLM CACHING)
+# RENDER INTELLIGENT DESIGNER TAB (with manual LLM cache)
 # =============================================
 def render_intelligent_designer_tab():
     st.markdown('<h2 class="section-header">🤖 Intelligent Designer</h2>', unsafe_allow_html=True)
@@ -3630,7 +3624,7 @@ def render_intelligent_designer_tab():
             tolerance=0.3, use_median=True, completeness_threshold=0.95
         )
         
-        # LLM completeness inference (if enabled) – now using cached function
+        # LLM completeness inference (if enabled) – now with manual cache
         llm_explanation = None
         llm_complete = None
         if use_llm_complete and st.session_state.llm_tokenizer is not None:
@@ -3649,9 +3643,23 @@ def render_intelligent_designer_tab():
                 - Uniformity std: {shell_quality['uniformity']:.2f} nm
                 - Intrusion: {shell_quality['intrusion']:.3f}
                 """
-                llm_complete, llm_t, llm_dr, llm_explanation = cached_llm_inference(
-                    desc, st.session_state.llm_tokenizer, st.session_state.llm_model
-                )
+                # Compute hash for caching
+                desc_hash = hashlib.md5(desc.encode()).hexdigest()
+                
+                # Check manual cache
+                if desc_hash in st.session_state.llm_cache:
+                    llm_complete, llm_t, llm_dr, llm_explanation = st.session_state.llm_cache[desc_hash]
+                else:
+                    # Call LLM (uncached)
+                    llm_complete, llm_t, llm_dr, llm_explanation = CompletionAnalyzer.llm_infer_completeness(
+                        desc, st.session_state.llm_tokenizer, st.session_state.llm_model
+                    )
+                    # Store in cache with LRU eviction
+                    cache = st.session_state.llm_cache
+                    cache[desc_hash] = (llm_complete, llm_t, llm_dr, llm_explanation)
+                    if len(cache) > st.session_state.llm_cache_maxsize:
+                        # pop the oldest item (OrderedDict maintains insertion order)
+                        cache.popitem(last=False)
         
         # ==================================================================
         # DISPLAY DYNAMIC RESULTS
@@ -3808,7 +3816,7 @@ def render_intelligent_designer_tab():
             st.plotly_chart(fig_thick, use_container_width=True)
 
 # =============================================
-# MAIN APP (remainder unchanged)
+# MAIN APP (unchanged from previous correct version)
 # =============================================
 def main():
     st.set_page_config(
