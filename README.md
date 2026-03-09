@@ -177,6 +177,11 @@ Intelligent Materials Designer using NLP
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt5-streamlit-red)](https://coreshellgpt5.streamlit.app/)  (more robust, temporally consistent, gpt-2 and other LLM implemented and parsing succeeds, completeness insight is working in this  )
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt6-streamlit-red)](https://coreshellgpt6.streamlit.app/)  (more robust, temporally consistent, gpt-2 and other LLM implemented and parsing succeeds, completeness insight is working in this, the LLM can also give opinion on dynamic results)
+
+Stable Version of coreshellgpt
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt-streamlit-red)](https://coreshellgpt.streamlit.app/)  (more robust, temporally consistent, gpt-2 and other LLM implemented and parsing succeeds, completeness insight is working in this, the LLM can also give opinion on dynamic results  )
+
 
 
 
