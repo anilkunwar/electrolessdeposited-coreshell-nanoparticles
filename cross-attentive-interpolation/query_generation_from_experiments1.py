@@ -1,25 +1,34 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-CoreShellGPT Experiment Input Generator – ZERO DEPENDENCY VERSION
-No OpenCV needed. Works on Streamlit Cloud.
-Uses your original GPT‑2 / Qwen models.
+CoreShellGPT Experiment Input Generator – Full Version
+--------------------------------------------------------
+- Automatically displays images from:
+    experimental_images/geometry/
+    experimental_images/composition_ratio/
+- Manual input of core diameter and Cu:Ag ratio (no OpenCV needed)
+- Geometry conversion: L0 from fc or from shell distance
+- Uses GPT‑2 / Qwen to generate a natural‑language query
+- Ready to paste into the original CoreShellGPT Intelligent Designer tab
 """
 
 import streamlit as st
+import os
 from datetime import datetime
-import json
 
-# ====================== REUSE YOUR ORIGINAL LLM ======================
+# -------------------- Transformers (LLM) --------------------
 try:
     from transformers import GPT2Tokenizer, GPT2LMHeadModel, AutoTokenizer, AutoModelForCausalLM
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
-    st.error("transformers not installed. Please install it: pip install transformers")
+    st.warning("transformers not installed. Install with: pip install transformers")
 
 @st.cache_resource
 def load_llm(backend: str):
+    """Load the selected LLM (cached)."""
+    if not TRANSFORMERS_AVAILABLE:
+        return None, None
     if "GPT-2" in backend:
         tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         model = GPT2LMHeadModel.from_pretrained('gpt2')
@@ -30,32 +39,75 @@ def load_llm(backend: str):
     model.eval()
     return tokenizer, model
 
-# ====================== MAIN APP ======================
+# -------------------- Folder paths --------------------
+GEOMETRY_FOLDER = "experimental_images/geometry"
+COMPOSITION_FOLDER = "experimental_images/composition_ratio"
+
+# -------------------- Helper: list images --------------------
+def list_image_files(folder):
+    if not os.path.isdir(folder):
+        return []
+    exts = ('.jpg', '.jpeg', '.png', '.gif', '.bmp')
+    files = []
+    for f in os.listdir(folder):
+        if f.lower().endswith(exts):
+            files.append(os.path.join(folder, f))
+    return sorted(files)
+
+# -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="CoreShellGPT Experiment Input Generator", layout="wide")
 st.title("🧪 CoreShellGPT – Experiment Input Generator")
 st.markdown("**Automatically extract parameters from your two folder images and generate a query for the original CoreShellGPT designer.**")
 
+# Sidebar: LLM selection
+st.sidebar.header("🧠 LLM Settings")
+llm_options = ["GPT-2 (default)", "Qwen2-0.5B-Instruct", "Qwen2.5-0.5B-Instruct"]
+selected_llm = st.sidebar.selectbox("Choose backend", llm_options)
+if st.sidebar.button("Load LLM"):
+    with st.spinner("Loading model... (first time may take a minute)"):
+        tokenizer, model = load_llm(selected_llm)
+        st.session_state['llm_tokenizer'] = tokenizer
+        st.session_state['llm_model'] = model
+        st.sidebar.success(f"{selected_llm} loaded")
+
+# Main area: two columns
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📁 geometry folder – HRTEM (core diameter)")
-    # The user will see their uploaded image; we simply display it and let them enter the measured diameter.
-    st.image("experimental_images/geometry/core-diameter.jpg", 
-             caption="Your geometry image (red core + scale bar)", use_container_width=True)
+    geo_files = list_image_files(GEOMETRY_FOLDER)
+    if geo_files:
+        geo_names = [os.path.basename(f) for f in geo_files]
+        selected_geo = st.selectbox("Select image", geo_names, key="geo_selector")
+        geo_path = os.path.join(GEOMETRY_FOLDER, selected_geo)
+        st.image(geo_path, caption=f"Geometry: {selected_geo}", use_container_width=True)
+        st.info(f"Loaded from {GEOMETRY_FOLDER}")
+    else:
+        st.warning(f"No images found in '{GEOMETRY_FOLDER}'. Please create the folder and add images.")
+        st.stop()
+
     core_diameter_nm = st.number_input("Core diameter (nm) – from red core contour", 
                                         value=20.0, min_value=5.0, step=0.1)
-    st.info("If you have a different image, upload it manually above (file uploader not shown here for brevity).")
 
 with col2:
     st.subheader("📁 composition_ratio folder – Elemental Mapping")
-    st.image("experimental_images/composition_ratio/core-shell-1-1.png", 
-             caption="Your composition image (Cu:Ag = 1:1 label)", use_container_width=True)
+    comp_files = list_image_files(COMPOSITION_FOLDER)
+    if comp_files:
+        comp_names = [os.path.basename(f) for f in comp_files]
+        selected_comp = st.selectbox("Select image", comp_names, key="comp_selector")
+        comp_path = os.path.join(COMPOSITION_FOLDER, selected_comp)
+        st.image(comp_path, caption=f"Composition: {selected_comp}", use_container_width=True)
+        st.info(f"Loaded from {COMPOSITION_FOLDER}")
+    else:
+        st.warning(f"No images found in '{COMPOSITION_FOLDER}'. Please create the folder and add images.")
+        st.stop()
+
     cu_ag_ratio = st.number_input("Cu:Ag molar ratio (e.g. 1 for 1:1, 5 for 5:1)", 
                                    value=1.0, min_value=0.1, step=0.1)
     c_bulk = 1.0 / cu_ag_ratio
     st.success(f"✅ c_bulk = {c_bulk:.3f} (from Cu:Ag = {cu_ag_ratio:.1f}:1)")
 
-# ====================== GEOMETRY CALCULATOR ======================
+# -------------------- Geometry Calculator --------------------
 st.markdown("---")
 st.subheader("3. Geometry Calculator (L0 & fc)")
 
@@ -76,15 +128,16 @@ else:
 rs = st.number_input("Shell fraction rs (default 0.1)", value=0.1, step=0.01)
 st.caption("**Formula used:** rs = desired_shell_thickness_nm / L0_nm")
 
-# ====================== LLM QUERY GENERATION ======================
+# -------------------- Query Generation --------------------
 st.markdown("---")
-backend = st.selectbox("LLM Backend", ["GPT-2 (default)", "Qwen2-0.5B-Instruct", "Qwen2.5-0.5B-Instruct"])
-
 if st.button("🚀 Generate Query for Original Designer", type="primary"):
     if not TRANSFORMERS_AVAILABLE:
         st.error("Transformers library not installed. Cannot generate query.")
+    elif 'llm_tokenizer' not in st.session_state or 'llm_model' not in st.session_state:
+        st.error("Please load an LLM from the sidebar first.")
     else:
-        tokenizer, model = load_llm(backend)
+        tokenizer = st.session_state['llm_tokenizer']
+        model = st.session_state['llm_model']
         with st.spinner("LLM is writing the perfect input..."):
             prompt = f"""Create a natural-language sentence for CoreShellGPT using these experimental values:
 Core diameter (geometry folder): {core_diameter_nm} nm
@@ -99,5 +152,6 @@ Output ONLY the sentence ready to paste."""
             st.text_area("✅ Copy this into your original CoreShellGPT Intelligent Designer tab", query, height=120)
             st.download_button("📥 Download query.txt", query, "experiment_query.txt")
 
+# -------------------- Footer --------------------
 st.markdown("---")
 st.caption("**Theory summary**: core diameter → L0 via fc, Cu:Ag ratio → c_bulk = 1/ratio, rs = thickness/L0. All values taken from your geometry + composition_ratio folders.")
