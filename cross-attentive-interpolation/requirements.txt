@@ -24,3 +24,7 @@ einops
 sentence-transformers
 transformers
 accelerate
+opencv-python
+pillow
+numpy
+pytesseract
