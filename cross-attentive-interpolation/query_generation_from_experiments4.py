@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 CoreShellGPT – Intelligent Experimental Input Generator
-(using scikit‑image, no system dependencies)
+(Using scikit‑image with corrected imports)
 --------------------------------------------------------
 - Automatic core diameter & scale bar detection via scikit‑image
+- Uses skimage.feature.canny (modern location)
 - Optional Google Cloud Vision OCR (if API key available)
 - Manual entry fallback for all values
 - Derived parameters (L0, fc, c_bulk, rs) using exact formulas
@@ -21,7 +22,8 @@ from PIL import Image
 
 # -------------------- Optional dependency checks (graceful) --------------------
 try:
-    from skimage import filters, feature, transform, measure, color, morphology
+    # Import from correct modern locations
+    from skimage import feature, transform, measure, color, morphology
     from skimage.transform import probabilistic_hough_line, hough_circle, hough_circle_peaks
     SKIMAGE_AVAILABLE = True
 except ImportError:
@@ -53,12 +55,15 @@ COMPOSITION_FOLDER = BASE_DIR / "experimental_images" / "composition_ratio"
 GEOMETRY_FOLDER.mkdir(parents=True, exist_ok=True)
 COMPOSITION_FOLDER.mkdir(parents=True, exist_ok=True)
 
-# -------------------- Image analysis functions (scikit‑image) --------------------
+# -------------------- Image analysis functions (scikit‑image, corrected) --------------------
 if SKIMAGE_AVAILABLE:
     def detect_scale_bar_skimage(pil_img):
         """Detect horizontal scale bar using probabilistic Hough lines."""
         img = np.array(pil_img.convert('L'))  # grayscale
-        edges = filters.canny(img, sigma=2)
+        
+        # Use feature.canny (modern location)
+        edges = feature.canny(img, sigma=2)
+        
         lines = probabilistic_hough_line(edges, threshold=10, line_length=20, line_gap=3)
         
         horizontal_lines = []
@@ -81,6 +86,7 @@ if SKIMAGE_AVAILABLE:
     def detect_core_diameter_skimage(pil_img, scale_nm_per_px=None):
         """Detect circular core using Hough circle transform."""
         img = np.array(pil_img.convert('L'))
+        
         # Try a range of radii
         hough_radii = np.arange(20, 150, 5)
         hough_res = hough_circle(img, hough_radii)
@@ -107,8 +113,8 @@ if SKIMAGE_AVAILABLE:
             }
             return diameter_nm, diameter_px, confidence, debug_info
         
-        # Fallback: contour analysis
-        edges = filters.canny(img, sigma=2)
+        # Fallback: contour analysis using feature.canny again
+        edges = feature.canny(img, sigma=2)
         contours = measure.find_contours(edges, 0.8)
         
         best_circularity = 0
@@ -126,8 +132,7 @@ if SKIMAGE_AVAILABLE:
                 best_contour = contour
         
         if best_contour is not None:
-            # Fit minimal enclosing circle (using cv2 or custom? we can approximate)
-            # For simplicity, use bounding circle from extreme points
+            # Fit minimal enclosing circle (approximation)
             coords = best_contour
             center = np.mean(coords, axis=0)
             radius_px = np.max(np.linalg.norm(coords - center, axis=1))
