@@ -1,19 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-CoreShellGPT – Experimental Input Generator (Zero Dependency Version)
-----------------------------------------------------------------------
-- No OpenCV, no pytesseract – all values entered manually.
-- Scans experimental_images/geometry and experimental_images/composition_ratio.
-- Displays selected images (requires only Pillow).
-- Geometry conversion (L0, fc, rs) using your exact formulas.
-- Optional LLM query generation (if transformers & torch installed).
-- Falls back to default query when LLM unavailable.
+CoreShellGPT – Experimental Input Generator (Robust Path Resolution + Manual Entry)
+-----------------------------------------------------------------------------------
+- Automatically finds images in experimental_images/geometry and experimental_images/composition_ratio
+- Anchors paths to script location, creates folders if missing
+- Case‑insensitive extension matching, ignores hidden files
+- Fallback file uploaders if folders are empty
+- Manual entry of core diameter and Cu:Ag ratio (no OpenCV needed)
+- Optional LLM query generation (transformers + torch required)
 """
 
 import streamlit as st
 import os
 import glob
+from pathlib import Path
 from datetime import datetime
 
 # -------------------- Optional dependencies (LLM only) --------------------
@@ -25,7 +26,7 @@ try:
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
     TORCH_AVAILABLE = False
-    # Not a problem – LLM generation will be disabled
+    # LLM generation will be disabled
 
 # Pillow is required for image display
 try:
@@ -35,7 +36,68 @@ except ImportError:
     st.error("Pillow is required to display images. Please install it: pip install Pillow")
     st.stop()
 
-# -------------------- Helper: LLM loading (cached) --------------------
+# -------------------- Path configuration --------------------
+BASE_DIR = Path(__file__).parent.resolve()
+GEOMETRY_FOLDER = BASE_DIR / "experimental_images" / "geometry"
+COMPOSITION_FOLDER = BASE_DIR / "experimental_images" / "composition_ratio"
+
+# Ensure folders exist (create if missing)
+GEOMETRY_FOLDER.mkdir(parents=True, exist_ok=True)
+COMPOSITION_FOLDER.mkdir(parents=True, exist_ok=True)
+
+# -------------------- Helper: robust image listing --------------------
+def list_images_in_folder(folder_path):
+    """
+    Return sorted list of image file paths in folder (case‑insensitive, ignores hidden).
+    """
+    folder = Path(folder_path)
+    if not folder.exists() or not folder.is_dir():
+        return []
+    
+    valid_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+    files = []
+    for f in folder.iterdir():
+        if f.is_file() and not f.name.startswith('.'):
+            if f.suffix.lower() in valid_extensions:
+                files.append(str(f))
+    return sorted(files)
+
+# -------------------- Helper: folder browser with fallback uploader --------------------
+def image_selector(folder_path, label, key_prefix):
+    """
+    Display dropdown of images from folder, plus an uploader fallback.
+    Returns (PIL Image, source_description) or (None, None) if none selected.
+    """
+    st.markdown(f"**{label}**")
+    
+    # List images from folder
+    image_paths = list_images_in_folder(folder_path)
+    
+    if image_paths:
+        filenames = [Path(p).name for p in image_paths]
+        selected_name = st.selectbox(
+            f"Select from {folder_path.name} folder",
+            filenames,
+            key=f"{key_prefix}_dropdown"
+        )
+        selected_path = next(p for p in image_paths if Path(p).name == selected_name)
+        img = Image.open(selected_path).convert("RGB")
+        source = f"Folder: {selected_name}"
+        return img, source
+    else:
+        st.info(f"No images found in `{folder_path}`. You can upload one below.")
+        uploaded = st.file_uploader(
+            f"Upload {label.lower()} image",
+            type=['png', 'jpg', 'jpeg', 'gif', 'bmp'],
+            key=f"{key_prefix}_uploader"
+        )
+        if uploaded:
+            img = Image.open(uploaded).convert("RGB")
+            source = f"Uploaded: {uploaded.name}"
+            return img, source
+        return None, None
+
+# -------------------- LLM loading (cached) --------------------
 @st.cache_resource(show_spinner="Loading selected LLM...")
 def load_llm(backend: str):
     if not TRANSFORMERS_AVAILABLE or not TORCH_AVAILABLE:
@@ -80,24 +142,21 @@ Generate a natural language query for a core‑shell nanoparticle designer that 
         answer = answer.replace(full_prompt, "").strip()
     return answer
 
-# -------------------- Helper to list images in a folder --------------------
-def list_images_in_folder(folder_path):
-    if not os.path.isdir(folder_path):
-        return []
-    extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.bmp']
-    files = []
-    for ext in extensions:
-        files.extend(glob.glob(os.path.join(folder_path, ext)))
-    return sorted(files)
-
 # -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="Experimental Input Generator for CoreShellGPT", layout="wide")
-st.title("🧪 CoreShellGPT – Experimental Input Generator (Zero Dependency)")
+st.title("🧪 CoreShellGPT – Experimental Input Generator (Robust Paths + Manual Entry)")
 st.markdown("**All values are entered manually – no OpenCV required.**")
 
-# Define folders
-GEOMETRY_FOLDER = "experimental_images/geometry"
-COMPOSITION_FOLDER = "experimental_images/composition_ratio"
+# Debug expander (show path info)
+with st.expander("🔧 Debug Info"):
+    st.write(f"**Working directory:** {os.getcwd()}")
+    st.write(f"**Script location:** {BASE_DIR}")
+    st.write(f"**Geometry folder:** {GEOMETRY_FOLDER} (exists: {GEOMETRY_FOLDER.exists()})")
+    if GEOMETRY_FOLDER.exists():
+        st.write(f"**Contents:** {[f.name for f in GEOMETRY_FOLDER.iterdir() if not f.name.startswith('.')]}")
+    st.write(f"**Composition folder:** {COMPOSITION_FOLDER} (exists: {COMPOSITION_FOLDER.exists()})")
+    if COMPOSITION_FOLDER.exists():
+        st.write(f"**Contents:** {[f.name for f in COMPOSITION_FOLDER.iterdir() if not f.name.startswith('.')]}")
 
 # Sidebar: LLM selection (only if dependencies exist)
 st.sidebar.header("🧠 LLM Settings")
@@ -134,20 +193,15 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📁 HRTEM / Geometry Image")
-    st.markdown("**Select an image from the geometry folder (for reference only).**")
-
-    # Folder dropdown
-    geo_files = list_images_in_folder(GEOMETRY_FOLDER)
-    if geo_files:
-        geo_filenames = [os.path.basename(f) for f in geo_files]
-        selected_geo = st.selectbox("Select image from geometry folder", geo_filenames, key="geo_dropdown")
-        geo_path = os.path.join(GEOMETRY_FOLDER, selected_geo)
-        geo_img = Image.open(geo_path).convert("RGB")
-        st.image(geo_img, caption=f"Geometry: {selected_geo}", use_container_width=True)
-        st.session_state['geo_image'] = geo_img
-        st.info(f"Loaded from {GEOMETRY_FOLDER}")
+    st.markdown("**Red core, green shell, with scale bar (reference only).**")
+    
+    # Image selector (folder + upload fallback)
+    geo_img, geo_source = image_selector(GEOMETRY_FOLDER, "Geometry Image", "geo")
+    if geo_img:
+        st.image(geo_img, caption=geo_source, use_container_width=True)
+        st.session_state['geo_image'] = geo_img  # store for reference, not used in auto extraction
     else:
-        st.info(f"No images found in '{GEOMETRY_FOLDER}'. You can still enter values manually.")
+        st.info("No geometry image selected. You can still enter core diameter manually.")
 
     # Manual diameter entry (no automatic extraction)
     diam_manual = st.number_input("Enter core diameter (nm)", min_value=0.0, value=20.0, step=0.1)
@@ -157,20 +211,15 @@ with col1:
 
 with col2:
     st.subheader("📁 Elemental Mapping / Composition Image")
-    st.markdown("**Select an image from the composition_ratio folder (for reference only).**")
-
-    # Folder dropdown
-    comp_files = list_images_in_folder(COMPOSITION_FOLDER)
-    if comp_files:
-        comp_filenames = [os.path.basename(f) for f in comp_files]
-        selected_comp = st.selectbox("Select image from composition_ratio folder", comp_filenames, key="comp_dropdown")
-        comp_path = os.path.join(COMPOSITION_FOLDER, selected_comp)
-        comp_img = Image.open(comp_path).convert("RGB")
-        st.image(comp_img, caption=f"Composition: {selected_comp}", use_container_width=True)
-        st.session_state['comp_image'] = comp_img
-        st.info(f"Loaded from {COMPOSITION_FOLDER}")
+    st.markdown("**Red = Cu, Green = Ag (or explicit label like Cu:Ag=5:1) – reference only.**")
+    
+    # Image selector (folder + upload fallback)
+    comp_img, comp_source = image_selector(COMPOSITION_FOLDER, "Composition Image", "comp")
+    if comp_img:
+        st.image(comp_img, caption=comp_source, use_container_width=True)
+        st.session_state['comp_image'] = comp_img  # store for reference
     else:
-        st.info(f"No images found in '{COMPOSITION_FOLDER}'. You can still enter values manually.")
+        st.info("No composition image selected. You can still enter Cu:Ag ratio manually.")
 
     # Manual ratio entry (no automatic extraction)
     st.markdown("**Enter Cu:Ag ratio manually**")
@@ -179,7 +228,7 @@ with col2:
     if st.button("Set c_bulk", key="set_comp"):
         ratio = cu_num / ag_num
         c_bulk = 1.0 / ratio
-        c_bulk = np.clip(c_bulk, 0.1, 1.0)
+        c_bulk = max(0.1, min(1.0, c_bulk))  # clip
         st.session_state['c_bulk'] = round(c_bulk, 3)
         st.session_state['ratio_str'] = f"{cu_num}:{ag_num}"
         st.success(f"c_bulk = {c_bulk} (Cu:Ag = {cu_num}:{ag_num})")
