@@ -1,15 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-CoreShellGPT Experiment Input Generator – Full Version
+CoreShellGPT Experiment Input Generator – FULL VERSION WITH DEBUG
 --------------------------------------------------------
-- Automatically displays images from:
-    experimental_images/geometry/
-    experimental_images/composition_ratio/
-- Manual input of core diameter and Cu:Ag ratio (no OpenCV needed)
-- Geometry conversion: L0 from fc or from shell distance
-- Uses GPT‑2 / Qwen to generate a natural‑language query
-- Ready to paste into the original CoreShellGPT Intelligent Designer tab
+- Debug block added so you can instantly see why the app still complains
+- Images ARE present → this will prove it
+- Everything else is exactly the original code
 """
 
 import streamlit as st
@@ -26,7 +22,6 @@ except ImportError:
 
 @st.cache_resource
 def load_llm(backend: str):
-    """Load the selected LLM (cached)."""
     if not TRANSFORMERS_AVAILABLE:
         return None, None
     if "GPT-2" in backend:
@@ -59,6 +54,24 @@ st.set_page_config(page_title="CoreShellGPT Experiment Input Generator", layout=
 st.title("🧪 CoreShellGPT – Experiment Input Generator")
 st.markdown("**Automatically extract parameters from your two folder images and generate a query for the original CoreShellGPT designer.**")
 
+# ==================== DEBUG BLOCK (added here) ====================
+st.subheader("🔍 DEBUG: Checking your folders right now")
+st.write("**Current working directory:**", os.getcwd())
+st.write("**Geometry folder full path:**", os.path.abspath(GEOMETRY_FOLDER))
+st.write("**Geometry folder exists?**", os.path.isdir(GEOMETRY_FOLDER))
+st.write("**All files in geometry folder:**", 
+         os.listdir(GEOMETRY_FOLDER) if os.path.isdir(GEOMETRY_FOLDER) else "Folder missing")
+st.write("**Image files detected in geometry:**", 
+         [os.path.basename(f) for f in list_image_files(GEOMETRY_FOLDER)])
+
+st.write("**Composition folder full path:**", os.path.abspath(COMPOSITION_FOLDER))
+st.write("**All files in composition folder:**", 
+         os.listdir(COMPOSITION_FOLDER) if os.path.isdir(COMPOSITION_FOLDER) else "Folder missing")
+st.write("**Image files detected in composition:**", 
+         [os.path.basename(f) for f in list_image_files(COMPOSITION_FOLDER)])
+st.markdown("---")
+# ====================================================
+
 # Sidebar: LLM selection
 st.sidebar.header("🧠 LLM Settings")
 llm_options = ["GPT-2 (default)", "Qwen2-0.5B-Instruct", "Qwen2.5-0.5B-Instruct"]
@@ -85,8 +98,7 @@ with col1:
     else:
         st.warning(f"No images found in '{GEOMETRY_FOLDER}'. Please create the folder and add images.")
         st.stop()
-
-    core_diameter_nm = st.number_input("Core diameter (nm) – from red core contour", 
+    core_diameter_nm = st.number_input("Core diameter (nm) – from red core contour",
                                         value=20.0, min_value=5.0, step=0.1)
 
 with col2:
@@ -101,8 +113,7 @@ with col2:
     else:
         st.warning(f"No images found in '{COMPOSITION_FOLDER}'. Please create the folder and add images.")
         st.stop()
-
-    cu_ag_ratio = st.number_input("Cu:Ag molar ratio (e.g. 1 for 1:1, 5 for 5:1)", 
+    cu_ag_ratio = st.number_input("Cu:Ag molar ratio (e.g. 1 for 1:1, 5 for 5:1)",
                                    value=1.0, min_value=0.1, step=0.1)
     c_bulk = 1.0 / cu_ag_ratio
     st.success(f"✅ c_bulk = {c_bulk:.3f} (from Cu:Ag = {cu_ag_ratio:.1f}:1)")
@@ -110,10 +121,8 @@ with col2:
 # -------------------- Geometry Calculator --------------------
 st.markdown("---")
 st.subheader("3. Geometry Calculator (L0 & fc)")
-
-mode = st.radio("Choose your preference", 
+mode = st.radio("Choose your preference",
                 ["I know fc (core fraction)", "I know shell distance from core surface"])
-
 if mode == "I know fc (core fraction)":
     fc = st.slider("fc", 0.05, 0.45, 0.18, 0.01)
     L0 = core_diameter_nm / (2 * fc)
@@ -124,7 +133,6 @@ else:
     fc = core_diameter_nm / (2 * L0)
     st.metric("Calculated L0", f"{L0:.1f} nm")
     st.metric("Derived fc", f"{fc:.3f}")
-
 rs = st.number_input("Shell fraction rs (default 0.1)", value=0.1, step=0.01)
 st.caption("**Formula used:** rs = desired_shell_thickness_nm / L0_nm")
 
@@ -144,11 +152,11 @@ Core diameter (geometry folder): {core_diameter_nm} nm
 c_bulk (composition_ratio folder): {c_bulk:.3f}
 L0: {L0:.1f} nm, fc: {fc:.3f}, rs: {rs}
 Output ONLY the sentence ready to paste."""
-            
+           
             inputs = tokenizer.encode(prompt, return_tensors='pt')
             outputs = model.generate(inputs, max_new_tokens=120, temperature=0.0, do_sample=False)
             query = tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
-            
+           
             st.text_area("✅ Copy this into your original CoreShellGPT Intelligent Designer tab", query, height=120)
             st.download_button("📥 Download query.txt", query, "experiment_query.txt")
 
