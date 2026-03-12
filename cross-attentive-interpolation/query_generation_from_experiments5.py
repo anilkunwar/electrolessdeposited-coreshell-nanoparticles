@@ -2,14 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 CoreShellGPT – Intelligent Experimental Input Generator
-(Using scikit‑image with corrected imports)
---------------------------------------------------------
-- Automatic core diameter & scale bar detection via scikit‑image
-- Uses skimage.feature.canny (modern location)
-- Optional Google Cloud Vision OCR (if API key available)
-- Manual entry fallback for all values
-- Derived parameters (L0, fc, c_bulk, rs) using exact formulas
-- LLM query generation with GPT‑2 / Qwen (optional)
+(Improved with session‑state initialisation, single accept buttons, annotated images)
 """
 
 import streamlit as st
@@ -18,11 +11,26 @@ import re
 import numpy as np
 from pathlib import Path
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+
+# -------------------- SESSION STATE INITIALISATION (crash prevention) --------------------
+if "initialised" not in st.session_state:
+    st.session_state.update({
+        "core_diameter": None,
+        "scale_nm_per_px": None,
+        "c_bulk": None,
+        "ratio_str": "?",
+        "geo_annotated": None,
+        "comp_annotated": None,
+        "llm_tokenizer": None,
+        "llm_model": None,
+        "temp_geo_detection": None,       # store last detection results
+        "temp_comp_detection": None,
+    })
+    st.session_state.initialised = True
 
 # -------------------- Optional dependency checks (graceful) --------------------
 try:
-    # Import from correct modern locations
     from skimage import feature, transform, measure, color, morphology
     from skimage.transform import probabilistic_hough_line, hough_circle, hough_circle_peaks
     SKIMAGE_AVAILABLE = True
@@ -40,7 +48,6 @@ except ImportError:
     TORCH_AVAILABLE = False
     st.warning("Transformers or PyTorch not installed. LLM query generation disabled; default query will be shown.")
 
-# Google Cloud Vision (optional, requires API key)
 try:
     from google.cloud import vision
     import io
@@ -55,74 +62,123 @@ COMPOSITION_FOLDER = BASE_DIR / "experimental_images" / "composition_ratio"
 GEOMETRY_FOLDER.mkdir(parents=True, exist_ok=True)
 COMPOSITION_FOLDER.mkdir(parents=True, exist_ok=True)
 
-# -------------------- Image analysis functions (scikit‑image, corrected) --------------------
+# -------------------- Annotation helper (new) --------------------
+def annotate_geometry(pil_img, scale_line=None, core_info=None):
+    """Return a copy of pil_img with scale bar and core highlighted."""
+    annotated = pil_img.copy().convert("RGB")
+    draw = ImageDraw.Draw(annotated)
+    try:
+        # Use a larger font if available
+        font = ImageFont.truetype("arial.ttf", 20)
+    except:
+        font = ImageFont.load_default()
+
+    # Highlight scale bar
+    if scale_line:
+        (x1, y1), (x2, y2) = scale_line
+        # thick red line over the bar
+        draw.line([(x1, y1), (x2, y2)], fill="#FF0000", width=6)
+        # bounding box around it
+        draw.rectangle([(min(x1,x2)-10, min(y1,y2)-15),
+                        (max(x1,x2)+10, max(y1,y2)+15)],
+                       outline="#FF0000", width=3)
+        draw.text((min(x1,x2), min(y1,y2)-25),
+                  "SCALE BAR", fill="#FF0000", font=font)
+
+    # Highlight core
+    if core_info:
+        cx, cy, r = core_info["center"][0], core_info["center"][1], core_info["radius_px"]
+        # Draw outer circle
+        draw.ellipse((cx-r-3, cy-r-3, cx+r+3, cy+r+3),
+                     outline="#00FF00", width=5)
+        # Label with diameter
+        diam_nm = core_info.get("diam_nm", 0)
+        label = f"{diam_nm:.1f} nm" if diam_nm else "core"
+        draw.text((cx-30, cy-15), label,
+                  fill="white", font=font, stroke_width=2, stroke_fill="black")
+
+        # If we have contour pixels (fallback), highlight them in yellow
+        if core_info.get("contour") is not None:
+            for pt in core_info["contour"].astype(int):
+                if 0 <= pt[0] < annotated.height and 0 <= pt[1] < annotated.width:
+                    annotated.putpixel((pt[1], pt[0]), (255, 255, 0))
+    return annotated
+
+def annotate_composition(pil_img, ratio_str, c_bulk, masks=None):
+    """Add a text overlay with the detected Cu:Ag ratio."""
+    annotated = pil_img.copy().convert("RGB")
+    draw = ImageDraw.Draw(annotated)
+    try:
+        font = ImageFont.truetype("arial.ttf", 24)
+    except:
+        font = ImageFont.load_default()
+    text = f"Cu:Ag ≈ {ratio_str}  →  c_bulk = {c_bulk:.3f}"
+    # Semi‑transparent background for readability
+    bbox = draw.textbbox((10, annotated.height-50), text, font=font)
+    draw.rectangle(bbox, fill=(0,0,0,180))
+    draw.text((10, annotated.height-50), text, fill="#00FF00", font=font)
+    return annotated
+
+# -------------------- Image analysis functions (scikit‑image) --------------------
 if SKIMAGE_AVAILABLE:
     def detect_scale_bar_skimage(pil_img):
-        """Detect horizontal scale bar using probabilistic Hough lines."""
-        img = np.array(pil_img.convert('L'))  # grayscale
-        
-        # Use feature.canny (modern location)
+        """Detect horizontal scale bar. Returns (length_px, line_coords, confidence, annotated_img)."""
+        img = np.array(pil_img.convert('L'))
         edges = feature.canny(img, sigma=2)
-        
         lines = probabilistic_hough_line(edges, threshold=10, line_length=20, line_gap=3)
-        
+
         horizontal_lines = []
         for line in lines:
             (x1, y1), (x2, y2) = line
             length = np.hypot(x2 - x1, y2 - y1)
             angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
-            if angle < 10 and 20 < length < 200:  # nearly horizontal, reasonable length
+            if angle < 10 and 20 < length < 200:
                 horizontal_lines.append((length, line))
-        
+
         if not horizontal_lines:
-            return None, None, 0.0
-        
-        # Choose the longest line as scale bar
+            return None, None, 0.0, pil_img
+
         longest = max(horizontal_lines, key=lambda x: x[0])
-        length_px = longest[0]
-        confidence = 0.7  # heuristic
-        return length_px, None, confidence  # return length, no label yet (need OCR)
+        length_px, line_coords = longest
+        confidence = 0.7
+        # Create annotated image (just scale bar highlighted)
+        annotated = annotate_geometry(pil_img, scale_line=line_coords, core_info=None)
+        return length_px, line_coords, confidence, annotated
 
     def detect_core_diameter_skimage(pil_img, scale_nm_per_px=None):
-        """Detect circular core using Hough circle transform."""
+        """Detect circular core. Returns (diam_nm, diam_px, confidence, debug_info, annotated_img)."""
         img = np.array(pil_img.convert('L'))
-        
-        # Try a range of radii
         hough_radii = np.arange(20, 150, 5)
         hough_res = hough_circle(img, hough_radii)
         accums, cx, cy, radii = hough_circle_peaks(hough_res, hough_radii,
                                                    total_num_peaks=3)
-        
+
         if len(radii) > 0:
-            # Use the most prominent circle (highest accumulator)
             best_idx = np.argmax(accums)
             radius_px = radii[best_idx]
             diameter_px = 2 * radius_px
             confidence = accums[best_idx] / accums.max() if accums.max() > 0 else 0.5
-            
-            if scale_nm_per_px is not None:
-                diameter_nm = diameter_px * scale_nm_per_px
-            else:
-                diameter_nm = None
-            
-            debug_info = {
-                'method': 'hough',
-                'circles_found': len(radii),
+            diam_nm = diameter_px * scale_nm_per_px if scale_nm_per_px else None
+
+            core_info = {
                 'center': (cx[best_idx], cy[best_idx]),
-                'radius_px': radius_px
+                'radius_px': radius_px,
+                'diam_nm': diam_nm,
+                'contour': None
             }
-            return diameter_nm, diameter_px, confidence, debug_info
-        
-        # Fallback: contour analysis using feature.canny again
+            debug_info = {'method': 'hough', 'circles_found': len(radii)}
+            annotated = annotate_geometry(pil_img, scale_line=None, core_info=core_info)
+            return diam_nm, diameter_px, confidence, debug_info, annotated
+
+        # Fallback: contour analysis
         edges = feature.canny(img, sigma=2)
         contours = measure.find_contours(edges, 0.8)
-        
         best_circularity = 0
         best_contour = None
         for contour in contours:
             if len(contour) < 5:
                 continue
-            area = measure.grid_points_in_poly(contour, (img.shape))
+            area = measure.grid_points_in_poly(contour, img.shape)
             if area == 0:
                 continue
             perimeter = measure.perimeter(contour)
@@ -130,77 +186,57 @@ if SKIMAGE_AVAILABLE:
             if circularity > best_circularity and circularity > 0.6:
                 best_circularity = circularity
                 best_contour = contour
-        
+
         if best_contour is not None:
-            # Fit minimal enclosing circle (approximation)
-            coords = best_contour
-            center = np.mean(coords, axis=0)
-            radius_px = np.max(np.linalg.norm(coords - center, axis=1))
+            center = np.mean(best_contour, axis=0)
+            radius_px = np.max(np.linalg.norm(best_contour - center, axis=1))
             diameter_px = 2 * radius_px
             confidence = 0.5 * best_circularity
+            diam_nm = diameter_px * scale_nm_per_px if scale_nm_per_px else None
+            core_info = {
+                'center': (int(center[1]), int(center[0])),  # (x,y) order for drawing
+                'radius_px': radius_px,
+                'diam_nm': diam_nm,
+                'contour': best_contour
+            }
             debug_info = {'method': 'contour', 'circularity': best_circularity}
-            if scale_nm_per_px:
-                diameter_nm = diameter_px * scale_nm_per_px
-            else:
-                diameter_nm = None
-            return diameter_nm, diameter_px, confidence, debug_info
-        
-        return None, None, 0.0, {}
+            annotated = annotate_geometry(pil_img, scale_line=None, core_info=core_info)
+            return diam_nm, diameter_px, confidence, debug_info, annotated
+
+        return None, None, 0.0, {}, pil_img
 
     def extract_composition_skimage(pil_img):
-        """Simple color-based analysis for Cu (red) and Ag (green)."""
+        """Simple color analysis. Returns (c_bulk, ratio_str, confidence, annotated_img)."""
         img_rgb = np.array(pil_img.convert('RGB'))
         hsv = color.rgb2hsv(img_rgb)
-        
-        # Red mask (hue near 0 or 1)
+
         red_mask1 = (hsv[..., 0] < 0.05) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
         red_mask2 = (hsv[..., 0] > 0.95) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
         red_mask = red_mask1 | red_mask2
-        
-        # Green mask (hue ~0.33)
         green_mask = (np.abs(hsv[..., 0] - 0.33) < 0.1) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
-        
+
         cu_pixels = np.sum(red_mask)
         ag_pixels = np.sum(green_mask)
-        
+
         if cu_pixels > 100 and ag_pixels > 100:
             ratio = cu_pixels / ag_pixels
             c_bulk = 1.0 / ratio if ratio > 0 else 1.0
             c_bulk = np.clip(c_bulk, 0.1, 1.0)
             ratio_str = f"{round(ratio,1)}:1"
-            return round(c_bulk, 3), ratio_str, 0.6, "color_analysis"
-        return None, None, 0.0, "failed"
+            confidence = 0.6
+            # Build annotated image
+            annotated = annotate_composition(pil_img, ratio_str, c_bulk)
+            return c_bulk, ratio_str, confidence, annotated
+        return None, None, 0.0, pil_img
 
-# -------------------- Google Cloud Vision OCR (optional) --------------------
-def google_vision_ocr(pil_img):
-    """Use Google Vision API to read text labels (requires credentials)."""
-    if not GOOGLE_VISION_AVAILABLE:
-        return None
-    try:
-        client = vision.ImageAnnotatorClient()
-        buffer = io.BytesIO()
-        pil_img.save(buffer, format='PNG')
-        content = buffer.getvalue()
-        image = vision.Image(content=content)
-        response = client.text_detection(image=image)
-        texts = response.text_annotations
-        if texts:
-            return texts[0].description
-    except Exception as e:
-        st.warning(f"Google Vision OCR failed: {e}")
-    return None
-
-# -------------------- Helper functions (always available) --------------------
+# -------------------- Helper functions --------------------
 def list_images_in_folder(folder_path):
     folder = Path(folder_path)
-    if not folder.exists() or not folder.is_dir():
+    if not folder.exists():
         return []
     valid_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
-    files = []
-    for f in folder.iterdir():
-        if f.is_file() and not f.name.startswith('.'):
-            if f.suffix.lower() in valid_extensions:
-                files.append(str(f))
+    files = [str(f) for f in folder.iterdir()
+             if f.is_file() and f.suffix.lower() in valid_extensions]
     return sorted(files)
 
 def image_selector(folder_path, label, key_prefix):
@@ -273,15 +309,32 @@ Generate a natural language query starting with "Design a core-shell with". Outp
         answer = answer.replace(full_prompt, "").strip()
     return answer
 
+def google_vision_ocr(pil_img):
+    if not GOOGLE_VISION_AVAILABLE:
+        return None
+    try:
+        client = vision.ImageAnnotatorClient()
+        buffer = io.BytesIO()
+        pil_img.save(buffer, format='PNG')
+        content = buffer.getvalue()
+        image = vision.Image(content=content)
+        response = client.text_detection(image=image)
+        texts = response.text_annotations
+        if texts:
+            return texts[0].description
+    except Exception as e:
+        st.warning(f"Google Vision OCR failed: {e}")
+    return None
+
 # -------------------- STREAMLIT UI --------------------
 st.set_page_config(page_title="CoreShellGPT – Intelligent Input Generator", layout="wide")
 st.title("🧪 CoreShellGPT – Intelligent Experimental Input Generator")
-st.markdown("**Automatic detection using scikit‑image (pure Python).**")
+st.markdown("**Automatic detection using scikit‑image + annotated images**")
 
 with st.expander("🔧 System Info"):
-    st.write(f"**scikit‑image:** {'✅' if SKIMAGE_AVAILABLE else '❌'} (auto-detection will be hidden if missing)")
-    st.write(f"**Google Cloud Vision:** {'✅' if GOOGLE_VISION_AVAILABLE else '❌'} (OCR if API key set)")
-    st.write(f"**Transformers:** {'✅' if TRANSFORMERS_AVAILABLE else '❌'} (LLM disabled if missing)")
+    st.write(f"**scikit‑image:** {'✅' if SKIMAGE_AVAILABLE else '❌'}")
+    st.write(f"**Google Cloud Vision:** {'✅' if GOOGLE_VISION_AVAILABLE else '❌'}")
+    st.write(f"**Transformers:** {'✅' if TRANSFORMERS_AVAILABLE else '❌'}")
 
 st.sidebar.header("🧠 LLM Settings")
 if TRANSFORMERS_AVAILABLE and TORCH_AVAILABLE:
@@ -318,55 +371,81 @@ with col1:
         st.image(geo_img, caption=geo_source, use_container_width=True)
         st.session_state['geo_image'] = geo_img
 
+        # Auto‑detection button (stores results in session_state.temp_geo_detection)
         if SKIMAGE_AVAILABLE:
             if st.button("🔍 Auto-detect Scale Bar & Core (skimage)", key="auto_geo"):
                 with st.spinner("Analyzing image..."):
-                    # Step 1: detect scale bar
-                    scale_px, _, scale_conf = detect_scale_bar_skimage(geo_img)
-
+                    scale_px, line_coords, scale_conf, annotated_scale = detect_scale_bar_skimage(geo_img)
                     if scale_px:
-                        st.success(f"✅ Scale bar detected: {scale_px:.1f} pixels")
-
-                        # Ask user for scale value (OCR would come here)
-                        scale_nm = st.number_input("Enter scale bar value (nm)", value=20.0, step=5.0, key="scale_nm_auto")
-                        if scale_nm > 0:
-                            scale_nm_per_px = scale_nm / scale_px
-                            st.info(f"📏 Scale: {scale_nm_per_px:.4f} nm/pixel")
-                            st.session_state['scale_nm_per_px'] = scale_nm_per_px
-
-                            # Step 2: detect core
-                            diam_nm, diam_px, diam_conf, debug = detect_core_diameter_skimage(geo_img, scale_nm_per_px)
-                            if diam_nm:
-                                st.success(f"✅ Core diameter: {diam_nm:.2f} nm ({diam_px:.1f} px)")
-                                st.info(f"🎯 Detection confidence: {diam_conf:.1%}")
-                                if debug.get('circles_found', 0) > 0:
-                                    st.caption(f"Found {debug['circles_found']} circles using {debug['method']}")
-
-                                if st.button("Use this diameter", key="accept_diam"):
-                                    st.session_state['core_diameter'] = diam_nm
-                                    st.rerun()
-                            else:
-                                st.warning("⚠️ Could not detect core automatically. Try manual entry below.")
+                        # User must input the real length in nm
+                        scale_nm = st.number_input("Scale bar value (nm)", value=20.0, step=5.0,
+                                                    key="scale_nm_auto_temp")
+                        scale_nm_per_px = scale_nm / scale_px
+                        # Now detect core
+                        diam_nm, diam_px, diam_conf, debug, annotated_core = detect_core_diameter_skimage(
+                            geo_img, scale_nm_per_px
+                        )
+                        # Store everything temporarily
+                        st.session_state.temp_geo_detection = {
+                            'scale_nm_per_px': scale_nm_per_px,
+                            'diam_nm': diam_nm,
+                            'annotated_scale': annotated_scale,
+                            'annotated_core': annotated_core,
+                            'scale_px': scale_px,
+                            'diam_conf': diam_conf,
+                        }
+                        st.success("Detection complete! Review the annotated images below.")
                     else:
-                        st.error("❌ Could not detect scale bar. Please enter manually.")
-        else:
-            st.info("Automatic detection disabled (scikit‑image not installed). Please enter manually.")
+                        st.error("Could not detect scale bar. Please use manual entry.")
 
+            # Show temporary annotations if they exist
+            if st.session_state.get('temp_geo_detection'):
+                det = st.session_state.temp_geo_detection
+                st.image(det['annotated_scale'], caption="Detected scale bar", use_container_width=True)
+                st.image(det['annotated_core'], caption="Detected core", use_container_width=True)
+                if det['diam_nm']:
+                    st.metric("Detected diameter", f"{det['diam_nm']:.2f} nm")
+                else:
+                    st.warning("Core detection failed.")
+
+                # Single accept button
+                if st.button("✅ Accept All Geometry Detections", key="accept_geo"):
+                    st.session_state.scale_nm_per_px = det['scale_nm_per_px']
+                    st.session_state.core_diameter = det['diam_nm']
+                    st.session_state.geo_annotated = det['annotated_core']  # final annotated image
+                    # Clear temporary
+                    del st.session_state.temp_geo_detection
+                    st.success("Geometry accepted!")
+                    st.rerun()
+
+        # Manual entry section (always visible)
         st.markdown("---")
         st.markdown("**Manual Entry**")
-        scale_nm_manual = st.number_input("Scale bar value (nm)", value=20.0, step=5.0, key="scale_manual")
-        scale_px_manual = st.number_input("Scale bar length (pixels)", value=100, step=10, key="scalepx_manual")
+        scale_nm_manual = st.number_input("Scale bar value (nm)", value=20.0, step=5.0, key="scale_manual_final")
+        scale_px_manual = st.number_input("Scale bar length (pixels)", value=100, step=10, key="scalepx_manual_final")
+        diam_manual = st.number_input("Core diameter (nm)", min_value=0.0, value=20.0, step=0.1, key="diam_manual_final")
 
-        if st.button("Set scale manually", key="set_scale_manual"):
+        if st.button("Set Geometry Manually", key="set_geo_manual"):
             if scale_px_manual > 0:
-                st.session_state['scale_nm_per_px'] = scale_nm_manual / scale_px_manual
-                st.success(f"Scale set: {scale_nm_manual/scale_px_manual:.4f} nm/pixel")
+                st.session_state.scale_nm_per_px = scale_nm_manual / scale_px_manual
+            st.session_state.core_diameter = diam_manual
+            # For manual, we don't have an annotated image; create a simple one
+            if geo_img:
+                # Just add a text label
+                ann = geo_img.copy().convert("RGB")
+                draw = ImageDraw.Draw(ann)
+                draw.text((10,10), f"Manual: core = {diam_manual} nm", fill="white")
+                st.session_state.geo_annotated = ann
+            st.success("Manual geometry set!")
+            st.rerun()
 
-        if 'scale_nm_per_px' in st.session_state or True:
-            diam_manual = st.number_input("Core diameter (nm)", min_value=0.0, value=20.0, step=0.1, key="diam_manual")
-            if st.button("Set core diameter", key="set_diam_manual"):
-                st.session_state['core_diameter'] = diam_manual
-                st.success(f"Core diameter set to {diam_manual} nm")
+        # Show final annotated geometry if already accepted
+        if st.session_state.get('geo_annotated'):
+            st.image(st.session_state.geo_annotated, caption="✅ Final Annotated Geometry", use_container_width=True)
+            if st.button("📥 Download Annotated Geometry", key="dl_geo"):
+                buf = io.BytesIO()
+                st.session_state.geo_annotated.save(buf, format="PNG")
+                st.download_button("Download PNG", data=buf.getvalue(), file_name="annotated_geometry.png", mime="image/png")
 
 # -------------------- COMPOSITION IMAGE --------------------
 with col2:
@@ -379,29 +458,40 @@ with col2:
 
         if SKIMAGE_AVAILABLE:
             if st.button("🔍 Auto-extract Composition (color analysis)", key="auto_comp"):
-                with st.spinner("Analyzing composition..."):
-                    c_bulk, ratio_str, conf, method = extract_composition_skimage(comp_img)
+                with st.spinner("Analyzing..."):
+                    c_bulk, ratio_str, conf, annotated = extract_composition_skimage(comp_img)
                     if c_bulk is not None:
-                        st.success(f"✅ Extracted: Cu:Ag ≈ {ratio_str}")
-                        st.info(f"c_bulk = {c_bulk} (confidence: {conf:.1%}, method: {method})")
-
-                        if st.button("Use this ratio", key="accept_comp"):
-                            st.session_state['c_bulk'] = c_bulk
-                            st.session_state['ratio_str'] = ratio_str
-                            st.rerun()
+                        st.session_state.temp_comp_detection = {
+                            'c_bulk': c_bulk,
+                            'ratio_str': ratio_str,
+                            'annotated': annotated,
+                        }
+                        st.success("Composition detected! See annotated image below.")
                     else:
-                        st.warning("⚠️ Could not extract automatically. Try manual entry or OCR.")
-        else:
-            st.info("Automatic color analysis disabled (scikit‑image not installed).")
+                        st.warning("Could not extract automatically. Try manual entry or OCR.")
 
-        # Optional Google Vision OCR
+            # Show temporary composition result
+            if st.session_state.get('temp_comp_detection'):
+                det = st.session_state.temp_comp_detection
+                st.image(det['annotated'], caption="Detected composition", use_container_width=True)
+                st.metric("Cu:Ag ratio", det['ratio_str'])
+                st.metric("c_bulk", f"{det['c_bulk']:.3f}")
+
+                if st.button("✅ Accept Composition Detection", key="accept_comp"):
+                    st.session_state.c_bulk = det['c_bulk']
+                    st.session_state.ratio_str = det['ratio_str']
+                    st.session_state.comp_annotated = det['annotated']
+                    del st.session_state.temp_comp_detection
+                    st.success("Composition accepted!")
+                    st.rerun()
+
+        # Google Vision OCR (optional)
         if GOOGLE_VISION_AVAILABLE:
             if st.button("📝 Read labels with Google Vision", key="ocr_comp"):
                 with st.spinner("Running OCR..."):
                     text = google_vision_ocr(comp_img)
                     if text:
                         st.text_area("OCR result", text, height=100)
-                        # Try to parse ratio
                         match = re.search(r'cu\s*:\s*ag\s*=\s*(\d+)\s*:\s*(\d+)', text, re.IGNORECASE)
                         if match:
                             cu = int(match.group(1))
@@ -411,31 +501,51 @@ with col2:
                                 c_bulk = 1.0 / ratio
                                 c_bulk = np.clip(c_bulk, 0.1, 1.0)
                                 st.success(f"Found Cu:Ag = {cu}:{ag} → c_bulk = {c_bulk}")
-                                if st.button("Use this ratio (OCR)", key="accept_ocr"):
-                                    st.session_state['c_bulk'] = round(c_bulk, 3)
-                                    st.session_state['ratio_str'] = f"{cu}:{ag}"
-                                    st.rerun()
+                                # Optionally use this as detection
+                                annotated = annotate_composition(comp_img, f"{cu}:{ag}", c_bulk)
+                                st.session_state.temp_comp_detection = {
+                                    'c_bulk': round(c_bulk, 3),
+                                    'ratio_str': f"{cu}:{ag}",
+                                    'annotated': annotated,
+                                }
+                                st.rerun()
                     else:
                         st.warning("No text detected.")
 
+        # Manual entry
         st.markdown("---")
         st.markdown("**Manual Entry**")
         cu_num = st.number_input("Cu count", min_value=1, value=1, step=1, key="cu")
         ag_num = st.number_input("Ag count", min_value=1, value=1, step=1, key="ag")
 
-        if st.button("Set ratio manually", key="set_comp_manual"):
+        if st.button("Set Ratio Manually", key="set_comp_manual"):
             ratio = cu_num / ag_num
             c_bulk = 1.0 / ratio if ratio > 0 else 1.0
             c_bulk = np.clip(c_bulk, 0.1, 1.0)
-            st.session_state['c_bulk'] = round(c_bulk, 3)
-            st.session_state['ratio_str'] = f"{cu_num}:{ag_num}"
-            st.success(f"Set: c_bulk = {c_bulk}")
+            st.session_state.c_bulk = round(c_bulk, 3)
+            st.session_state.ratio_str = f"{cu_num}:{ag_num}"
+            # Create simple annotated image
+            if comp_img:
+                ann = comp_img.copy().convert("RGB")
+                draw = ImageDraw.Draw(ann)
+                draw.text((10,10), f"Manual: Cu:Ag = {cu_num}:{ag_num}", fill="white")
+                st.session_state.comp_annotated = ann
+            st.success("Manual composition set!")
+            st.rerun()
+
+        # Show final annotated composition
+        if st.session_state.get('comp_annotated'):
+            st.image(st.session_state.comp_annotated, caption="✅ Final Annotated Composition", use_container_width=True)
+            if st.button("📥 Download Annotated Composition", key="dl_comp"):
+                buf = io.BytesIO()
+                st.session_state.comp_annotated.save(buf, format="PNG")
+                st.download_button("Download PNG", data=buf.getvalue(), file_name="annotated_composition.png", mime="image/png")
 
 # -------------------- CALCULATIONS --------------------
 st.header("📐 Derived Parameters")
 
-if 'core_diameter' in st.session_state and 'c_bulk' in st.session_state:
-    d_core = st.session_state['core_diameter']
+if st.session_state.core_diameter and st.session_state.c_bulk:
+    d_core = st.session_state.core_diameter
     r_core = d_core / 2.0
 
     if geo_mode == "Provide fc":
@@ -449,8 +559,8 @@ if 'core_diameter' in st.session_state and 'c_bulk' in st.session_state:
         fc = r_core / L0
 
     rs = rs_default
-    c_bulk = st.session_state['c_bulk']
-    ratio_str = st.session_state.get('ratio_str', '?')
+    c_bulk = st.session_state.c_bulk
+    ratio_str = st.session_state.ratio_str
 
     col_a, col_b = st.columns(2)
     with col_a:
