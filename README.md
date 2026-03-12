@@ -187,6 +187,7 @@ Stable Version of coreshellgpt
 
 
 Query Vector Design with Computer Vision and Vision LLM
+
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm1-streamlit-red)](https://experiments-informed-input-generator1.streamlit.app/) (cannot locate images from folders)
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm2-streamlit-red)](https://experiments-informed-input-generator2.streamlit.app/) (cannot locate images from folders, can upload images externally)
