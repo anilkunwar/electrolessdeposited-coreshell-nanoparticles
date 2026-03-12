@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-CoreShellGPT Experiment Input Generator – FULL VERSION WITH DEBUG
+CoreShellGPT Experiment Input Generator – FIXED & AUTO-CREATED VERSION
 --------------------------------------------------------
-- Debug block added so you can instantly see why the app still complains
-- Images ARE present → this will prove it
-- Everything else is exactly the original code
+- AUTO-CREATES the missing folders on startup
+- Debug block shows exactly what's happening
+- NO MORE st.stop() → app always runs (images optional)
+- You can now enter numbers manually even if no images are added yet
+- Just add your images later via file explorer
 """
 
 import streamlit as st
@@ -38,6 +40,11 @@ def load_llm(backend: str):
 GEOMETRY_FOLDER = "experimental_images/geometry"
 COMPOSITION_FOLDER = "experimental_images/composition_ratio"
 
+# -------------------- AUTO-CREATE FOLDERS --------------------
+os.makedirs(GEOMETRY_FOLDER, exist_ok=True)
+os.makedirs(COMPOSITION_FOLDER, exist_ok=True)
+st.success(f"✅ Folders auto-created (or already existed):\n   • {GEOMETRY_FOLDER}\n   • {COMPOSITION_FOLDER}")
+
 # -------------------- Helper: list images --------------------
 def list_image_files(folder):
     if not os.path.isdir(folder):
@@ -54,7 +61,7 @@ st.set_page_config(page_title="CoreShellGPT Experiment Input Generator", layout=
 st.title("🧪 CoreShellGPT – Experiment Input Generator")
 st.markdown("**Automatically extract parameters from your two folder images and generate a query for the original CoreShellGPT designer.**")
 
-# ==================== DEBUG BLOCK (added here) ====================
+# ==================== DEBUG BLOCK ====================
 st.subheader("🔍 DEBUG: Checking your folders right now")
 st.write("**Current working directory:**", os.getcwd())
 st.write("**Geometry folder full path:**", os.path.abspath(GEOMETRY_FOLDER))
@@ -96,8 +103,7 @@ with col1:
         st.image(geo_path, caption=f"Geometry: {selected_geo}", use_container_width=True)
         st.info(f"Loaded from {GEOMETRY_FOLDER}")
     else:
-        st.warning(f"No images found in '{GEOMETRY_FOLDER}'. Please create the folder and add images.")
-        st.stop()
+        st.warning(f"📂 No images yet in '{GEOMETRY_FOLDER}'.\nAdd any .jpg/.png file via your file explorer.")
     core_diameter_nm = st.number_input("Core diameter (nm) – from red core contour",
                                         value=20.0, min_value=5.0, step=0.1)
 
@@ -111,8 +117,7 @@ with col2:
         st.image(comp_path, caption=f"Composition: {selected_comp}", use_container_width=True)
         st.info(f"Loaded from {COMPOSITION_FOLDER}")
     else:
-        st.warning(f"No images found in '{COMPOSITION_FOLDER}'. Please create the folder and add images.")
-        st.stop()
+        st.warning(f"📂 No images yet in '{COMPOSITION_FOLDER}'.\nAdd any .jpg/.png file via your file explorer.")
     cu_ag_ratio = st.number_input("Cu:Ag molar ratio (e.g. 1 for 1:1, 5 for 5:1)",
                                    value=1.0, min_value=0.1, step=0.1)
     c_bulk = 1.0 / cu_ag_ratio
