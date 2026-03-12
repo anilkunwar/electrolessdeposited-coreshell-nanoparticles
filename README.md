@@ -186,10 +186,14 @@ Stable Version of coreshellgpt
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/coreshellgpt-streamlit-red)](https://coreshellgpt.streamlit.app/)  (more robust, temporally consistent, gpt-2 and other LLM implemented and parsing succeeds, completeness insight is working in this, the LLM can also give opinion on dynamic results  )
 
 
+Query Vector Design with Computer Vision and Vision LLM
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm1-streamlit-red)](https://experiments-informed-input-generator1.streamlit.app/) (cannot locate images from folders)
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm2-streamlit-red)](https://experiments-informed-input-generator2.streamlit.app/) (cannot locate images from folders, can upload images externally)
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm3-streamlit-red)](https://experiments-informed-input-generator3.streamlit.app/) (can locate images from folders)
 
-
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm4-streamlit-red)](https://experiments-informed-input-generator4.streamlit.app/) (cannot locate images from folders)
 
 
 
