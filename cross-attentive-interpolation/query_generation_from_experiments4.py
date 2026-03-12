@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 CoreShellGPT – Intelligent Experimental Input Generator
-(Dependency‑aware version – works without OpenCV or Tesseract)
+(using scikit‑image, no system dependencies)
 --------------------------------------------------------
-- Automatic features enabled only if required libraries are present.
-- Falls back to manual entry when libraries missing.
-- Scans experimental_images/geometry and experimental_images/composition_ratio.
-- Uses GPT‑2 / Qwen for query generation (optional).
+- Automatic core diameter & scale bar detection via scikit‑image
+- Optional Google Cloud Vision OCR (if API key available)
+- Manual entry fallback for all values
+- Derived parameters (L0, fc, c_bulk, rs) using exact formulas
+- LLM query generation with GPT‑2 / Qwen (optional)
 """
 
 import streamlit as st
@@ -16,25 +17,16 @@ import re
 import numpy as np
 from pathlib import Path
 from datetime import datetime
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image
 
-# -------------------- Dependency checks (graceful) --------------------
+# -------------------- Optional dependency checks (graceful) --------------------
 try:
-    import cv2
-    CV2_AVAILABLE = True
+    from skimage import filters, feature, transform, measure, color, morphology
+    from skimage.transform import probabilistic_hough_line, hough_circle, hough_circle_peaks
+    SKIMAGE_AVAILABLE = True
 except ImportError:
-    CV2_AVAILABLE = False
-    st.warning("OpenCV not installed. Automatic image analysis disabled. Please enter values manually.")
-
-try:
-    import pytesseract
-    TESSERACT_AVAILABLE = True
-    # On Windows, you may need to set the path:
-    # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-except ImportError:
-    TESSERACT_AVAILABLE = False
-    if CV2_AVAILABLE:
-        st.warning("pytesseract not installed. Scale bar OCR disabled; use manual entry or color analysis.")
+    SKIMAGE_AVAILABLE = False
+    st.warning("scikit‑image not installed. Automatic detection disabled. Install with: pip install scikit-image")
 
 try:
     from transformers import GPT2Tokenizer, GPT2LMHeadModel, AutoTokenizer, AutoModelForCausalLM
@@ -46,13 +38,13 @@ except ImportError:
     TORCH_AVAILABLE = False
     st.warning("Transformers or PyTorch not installed. LLM query generation disabled; default query will be shown.")
 
-# Pillow is required
+# Google Cloud Vision (optional, requires API key)
 try:
-    from PIL import Image
-    PIL_AVAILABLE = True
+    from google.cloud import vision
+    import io
+    GOOGLE_VISION_AVAILABLE = True
 except ImportError:
-    st.error("Pillow is required. Run: pip install Pillow")
-    st.stop()
+    GOOGLE_VISION_AVAILABLE = False
 
 # -------------------- Path configuration --------------------
 BASE_DIR = Path(__file__).parent.resolve()
@@ -61,170 +53,137 @@ COMPOSITION_FOLDER = BASE_DIR / "experimental_images" / "composition_ratio"
 GEOMETRY_FOLDER.mkdir(parents=True, exist_ok=True)
 COMPOSITION_FOLDER.mkdir(parents=True, exist_ok=True)
 
-# -------------------- Image analysis functions (only if cv2 available) --------------------
-if CV2_AVAILABLE:
-    def preprocess_image_for_ocr(pil_img):
-        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, 11, 2)
-        denoised = cv2.fastNlMeansDenoising(thresh, None, 10, 7, 21)
-        return gray, thresh, denoised
-
-    def detect_scale_bar(pil_img):
-        """Detect scale bar using Hough lines + OCR."""
-        if not CV2_AVAILABLE or not TESSERACT_AVAILABLE:
-            return None, None, 0.0
-        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        lines = cv2.HoughLinesP(edges, rho=1, theta=np.pi/180, threshold=50,
-                                minLineLength=30, maxLineGap=10)
+# -------------------- Image analysis functions (scikit‑image) --------------------
+if SKIMAGE_AVAILABLE:
+    def detect_scale_bar_skimage(pil_img):
+        """Detect horizontal scale bar using probabilistic Hough lines."""
+        img = np.array(pil_img.convert('L'))  # grayscale
+        edges = filters.canny(img, sigma=2)
+        lines = probabilistic_hough_line(edges, threshold=10, line_length=20, line_gap=3)
+        
         horizontal_lines = []
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                line_length = abs(x2 - x1)
-                line_angle = abs(y2 - y1)
-                if line_angle < 5 and 20 < line_length < 200:
-                    horizontal_lines.append((x1, y1, x2, y2, line_length))
-        horizontal_lines.sort(key=lambda x: x[4], reverse=True)
+        for line in lines:
+            (x1, y1), (x2, y2) = line
+            length = np.hypot(x2 - x1, y2 - y1)
+            angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+            if angle < 10 and 20 < length < 200:  # nearly horizontal, reasonable length
+                horizontal_lines.append((length, line))
+        
+        if not horizontal_lines:
+            return None, None, 0.0
+        
+        # Choose the longest line as scale bar
+        longest = max(horizontal_lines, key=lambda x: x[0])
+        length_px = longest[0]
+        confidence = 0.7  # heuristic
+        return length_px, None, confidence  # return length, no label yet (need OCR)
 
-        scale_info = None
-        best_confidence = 0.0
-        for i, (x1, y1, x2, y2, length_px) in enumerate(horizontal_lines[:3]):
-            roi_y1 = max(0, y2 - 30)
-            roi_y2 = min(img_cv.shape[0], y2 + 50)
-            roi_x1 = max(0, x1 - 20)
-            roi_x2 = min(img_cv.shape[1], x2 + 20)
-            roi = gray[roi_y1:roi_y2, roi_x1:roi_x2]
-            try:
-                custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.nm '
-                text = pytesseract.image_to_string(roi, config=custom_config).strip()
-                match = re.search(r'(\d+(?:\.\d+)?)\s*(nm|nanometers?)', text, re.IGNORECASE)
-                if match:
-                    scale_value = float(match.group(1))
-                    scale_info = (length_px, f"{scale_value} nm", 0.8)
-                    break
-            except:
-                pass
-        return scale_info if scale_info else (None, None, 0.0)
-
-    def detect_core_diameter(pil_img, scale_nm_per_px):
-        """Measure core diameter via Hough circles or contour analysis."""
-        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (9, 9), 2)
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1, minDist=50,
-                                   param1=50, param2=50, minRadius=20, maxRadius=200)
-        debug_info = {'circles_found': 0, 'method': 'hough'}
-        if circles is not None:
-            circles = np.round(circles[0, :]).astype("int")
-            debug_info['circles_found'] = len(circles)
-            circles = sorted(circles, key=lambda k: k[2], reverse=True)
-            x, y, radius_px = circles[0]
+    def detect_core_diameter_skimage(pil_img, scale_nm_per_px=None):
+        """Detect circular core using Hough circle transform."""
+        img = np.array(pil_img.convert('L'))
+        # Try a range of radii
+        hough_radii = np.arange(20, 150, 5)
+        hough_res = hough_circle(img, hough_radii)
+        accums, cx, cy, radii = hough_circle_peaks(hough_res, hough_radii,
+                                                   total_num_peaks=3)
+        
+        if len(radii) > 0:
+            # Use the most prominent circle (highest accumulator)
+            best_idx = np.argmax(accums)
+            radius_px = radii[best_idx]
             diameter_px = 2 * radius_px
-            diameter_nm = diameter_px * scale_nm_per_px
-            confidence = 0.7
-            debug_info['center'] = (x, y)
-            debug_info['radius_px'] = radius_px
-            return diameter_nm, diameter_px, confidence, debug_info
-
-        # Fallback: contour analysis
-        edges = cv2.Canny(gray, 50, 150)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            best_contour = None
-            best_circularity = 0
-            for contour in contours:
-                area = cv2.contourArea(contour)
-                if area < 1000:
-                    continue
-                perimeter = cv2.arcLength(contour, True)
-                if perimeter == 0:
-                    continue
-                circularity = 4 * np.pi * (area / (perimeter * perimeter))
-                if circularity > best_circularity and circularity > 0.6:
-                    best_circularity = circularity
-                    best_contour = contour
-            if best_contour is not None:
-                (x, y), radius_px = cv2.minEnclosingCircle(best_contour)
-                diameter_px = 2 * radius_px
+            confidence = accums[best_idx] / accums.max() if accums.max() > 0 else 0.5
+            
+            if scale_nm_per_px is not None:
                 diameter_nm = diameter_px * scale_nm_per_px
-                confidence = 0.5 * best_circularity
-                debug_info['method'] = 'contour'
-                debug_info['circularity'] = best_circularity
-                return diameter_nm, diameter_px, confidence, debug_info
-        return None, None, 0.0, debug_info
+            else:
+                diameter_nm = None
+            
+            debug_info = {
+                'method': 'hough',
+                'circles_found': len(radii),
+                'center': (cx[best_idx], cy[best_idx]),
+                'radius_px': radius_px
+            }
+            return diameter_nm, diameter_px, confidence, debug_info
+        
+        # Fallback: contour analysis
+        edges = filters.canny(img, sigma=2)
+        contours = measure.find_contours(edges, 0.8)
+        
+        best_circularity = 0
+        best_contour = None
+        for contour in contours:
+            if len(contour) < 5:
+                continue
+            area = measure.grid_points_in_poly(contour, (img.shape))
+            if area == 0:
+                continue
+            perimeter = measure.perimeter(contour)
+            circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0
+            if circularity > best_circularity and circularity > 0.6:
+                best_circularity = circularity
+                best_contour = contour
+        
+        if best_contour is not None:
+            # Fit minimal enclosing circle (using cv2 or custom? we can approximate)
+            # For simplicity, use bounding circle from extreme points
+            coords = best_contour
+            center = np.mean(coords, axis=0)
+            radius_px = np.max(np.linalg.norm(coords - center, axis=1))
+            diameter_px = 2 * radius_px
+            confidence = 0.5 * best_circularity
+            debug_info = {'method': 'contour', 'circularity': best_circularity}
+            if scale_nm_per_px:
+                diameter_nm = diameter_px * scale_nm_per_px
+            else:
+                diameter_nm = None
+            return diameter_nm, diameter_px, confidence, debug_info
+        
+        return None, None, 0.0, {}
 
-    def extract_composition_from_image(pil_img):
-        """Extract Cu:Ag ratio via OCR or color segmentation."""
-        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-
-        # OCR methods
-        if TESSERACT_AVAILABLE:
-            try:
-                custom_config = r'--oem 3 --psm 6'
-                text = pytesseract.image_to_string(gray, config=custom_config)
-
-                # Cu:Ag = X:Y
-                match1 = re.search(r'cu\s*:\s*ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
-                if match1:
-                    cu_val = float(match1.group(1))
-                    ag_val = float(match1.group(2))
-                    if ag_val > 0:
-                        ratio = cu_val / ag_val
-                        c_bulk = 1.0 / ratio if ratio > 0 else 1.0
-                        c_bulk = np.clip(c_bulk, 0.1, 1.0)
-                        return round(c_bulk, 3), f"{int(cu_val)}:{int(ag_val)}", 0.9, "ocr_ratio"
-
-                # c_bulk = X
-                match2 = re.search(r'c[_\s]*(?:bulk)?\s*=\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
-                if match2:
-                    c_bulk = float(match2.group(1))
-                    c_bulk = np.clip(c_bulk, 0.1, 1.0)
-                    return round(c_bulk, 3), f"1:{round(1/c_bulk,1)}", 0.8, "ocr_cbulk"
-
-                # percentages
-                cu_match = re.search(r'cu.*?(\d+(?:\.\d+)?)\s*%', text, re.IGNORECASE)
-                ag_match = re.search(r'ag.*?(\d+(?:\.\d+)?)\s*%', text, re.IGNORECASE)
-                if cu_match and ag_match:
-                    cu_pct = float(cu_match.group(1))
-                    ag_pct = float(ag_match.group(1))
-                    if cu_pct + ag_pct > 0:
-                        ratio = cu_pct / ag_pct if ag_pct > 0 else 10
-                        c_bulk = 1.0 / ratio if ratio > 0 else 1.0
-                        c_bulk = np.clip(c_bulk, 0.1, 1.0)
-                        return round(c_bulk, 3), f"{round(cu_pct)}:{round(ag_pct)}", 0.7, "ocr_percentage"
-            except:
-                pass
-
-        # Color analysis (red=Cu, green=Ag)
-        try:
-            hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
-            lower_red1 = np.array([0, 100, 100]); upper_red1 = np.array([10, 255, 255])
-            lower_red2 = np.array([170, 100, 100]); upper_red2 = np.array([180, 255, 255])
-            mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
-            mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
-            mask_cu = cv2.bitwise_or(mask_red1, mask_red2)
-
-            lower_green = np.array([40, 40, 40]); upper_green = np.array([80, 255, 255])
-            mask_ag = cv2.inRange(hsv, lower_green, upper_green)
-
-            cu_pixels = np.sum(mask_cu > 0)
-            ag_pixels = np.sum(mask_ag > 0)
-
-            if cu_pixels > 100 and ag_pixels > 100:
-                ratio = cu_pixels / ag_pixels
-                c_bulk = 1.0 / ratio if ratio > 0 else 1.0
-                c_bulk = np.clip(c_bulk, 0.1, 1.0)
-                ratio_str = f"{round(ratio,1)}:1"
-                return round(c_bulk, 3), ratio_str, 0.6, "color_analysis"
-        except:
-            pass
-
+    def extract_composition_skimage(pil_img):
+        """Simple color-based analysis for Cu (red) and Ag (green)."""
+        img_rgb = np.array(pil_img.convert('RGB'))
+        hsv = color.rgb2hsv(img_rgb)
+        
+        # Red mask (hue near 0 or 1)
+        red_mask1 = (hsv[..., 0] < 0.05) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
+        red_mask2 = (hsv[..., 0] > 0.95) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
+        red_mask = red_mask1 | red_mask2
+        
+        # Green mask (hue ~0.33)
+        green_mask = (np.abs(hsv[..., 0] - 0.33) < 0.1) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
+        
+        cu_pixels = np.sum(red_mask)
+        ag_pixels = np.sum(green_mask)
+        
+        if cu_pixels > 100 and ag_pixels > 100:
+            ratio = cu_pixels / ag_pixels
+            c_bulk = 1.0 / ratio if ratio > 0 else 1.0
+            c_bulk = np.clip(c_bulk, 0.1, 1.0)
+            ratio_str = f"{round(ratio,1)}:1"
+            return round(c_bulk, 3), ratio_str, 0.6, "color_analysis"
         return None, None, 0.0, "failed"
+
+# -------------------- Google Cloud Vision OCR (optional) --------------------
+def google_vision_ocr(pil_img):
+    """Use Google Vision API to read text labels (requires credentials)."""
+    if not GOOGLE_VISION_AVAILABLE:
+        return None
+    try:
+        client = vision.ImageAnnotatorClient()
+        buffer = io.BytesIO()
+        pil_img.save(buffer, format='PNG')
+        content = buffer.getvalue()
+        image = vision.Image(content=content)
+        response = client.text_detection(image=image)
+        texts = response.text_annotations
+        if texts:
+            return texts[0].description
+    except Exception as e:
+        st.warning(f"Google Vision OCR failed: {e}")
+    return None
 
 # -------------------- Helper functions (always available) --------------------
 def list_images_in_folder(folder_path):
@@ -312,11 +271,11 @@ Generate a natural language query starting with "Design a core-shell with". Outp
 # -------------------- STREAMLIT UI --------------------
 st.set_page_config(page_title="CoreShellGPT – Intelligent Input Generator", layout="wide")
 st.title("🧪 CoreShellGPT – Intelligent Experimental Input Generator")
-st.markdown("**Automatic features enabled only if OpenCV + Tesseract are installed.**")
+st.markdown("**Automatic detection using scikit‑image (pure Python).**")
 
 with st.expander("🔧 System Info"):
-    st.write(f"**OpenCV:** {'✅' if CV2_AVAILABLE else '❌'} (automatic detection will be hidden if missing)")
-    st.write(f"**Tesseract OCR:** {'✅' if TESSERACT_AVAILABLE else '❌'} (scale‑bar OCR disabled if missing)")
+    st.write(f"**scikit‑image:** {'✅' if SKIMAGE_AVAILABLE else '❌'} (auto-detection will be hidden if missing)")
+    st.write(f"**Google Cloud Vision:** {'✅' if GOOGLE_VISION_AVAILABLE else '❌'} (OCR if API key set)")
     st.write(f"**Transformers:** {'✅' if TRANSFORMERS_AVAILABLE else '❌'} (LLM disabled if missing)")
 
 st.sidebar.header("🧠 LLM Settings")
@@ -354,25 +313,24 @@ with col1:
         st.image(geo_img, caption=geo_source, use_container_width=True)
         st.session_state['geo_image'] = geo_img
 
-        if CV2_AVAILABLE:
-            if st.button("🔍 Auto-detect Scale Bar & Core", key="auto_geo"):
+        if SKIMAGE_AVAILABLE:
+            if st.button("🔍 Auto-detect Scale Bar & Core (skimage)", key="auto_geo"):
                 with st.spinner("Analyzing image..."):
-                    scale_px, scale_label, scale_conf = detect_scale_bar(geo_img)
+                    # Step 1: detect scale bar
+                    scale_px, _, scale_conf = detect_scale_bar_skimage(geo_img)
 
-                    if scale_px and scale_label:
-                        match = re.search(r'(\d+(?:\.\d+)?)', scale_label)
-                        if match:
-                            scale_nm = float(match.group(1))
+                    if scale_px:
+                        st.success(f"✅ Scale bar detected: {scale_px:.1f} pixels")
+
+                        # Ask user for scale value (OCR would come here)
+                        scale_nm = st.number_input("Enter scale bar value (nm)", value=20.0, step=5.0, key="scale_nm_auto")
+                        if scale_nm > 0:
                             scale_nm_per_px = scale_nm / scale_px
-
-                            st.success(f"✅ Scale bar detected: {scale_label}")
-                            st.info(f"📏 Scale: {scale_nm_per_px:.4f} nm/pixel (bar = {scale_px}px)")
-
+                            st.info(f"📏 Scale: {scale_nm_per_px:.4f} nm/pixel")
                             st.session_state['scale_nm_per_px'] = scale_nm_per_px
-                            st.session_state['scale_label'] = scale_label
 
-                            diam_nm, diam_px, diam_conf, debug = detect_core_diameter(geo_img, scale_nm_per_px)
-
+                            # Step 2: detect core
+                            diam_nm, diam_px, diam_conf, debug = detect_core_diameter_skimage(geo_img, scale_nm_per_px)
                             if diam_nm:
                                 st.success(f"✅ Core diameter: {diam_nm:.2f} nm ({diam_px:.1f} px)")
                                 st.info(f"🎯 Detection confidence: {diam_conf:.1%}")
@@ -384,13 +342,10 @@ with col1:
                                     st.rerun()
                             else:
                                 st.warning("⚠️ Could not detect core automatically. Try manual entry below.")
-                        else:
-                            st.error(f"❌ Could not parse scale value from: {scale_label}")
                     else:
-                        st.error("❌ Could not detect scale bar. Please enter manually below.")
-                        st.info("💡 Tip: Make sure your image has a visible scale bar with 'nm' label")
+                        st.error("❌ Could not detect scale bar. Please enter manually.")
         else:
-            st.info("Automatic detection disabled (OpenCV not installed). Please enter values manually.")
+            st.info("Automatic detection disabled (scikit‑image not installed). Please enter manually.")
 
         st.markdown("---")
         st.markdown("**Manual Entry**")
@@ -402,7 +357,7 @@ with col1:
                 st.session_state['scale_nm_per_px'] = scale_nm_manual / scale_px_manual
                 st.success(f"Scale set: {scale_nm_manual/scale_px_manual:.4f} nm/pixel")
 
-        if 'scale_nm_per_px' in st.session_state or True:  # always allow manual diameter
+        if 'scale_nm_per_px' in st.session_state or True:
             diam_manual = st.number_input("Core diameter (nm)", min_value=0.0, value=20.0, step=0.1, key="diam_manual")
             if st.button("Set core diameter", key="set_diam_manual"):
                 st.session_state['core_diameter'] = diam_manual
@@ -417,13 +372,12 @@ with col2:
         st.image(comp_img, caption=comp_source, use_container_width=True)
         st.session_state['comp_image'] = comp_img
 
-        if CV2_AVAILABLE:
-            if st.button("🔍 Auto-extract Composition", key="auto_comp"):
+        if SKIMAGE_AVAILABLE:
+            if st.button("🔍 Auto-extract Composition (color analysis)", key="auto_comp"):
                 with st.spinner("Analyzing composition..."):
-                    c_bulk, ratio_str, conf, method = extract_composition_from_image(comp_img)
-
+                    c_bulk, ratio_str, conf, method = extract_composition_skimage(comp_img)
                     if c_bulk is not None:
-                        st.success(f"✅ Extracted: Cu:Ag = {ratio_str}")
+                        st.success(f"✅ Extracted: Cu:Ag ≈ {ratio_str}")
                         st.info(f"c_bulk = {c_bulk} (confidence: {conf:.1%}, method: {method})")
 
                         if st.button("Use this ratio", key="accept_comp"):
@@ -431,9 +385,33 @@ with col2:
                             st.session_state['ratio_str'] = ratio_str
                             st.rerun()
                     else:
-                        st.warning("⚠️ Could not extract automatically. Enter manually below.")
+                        st.warning("⚠️ Could not extract automatically. Try manual entry or OCR.")
         else:
-            st.info("Automatic extraction disabled (OpenCV not installed). Please enter ratio manually.")
+            st.info("Automatic color analysis disabled (scikit‑image not installed).")
+
+        # Optional Google Vision OCR
+        if GOOGLE_VISION_AVAILABLE:
+            if st.button("📝 Read labels with Google Vision", key="ocr_comp"):
+                with st.spinner("Running OCR..."):
+                    text = google_vision_ocr(comp_img)
+                    if text:
+                        st.text_area("OCR result", text, height=100)
+                        # Try to parse ratio
+                        match = re.search(r'cu\s*:\s*ag\s*=\s*(\d+)\s*:\s*(\d+)', text, re.IGNORECASE)
+                        if match:
+                            cu = int(match.group(1))
+                            ag = int(match.group(2))
+                            if ag > 0:
+                                ratio = cu / ag
+                                c_bulk = 1.0 / ratio
+                                c_bulk = np.clip(c_bulk, 0.1, 1.0)
+                                st.success(f"Found Cu:Ag = {cu}:{ag} → c_bulk = {c_bulk}")
+                                if st.button("Use this ratio (OCR)", key="accept_ocr"):
+                                    st.session_state['c_bulk'] = round(c_bulk, 3)
+                                    st.session_state['ratio_str'] = f"{cu}:{ag}"
+                                    st.rerun()
+                    else:
+                        st.warning("No text detected.")
 
         st.markdown("---")
         st.markdown("**Manual Entry**")
