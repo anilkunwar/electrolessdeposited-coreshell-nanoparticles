@@ -1,109 +1,163 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+CoreShellGPT – Experimental Input Generator
+-------------------------------------------
+- Scans experimental_images/geometry and experimental_images/composition_ratio
+- Uses OpenCV + pytesseract for automatic core diameter & c_bulk extraction
+- Falls back to manual entry if dependencies are missing
+- Geometry conversion (L0, fc, rs) using your exact formulas
+- Generates natural language query with GPT‑2 / Qwen
+"""
+
 import streamlit as st
 import numpy as np
-import cv2
-from PIL import Image
-import re
-import json
-import torch
-from transformers import (
-    GPT2Tokenizer, GPT2LMHeadModel,
-    AutoTokenizer, AutoModelForCausalLM
-)
-import pytesseract  # optional, for reading scale‑bar text
-from collections import OrderedDict
 import os
 import glob
+import re
+import json
+from datetime import datetime
+from collections import OrderedDict
 
-# ---------- Helper: LLM loading (cached) ----------
+# -------------------- Dependency checks --------------------
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    st.error("PIL/Pillow not installed. Please run: pip install Pillow")
+    st.stop()
+
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    st.warning("OpenCV (cv2) not installed. Automatic image extraction disabled. You will need to enter values manually.")
+
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    # Not critical, we just won't use OCR
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    st.warning("PyTorch not installed. LLM query generation will be disabled.")
+
+try:
+    from transformers import GPT2Tokenizer, GPT2LMHeadModel, AutoTokenizer, AutoModelForCausalLM
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    st.warning("Transformers not installed. LLM query generation will be disabled.")
+
+# -------------------- Helper: LLM loading (cached) --------------------
 @st.cache_resource(show_spinner="Loading selected LLM...")
 def load_llm(backend: str):
+    if not TRANSFORMERS_AVAILABLE or not TORCH_AVAILABLE:
+        return None, None
     if "GPT-2" in backend:
         tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
         model = GPT2LMHeadModel.from_pretrained('gpt2')
     else:
-        # Qwen variants
         model_name = "Qwen/Qwen2-0.5B-Instruct" if "Qwen2-0.5B" in backend else "Qwen/Qwen2.5-0.5B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto", trust_remote_code=True)
     model.eval()
     return tokenizer, model
 
-# ---------- Image processing functions ----------
-def extract_core_diameter(image_pil, scale_px, scale_nm):
-    """Return core diameter in nm."""
-    img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # Red mask (HSV wraps around 0)
-    lower_red1 = np.array([0, 100, 100])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 100, 100])
-    upper_red2 = np.array([180, 255, 255])
-    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    mask = cv2.bitwise_or(mask1, mask2)
-
-    # Find largest red contour
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
+# -------------------- Image processing functions (only if cv2 available) --------------------
+def extract_core_diameter_cv2(image_pil, scale_px, scale_nm):
+    """Return core diameter in nm using OpenCV."""
+    if not CV2_AVAILABLE:
         return None
-    largest = max(contours, key=cv2.contourArea)
-    (x, y), radius = cv2.minEnclosingCircle(largest)
-    diameter_px = 2 * radius
-    diameter_nm = diameter_px * scale_nm / scale_px
-    return round(diameter_nm, 2)
+    try:
+        img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-def extract_c_bulk(image_pil, use_ocr=True):
-    """Return (c_bulk, ratio_text) from elemental map."""
-    img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        # Red mask (HSV wraps around 0)
+        lower_red1 = np.array([0, 100, 100])
+        upper_red1 = np.array([10, 255, 255])
+        lower_red2 = np.array([170, 100, 100])
+        upper_red2 = np.array([180, 255, 255])
+        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+        mask = cv2.bitwise_or(mask1, mask2)
 
-    # Red (Cu) mask
-    lower_red1 = np.array([0, 100, 100])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170, 100, 100])
-    upper_red2 = np.array([180, 255, 255])
-    mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
-    mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
-    mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        largest = max(contours, key=cv2.contourArea)
+        (x, y), radius = cv2.minEnclosingCircle(largest)
+        diameter_px = 2 * radius
+        diameter_nm = diameter_px * scale_nm / scale_px
+        return round(diameter_nm, 2)
+    except Exception as e:
+        st.warning(f"OpenCV core extraction failed: {e}")
+        return None
 
-    # Green (Ag) mask
-    lower_green = np.array([40, 40, 40])
-    upper_green = np.array([80, 255, 255])
-    mask_green = cv2.inRange(hsv, lower_green, upper_green)
+def extract_c_bulk_cv2(image_pil, use_ocr=True):
+    """Return (c_bulk, ratio_text) from elemental map using OpenCV and optional OCR."""
+    if not CV2_AVAILABLE:
+        return None, None
+    try:
+        img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # Optionally use OCR to read text labels
-    if use_ocr:
-        try:
-            text = pytesseract.image_to_string(image_pil)
-            match = re.search(r'Cu\s*:\s*Ag\s*=\s*(\d+)\s*:\s*(\d+)', text, re.IGNORECASE)
-            if match:
-                x, y = int(match.group(1)), int(match.group(2))
-                ratio = x / y
-                c_bulk = 1.0 / ratio if ratio != 0 else 1.0
-                c_bulk = np.clip(c_bulk, 0.1, 1.0)
-                return round(c_bulk, 3), f"{x}:{y}"
-        except:
-            pass
+        # Red (Cu) mask
+        lower_red1 = np.array([0, 100, 100])
+        upper_red1 = np.array([10, 255, 255])
+        lower_red2 = np.array([170, 100, 100])
+        upper_red2 = np.array([180, 255, 255])
+        mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
+        mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
+        mask_red = cv2.bitwise_or(mask_red1, mask_red2)
 
-    # Fallback to pixel counting
-    n_cu = np.sum(mask_red > 0)
-    n_ag = np.sum(mask_green > 0)
-    if n_ag == 0:
-        return 1.0, "Ag not found"
-    ratio = n_cu / n_ag
-    c_bulk = 1.0 / ratio
-    c_bulk = np.clip(c_bulk, 0.1, 1.0)
-    # Simplify ratio to nearest integer fraction
-    # (this is just a rough representation)
-    ratio_int = int(round(ratio))
-    if ratio_int < 1:
-        ratio_int = 1
-    ratio_str = f"{ratio_int}:1"
-    return round(c_bulk, 3), ratio_str
+        # Green (Ag) mask
+        lower_green = np.array([40, 40, 40])
+        upper_green = np.array([80, 255, 255])
+        mask_green = cv2.inRange(hsv, lower_green, upper_green)
+
+        # OCR if available and requested
+        if use_ocr and TESSERACT_AVAILABLE:
+            try:
+                text = pytesseract.image_to_string(image_pil)
+                match = re.search(r'Cu\s*:\s*Ag\s*=\s*(\d+)\s*:\s*(\d+)', text, re.IGNORECASE)
+                if match:
+                    x, y = int(match.group(1)), int(match.group(2))
+                    ratio = x / y
+                    c_bulk = 1.0 / ratio if ratio != 0 else 1.0
+                    c_bulk = np.clip(c_bulk, 0.1, 1.0)
+                    return round(c_bulk, 3), f"{x}:{y}"
+            except:
+                pass
+
+        # Fallback to pixel counting
+        n_cu = np.sum(mask_red > 0)
+        n_ag = np.sum(mask_green > 0)
+        if n_ag == 0:
+            return 1.0, "Ag not found"
+        ratio = n_cu / n_ag
+        c_bulk = 1.0 / ratio
+        c_bulk = np.clip(c_bulk, 0.1, 1.0)
+        ratio_int = int(round(ratio))
+        if ratio_int < 1:
+            ratio_int = 1
+        ratio_str = f"{ratio_int}:1"
+        return round(c_bulk, 3), ratio_str
+    except Exception as e:
+        st.warning(f"OpenCV c_bulk extraction failed: {e}")
+        return None, None
 
 # ---------- Query generation by LLM ----------
 def generate_query(llm_tokenizer, llm_model, params, backend):
+    if not TRANSFORMERS_AVAILABLE or not TORCH_AVAILABLE:
+        return "LLM not available. Please use the default query below."
     prompt = f"""Based on experimental images:
 - Core diameter = {params['core_diameter']} nm
 - Cu:Ag ratio = {params['ratio_str']} → c_bulk = {params['c_bulk']}
@@ -126,7 +180,6 @@ Generate a natural language query for a core‑shell nanoparticle designer that 
         outputs = llm_model.generate(inputs, max_new_tokens=80, temperature=0.3, do_sample=True,
                                      pad_token_id=llm_tokenizer.eos_token_id)
     answer = llm_tokenizer.decode(outputs[0], skip_special_tokens=True)
-    # Extract sentence after the prompt
     if full_prompt in answer:
         answer = answer.replace(full_prompt, "").strip()
     return answer
@@ -141,7 +194,7 @@ def list_images_in_folder(folder_path):
         files.extend(glob.glob(os.path.join(folder_path, ext)))
     return sorted(files)
 
-# ---------- Streamlit UI ----------
+# -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="Experimental Input Generator for CoreShellGPT", layout="wide")
 st.title("🧪 CoreShellGPT – Experimental Input Generator")
 st.markdown("Upload your HRTEM (core–shell) and elemental mapping images to extract parameters and generate a ready‑to‑paste query for the CoreShellGPT designer.")
@@ -150,7 +203,8 @@ st.markdown("Upload your HRTEM (core–shell) and elemental mapping images to ex
 GEOMETRY_FOLDER = "experimental_images/geometry"
 COMPOSITION_FOLDER = "experimental_images/composition_ratio"
 
-# LLM selection
+# Sidebar: LLM selection
+st.sidebar.header("🧠 LLM Settings")
 llm_options = ["GPT-2 (default, fastest startup)", 
                "Qwen2-0.5B-Instruct (better JSON)", 
                "Qwen2.5-0.5B-Instruct (newest, recommended)"]
@@ -173,7 +227,7 @@ else:  # Provide L0
     L0_input = st.sidebar.number_input("L0 (nm)", min_value=10.0, max_value=100.0, value=60.0, step=1.0)
 
 rs_default = st.sidebar.number_input("Default rs (shell fraction)", min_value=0.01, max_value=0.6, value=0.1, step=0.01)
-use_ocr = st.sidebar.checkbox("Use OCR to read scale bar / ratio labels", value=True)
+use_ocr = st.sidebar.checkbox("Use OCR to read scale bar / ratio labels", value=True, disabled=not TESSERACT_AVAILABLE)
 
 # Main area: two columns
 col1, col2 = st.columns(2)
@@ -204,16 +258,19 @@ with col1:
     scale_nm = st.number_input("Scale bar length (nm)", value=20.0, key="scale_nm")
     scale_px = st.number_input("Scale bar length (pixels)", value=100, key="scale_px")
 
-    if st.button("Extract core diameter", key="extract_geo"):
-        if 'geo_image' in st.session_state:
-            diam = extract_core_diameter(st.session_state['geo_image'], scale_px, scale_nm)
-            if diam:
-                st.session_state['core_diameter'] = diam
-                st.success(f"Core diameter = {diam} nm")
+    if CV2_AVAILABLE:
+        if st.button("Extract core diameter (auto)", key="extract_geo"):
+            if 'geo_image' in st.session_state:
+                diam = extract_core_diameter_cv2(st.session_state['geo_image'], scale_px, scale_nm)
+                if diam:
+                    st.session_state['core_diameter'] = diam
+                    st.success(f"Core diameter = {diam} nm")
+                else:
+                    st.error("Could not detect core. Try adjusting HSV thresholds or manual input.")
             else:
-                st.error("Could not detect core. Try adjusting HSV thresholds or manual input.")
-        else:
-            st.warning("Please load a geometry image first.")
+                st.warning("Please load a geometry image first.")
+    else:
+        st.info("OpenCV not installed. Automatic extraction disabled.")
 
     # Manual diameter entry
     diam_manual = st.number_input("Or enter core diameter manually (nm)", min_value=0.0, value=20.0, step=0.1)
@@ -243,14 +300,20 @@ with col2:
             st.image(comp_img, caption="Uploaded composition image", use_container_width=True)
             st.session_state['comp_image'] = comp_img
 
-    if st.button("Extract c_bulk", key="extract_comp"):
-        if 'comp_image' in st.session_state:
-            c_bulk, ratio_str = extract_c_bulk(st.session_state['comp_image'], use_ocr=use_ocr)
-            st.session_state['c_bulk'] = c_bulk
-            st.session_state['ratio_str'] = ratio_str
-            st.success(f"Cu:Ag = {ratio_str} → c_bulk = {c_bulk}")
-        else:
-            st.warning("Please load a composition image first.")
+    if CV2_AVAILABLE:
+        if st.button("Extract c_bulk (auto)", key="extract_comp"):
+            if 'comp_image' in st.session_state:
+                c_bulk, ratio_str = extract_c_bulk_cv2(st.session_state['comp_image'], use_ocr=use_ocr)
+                if c_bulk is not None:
+                    st.session_state['c_bulk'] = c_bulk
+                    st.session_state['ratio_str'] = ratio_str
+                    st.success(f"Cu:Ag = {ratio_str} → c_bulk = {c_bulk}")
+                else:
+                    st.error("Could not extract c_bulk.")
+            else:
+                st.warning("Please load a composition image first.")
+    else:
+        st.info("OpenCV not installed. Automatic extraction disabled.")
 
     # Manual ratio entry
     st.markdown("**Or enter ratio manually**")
@@ -318,7 +381,7 @@ if 'core_diameter' in st.session_state and 'c_bulk' in st.session_state:
     else:
         st.info("Load an LLM from the sidebar to generate a natural language query.")
 
-    # Also provide a simple default query (fallback)
+    # Always provide a simple default query (fallback)
     default_query = f"Design a core-shell with L0={params['L0']:.1f} nm, fc={params['fc']:.3f}, c_bulk={params['c_bulk']:.2f}, rs={params['rs']:.2f}, time=1e-3 s from HRTEM (core {params['core_diameter']} nm) and EDS (Cu:Ag={params['ratio_str']})."
     st.text_area("📋 Default query (can be edited):", default_query, height=100)
 
