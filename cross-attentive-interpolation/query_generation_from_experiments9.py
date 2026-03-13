@@ -219,7 +219,7 @@ def parse_scale_value_universal(text):
             pass
     return None
 
-# -------------------- OCR helpers (Tesseract first, then Google Vision) --------------------
+# -------------------- OCR helpers (Tesseract first, then Google Vision, then EasyOCR) --------------------
 def extract_text_tesseract(pil_crop):
     """Run Tesseract OCR on a PIL image crop. Returns cleaned text."""
     if not TESSERACT_AVAILABLE:
@@ -254,9 +254,20 @@ def extract_text_google(pil_crop):
         pass
     return ""
 
+def easyocr_fallback(pil_crop):
+    """Optional ultra-robust OCR fallback – one pip install."""
+    if not EASYOCR_AVAILABLE:
+        return ""
+    try:
+        reader = easyocr.Reader(['en'], gpu=False, download_enabled=True)
+        result = reader.readtext(np.array(pil_crop), detail=0)
+        return " ".join(result)
+    except:
+        return ""
+
 def extract_text_from_crop(pil_crop):
     """
-    Try multiple OCR engines in order: Tesseract (fast, local), Google Vision (optional).
+    Try multiple OCR engines in order: Tesseract (fast, local), Google Vision (optional), EasyOCR.
     Returns cleaned text.
     """
     text = extract_text_tesseract(pil_crop)
@@ -264,8 +275,9 @@ def extract_text_from_crop(pil_crop):
         return text
     if GOOGLE_VISION_AVAILABLE:
         text = extract_text_google(pil_crop)
-        return text
-    return ""
+        if text:
+            return text
+    return easyocr_fallback(pil_crop)
 
 # -------------------- Enhanced scale bar detection --------------------
 def detect_scale_bar_robust(pil_img):
@@ -307,8 +319,8 @@ def detect_scale_bar_robust(pil_img):
         edges = cv2.Canny(prep_img, 50, 150)
 
         # Hough lines for both orientations
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=30,
-                                minLineLength=width//15, maxLineGap=10)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=25,
+                                minLineLength=width//20, maxLineGap=15)
 
         if lines is None:
             continue
@@ -341,14 +353,8 @@ def detect_scale_bar_robust(pil_img):
             if line_region.size > 0 and np.mean(line_region) < 180:
                 continue  # too dark
 
-            # For vertical bars, swap coordinates for consistent handling
-            if is_vertical:
-                # Keep as is, but later annotation will draw correctly
-                pass
-
             # ---- OCR label extraction near line ----
             scale_nm = None
-            ocr_confidence = 0.0
 
             # Define search regions (below/above for horizontal, left/right for vertical)
             search_boxes = []
@@ -392,27 +398,23 @@ def detect_scale_bar_robust(pil_img):
                     value = parse_scale_value_universal(text)
                     if value:
                         scale_nm = value
-                        ocr_confidence = 0.8  # placeholder; could be refined
                         break
 
             # Score candidate: longer lines, away from edges, OCR success bonus
             y_center = (y1 + y2) / 2
             x_center = (x1 + x2) / 2
-            # Prefer bottom half for horizontal, right side for vertical (common placements)
             if is_horizontal:
                 pos_score = 1.0 if y_center > 0.6 * height else 0.5
             else:
                 pos_score = 1.0 if x_center > 0.6 * width else 0.5
 
-            score = length * pos_score
-            if scale_nm:
-                score *= 2  # boost if we found a label
+            score = length * pos_score * (2 if scale_nm else 1)
 
             candidate_bars.append({
                 'line': ((x1, y1), (x2, y2)),
                 'length_px': length,
                 'label_nm': scale_nm,
-                'confidence': min(0.9, ocr_confidence if scale_nm else 0.3),
+                'confidence': 0.9 if scale_nm else 0.65,
                 'score': score,
                 'is_horizontal': is_horizontal
             })
@@ -422,8 +424,7 @@ def detect_scale_bar_robust(pil_img):
         return None, None, 0.0, pil_img, None
 
     # Sort by score descending
-    candidate_bars.sort(key=lambda x: x['score'], reverse=True)
-    best = candidate_bars[0]
+    best = max(candidate_bars, key=lambda x: x['score'])
 
     # Annotate
     annotated = annotate_geometry(pil_img, scale_line=best['line'], core_info=None)
@@ -785,6 +786,7 @@ with st.expander("🔧 System Info"):
     st.write(f"**scikit‑image:** {'✅' if SKIMAGE_AVAILABLE else '❌'}")
     st.write(f"**Tesseract OCR:** {'✅' if TESSERACT_AVAILABLE else '❌'}")
     st.write(f"**Google Cloud Vision:** {'✅' if GOOGLE_VISION_AVAILABLE else '❌'}")
+    st.write(f"**EasyOCR:** {'✅' if EASYOCR_AVAILABLE else '❌'}")
     st.write(f"**OpenCV:** {'✅' if CV2_AVAILABLE else '❌'}")
     st.write(f"**Transformers:** {'✅' if TRANSFORMERS_AVAILABLE else '❌'}")
 
@@ -826,52 +828,60 @@ with col1:
 
         if SKIMAGE_AVAILABLE:
             if st.button("🔍 Auto-detect Scale Bar (Enhanced)", key="auto_geo"):
-                with st.spinner("Analyzing image with enhanced detection..."):
-                    # Use the new robust detection
+                with st.spinner("Analyzing with OpenCV line detection..."):
                     scale_px, line_coords, scale_conf, annotated_scale, scale_value = detect_scale_bar_robust(geo_img)
 
-                    if scale_px and scale_value:
-                        st.success(f"✅ Detected scale bar: {scale_value:.0f} nm ({scale_px:.1f} px)")
-                        scale_nm_per_px = scale_value / scale_px
+                    if scale_px:
+                        st.image(annotated_scale, caption="✅ Detected scale bar line", use_container_width=True)
 
-                        # Detect core (colour‑aware)
-                        img_type = classify_image_type(geo_img)
-                        if img_type == "composition":
-                            # EDS image – use red mask
-                            img_rgb = np.array(geo_img.convert('RGB'))
-                            hsv = color.rgb2hsv(img_rgb)
-                            red_mask = ((hsv[..., 0] < 0.05) | (hsv[..., 0] > 0.95)) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
-                            diam_nm, diam_px, diam_conf, core_info = extract_core_from_mask(red_mask, scale_nm_per_px)
-                            if core_info:
-                                annotated_core = annotate_geometry(geo_img, scale_line=None, core_info=core_info)
+                        if scale_value:
+                            st.success(f"Auto‑read label: {scale_value:.0f} nm")
+                            scale_nm_per_px = scale_value / scale_px
+                            proceed = True
+                        else:
+                            st.warning("Line detected – OCR label missing (Tesseract/Google unavailable).")
+                            # Show a number input for manual entry
+                            scale_nm_manual = st.number_input(
+                                "Enter the scale bar value shown in the image (nm)",
+                                value=20.0, step=5.0, key="scale_manual_after_auto"
+                            )
+                            if st.button("✅ Use this value & continue", key="confirm_scale"):
+                                scale_nm_per_px = scale_nm_manual / scale_px
+                                proceed = True
                             else:
-                                annotated_core = geo_img
-                        else:
-                            # HRTEM – use Hough on red channel
-                            diam_nm, diam_px, diam_conf, debug, annotated_core = detect_core_diameter_skimage(geo_img, scale_nm_per_px)
+                                proceed = False
 
-                        if diam_nm:
-                            st.session_state.temp_geo_detection = {
-                                'scale_nm_per_px': scale_nm_per_px,
-                                'diam_nm': diam_nm,
-                                'annotated_scale': annotated_scale,
-                                'annotated_core': annotated_core,
-                                'scale_px': scale_px,
-                                'scale_value': scale_value,
-                            }
-                            st.image(annotated_scale, caption="Detected scale bar", use_container_width=True)
-                            st.image(annotated_core, caption="Detected core", use_container_width=True)
-                            st.metric("Detected diameter", f"{diam_nm:.2f} nm")
-                        else:
-                            st.warning("Scale bar detected but core detection failed – please enter core diameter manually.")
-                            st.session_state.temp_geo_detection = {
-                                'scale_nm_per_px': scale_nm_per_px,
-                                'annotated_scale': annotated_scale,
-                                'scale_px': scale_px,
-                                'scale_value': scale_value,
-                            }
+                        if proceed:   # either auto label or user confirmed
+                            # === Core detection (unchanged) ===
+                            img_type = classify_image_type(geo_img)
+                            if img_type == "composition":
+                                img_rgb = np.array(geo_img.convert('RGB'))
+                                hsv = color.rgb2hsv(img_rgb)
+                                red_mask = ((hsv[..., 0] < 0.05) | (hsv[..., 0] > 0.95)) & (hsv[..., 1] > 0.3) & (hsv[..., 2] > 0.3)
+                                diam_nm, diam_px, diam_conf, core_info = extract_core_from_mask(red_mask, scale_nm_per_px)
+                                if core_info:
+                                    annotated_core = annotate_geometry(geo_img, scale_line=None, core_info=core_info)
+                                else:
+                                    annotated_core = geo_img
+                            else:
+                                diam_nm, diam_px, diam_conf, debug, annotated_core = detect_core_diameter_skimage(geo_img, scale_nm_per_px)
+
+                            if diam_nm:
+                                st.success(f"Core diameter: {diam_nm:.2f} nm")
+                                st.session_state.temp_geo_detection = {
+                                    'scale_nm_per_px': scale_nm_per_px,
+                                    'diam_nm': diam_nm,
+                                    'annotated_scale': annotated_scale,
+                                    'annotated_core': annotated_core,
+                                    'scale_px': scale_px,
+                                    'scale_value': scale_value or scale_nm_manual,
+                                }
+                                st.image(annotated_core, caption="Detected core", use_container_width=True)
+                                st.metric("Detected diameter", f"{diam_nm:.2f} nm")
+                            else:
+                                st.warning("Scale bar OK – core detection failed. Use manual core diameter.")
                     else:
-                        st.error("Could not detect scale bar. Please use manual entry.")
+                        st.error("No scale bar line found even with OpenCV. Try manual entry or better image contrast.")
 
             if st.session_state.get('temp_geo_detection'):
                 det = st.session_state.temp_geo_detection
