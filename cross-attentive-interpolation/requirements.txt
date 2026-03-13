@@ -24,7 +24,8 @@ einops
 sentence-transformers
 transformers
 accelerate
-opencv-python>=4.8.0
+#opencv-python>=4.8.0
+opencv-python-headless
 pillow
 numpy
 pytesseract
