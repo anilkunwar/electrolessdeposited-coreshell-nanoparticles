@@ -225,13 +225,14 @@ def annotate_composition(pil_img, ratio_str, c_bulk, masks=None):
 
 # -------------------- Image analysis functions (scikit‑image) --------------------
 if SKIMAGE_AVAILABLE:
-    # --- UPDATED: detect_scale_bar_skimage with position and length filtering ---
+    # --- IMPROVED: detect_scale_bar_skimage with brightness check, border exclusion, right-side weighting ---
     def detect_scale_bar_skimage(pil_img):
         """
-        Detect horizontal scale bar.
-        Returns (length_px, line_coords, confidence, annotated_img).
-        Now filters lines to keep only those in the top or bottom quarter of the image
-        and with length > 40 pixels (to avoid tiny artifacts).
+        Detect horizontal scale bar with improved heuristics:
+        - Exclude lines near image borders
+        - Require bright pixels (scale bar is white)
+        - Prefer lines on the right side of the image
+        - Minimum length filter
         """
         img = np.array(pil_img.convert('L'))
         height, width = img.shape
@@ -243,22 +244,37 @@ if SKIMAGE_AVAILABLE:
             (x1, y1), (x2, y2) = line
             length = np.hypot(x2 - x1, y2 - y1)
             angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
-            if angle < 10:  # near horizontal
-                # Apply position filter: keep lines in top 25% or bottom 25% of image
+            if angle < 10:
+                # 1. Exclude lines that touch the image border (common artifacts)
+                margin = 10
+                if y1 < margin or y2 < margin or y1 > height - margin or y2 > height - margin:
+                    continue
+                # 2. Check brightness along the line (scale bar is white)
+                y_min, y_max = min(y1, y2), max(y1, y2)
+                x_min, x_max = min(x1, x2), max(x1, x2)
+                line_region = img[y_min:y_max+1, x_min:x_max+1]
+                if line_region.size > 0 and np.mean(line_region) < 200:
+                    continue
+                # 3. Position filter: keep lines in top 25% or bottom 25% (common locations)
                 y_center = (y1 + y2) / 2
                 if y_center < 0.25 * height or y_center > 0.75 * height:
-                    # Minimum length filter: discard very short lines (likely artifacts)
+                    # 4. Minimum length filter
                     if length > 40:
-                        horizontal_lines.append((length, line))
+                        horizontal_lines.append((length, line, (x1+x2)/2))  # store x_center for scoring
 
         if not horizontal_lines:
-            # Fallback: if no line passes filters, return None (will trigger manual)
             return None, None, 0.0, pil_img
 
-        # Sort by length descending, pick longest
-        horizontal_lines.sort(key=lambda x: x[0], reverse=True)
-        length_px, line_coords = horizontal_lines[0]
-        confidence = 0.7
+        # 5. Score lines: combine length and right-side preference
+        scored_lines = []
+        for length, line, x_center in horizontal_lines:
+            # Weight by how far right the line is (normalized x_center/width)
+            score = length * (x_center / width)
+            scored_lines.append((score, length, line))
+
+        scored_lines.sort(key=lambda x: x[0], reverse=True)
+        best_score, length_px, line_coords = scored_lines[0]
+        confidence = 0.7  # could be based on score
         annotated = annotate_geometry(pil_img, scale_line=line_coords, core_info=None)
         return length_px, line_coords, confidence, annotated
 
