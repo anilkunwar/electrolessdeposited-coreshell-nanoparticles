@@ -3,7 +3,7 @@
 """
 CoreShellGPT – Intelligent Experimental Input Generator
 (Fully enhanced: colour‑aware detection, auto scale value, LLM verification,
- plot detection with robust OCR + LLM parsing, publication‑ready annotations)
+ plot detection with robust OCR + LLM parsing, improved scale‑bar filtering)
 """
 
 import streamlit as st
@@ -65,7 +65,7 @@ COMPOSITION_FOLDER = BASE_DIR / "experimental_images" / "composition_ratio"
 GEOMETRY_FOLDER.mkdir(parents=True, exist_ok=True)
 COMPOSITION_FOLDER.mkdir(parents=True, exist_ok=True)
 
-# -------------------- NEW: Image type classifier --------------------
+# -------------------- Image type classifier --------------------
 def classify_image_type(pil_img):
     """Return 'composition' for EDS maps, 'geometry' for HRTEM."""
     img_rgb = np.array(pil_img.convert('RGB'))
@@ -76,7 +76,7 @@ def classify_image_type(pil_img):
         return "composition"
     return "geometry"
 
-# -------------------- NEW: Auto scale value from OCR + LLM --------------------
+# -------------------- Auto scale value from OCR + LLM --------------------
 def auto_extract_scale_value(pil_img, line_coords):
     """Extract numeric scale value (nm) from the region below the detected scale bar."""
     if not line_coords:
@@ -122,7 +122,7 @@ def auto_extract_scale_value(pil_img, line_coords):
             pass
     return 20.0
 
-# -------------------- NEW: Core extraction from red mask (EDS) --------------------
+# -------------------- Core extraction from red mask (EDS) --------------------
 def extract_core_from_mask(red_mask, scale_nm_per_px):
     """Accurate diameter from red mask (EDS mode)."""
     labeled = label(red_mask.astype(int))
@@ -225,9 +225,16 @@ def annotate_composition(pil_img, ratio_str, c_bulk, masks=None):
 
 # -------------------- Image analysis functions (scikit‑image) --------------------
 if SKIMAGE_AVAILABLE:
+    # --- UPDATED: detect_scale_bar_skimage with position and length filtering ---
     def detect_scale_bar_skimage(pil_img):
-        """Detect horizontal scale bar. Returns (length_px, line_coords, confidence, annotated_img)."""
+        """
+        Detect horizontal scale bar.
+        Returns (length_px, line_coords, confidence, annotated_img).
+        Now filters lines to keep only those in the top or bottom quarter of the image
+        and with length > 40 pixels (to avoid tiny artifacts).
+        """
         img = np.array(pil_img.convert('L'))
+        height, width = img.shape
         edges = feature.canny(img, sigma=2)
         lines = probabilistic_hough_line(edges, threshold=10, line_length=20, line_gap=3)
 
@@ -236,16 +243,22 @@ if SKIMAGE_AVAILABLE:
             (x1, y1), (x2, y2) = line
             length = np.hypot(x2 - x1, y2 - y1)
             angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
-            if angle < 10 and 20 < length < 200:
-                horizontal_lines.append((length, line))
+            if angle < 10:  # near horizontal
+                # Apply position filter: keep lines in top 25% or bottom 25% of image
+                y_center = (y1 + y2) / 2
+                if y_center < 0.25 * height or y_center > 0.75 * height:
+                    # Minimum length filter: discard very short lines (likely artifacts)
+                    if length > 40:
+                        horizontal_lines.append((length, line))
 
         if not horizontal_lines:
+            # Fallback: if no line passes filters, return None (will trigger manual)
             return None, None, 0.0, pil_img
 
-        longest = max(horizontal_lines, key=lambda x: x[0])
-        length_px, line_coords = longest
+        # Sort by length descending, pick longest
+        horizontal_lines.sort(key=lambda x: x[0], reverse=True)
+        length_px, line_coords = horizontal_lines[0]
         confidence = 0.7
-        # Create annotated image (just scale bar highlighted)
         annotated = annotate_geometry(pil_img, scale_line=line_coords, core_info=None)
         return length_px, line_coords, confidence, annotated
 
@@ -355,7 +368,7 @@ if SKIMAGE_AVAILABLE:
             return c_bulk, ratio_str, confidence, annotated
         return None, None, 0.0, pil_img
 
-    # NEW: Plot classifier for composition figures
+    # Plot classifier for composition figures
     def is_plot_figure(pil_img):
         """Detect whether the image is likely a line‑scan plot (has many straight lines)."""
         img = np.array(pil_img.convert('L'))
@@ -470,7 +483,7 @@ def google_vision_ocr(pil_img):
 # -------------------- STREAMLIT UI --------------------
 st.set_page_config(page_title="CoreShellGPT – Intelligent Input Generator", layout="wide")
 st.title("🧪 CoreShellGPT – Intelligent Experimental Input Generator")
-st.markdown("**Automatic detection with colour awareness + LLM verification + plot recognition**")
+st.markdown("**Automatic detection with colour awareness + LLM verification + plot recognition + improved scale‑bar filtering**")
 
 with st.expander("🔧 System Info"):
     st.write(f"**scikit‑image:** {'✅' if SKIMAGE_AVAILABLE else '❌'}")
@@ -605,7 +618,7 @@ with col2:
         st.session_state['comp_image'] = comp_img
 
         if SKIMAGE_AVAILABLE:
-            # ---- UPDATED AUTO‑EXTRACT BUTTON with improved regex and LLM fallback ----
+            # Auto‑extract button with robust parsing
             if st.button("🔍 Auto-extract Composition", key="auto_comp"):
                 with st.spinner("Analyzing..."):
                     # 1. Check if this is a plot (line‑scan figure)
@@ -627,12 +640,11 @@ with col2:
                             st.info(f"LLM raw output: {text}")
 
                         # 2. Try to parse with flexible regex
-                        # More robust ratio patterns
                         ratio_patterns = [
-                            r'Cu:Ag\s*[:=]\s*(\d+(?:\.\d+)?)\s*[:=]\s*(\d+(?:\.\d+)?)',  # Cu:Ag=1:1 or Cu:Ag=1=1
-                            r'Cu:Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',        # Cu:Ag = 1:1
-                            r'Cu\s*:\s*Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',  # Cu : Ag = 1:1
-                            r'Cu:Ag\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',            # Cu:Ag 1:1
+                            r'Cu:Ag\s*[:=]\s*(\d+(?:\.\d+)?)\s*[:=]\s*(\d+(?:\.\d+)?)',
+                            r'Cu:Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',
+                            r'Cu\s*:\s*Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',
+                            r'Cu:Ag\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',
                         ]
                         ratio_match = None
                         for pat in ratio_patterns:
@@ -640,10 +652,8 @@ with col2:
                             if ratio_match:
                                 break
 
-                        # Bulk pattern with variations
                         bulk_match = re.search(r'(?:c_?bulk|bulk|c bulk)\s*[:=]\s*([0-9.]+)', text, re.IGNORECASE)
 
-                        # 3. If regex succeeded, use it
                         if bulk_match or ratio_match:
                             if bulk_match:
                                 c_bulk = float(bulk_match.group(1))
@@ -663,7 +673,7 @@ with col2:
                             }
                             st.success(f"✅ Extracted c_bulk = {c_bulk:.3f} and ratio = {ratio_str} from text")
                         else:
-                            # 4. If text exists but regex failed, try LLM parsing as a last resort
+                            # 3. If text exists but regex failed, try LLM parsing
                             if text and st.session_state.get('llm_model'):
                                 st.info("Attempting LLM-based parsing of messy OCR text...")
                                 prompt = f"""Extract the Cu:Ag ratio and c_bulk value from this OCR text. 
@@ -678,7 +688,6 @@ Text: {text}"""
                                 with torch.no_grad():
                                     outputs = model.generate(inputs, max_new_tokens=30, temperature=0.0)
                                 answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                                # Parse LLM's structured output
                                 ratio_part = re.search(r'RATIO:\s*([\d:.]+)', answer, re.IGNORECASE)
                                 bulk_part = re.search(r'CBULK:\s*([0-9.]+)', answer, re.IGNORECASE)
                                 if bulk_part:
@@ -703,7 +712,6 @@ Text: {text}"""
                                     else:
                                         st.error("Automatic extraction failed. Please enter manually.")
                             else:
-                                # No text or no LLM: fallback to colour analysis
                                 st.warning("Could not read labels; falling back to colour analysis.")
                                 c_bulk, ratio_str, conf, annotated = extract_composition_skimage(comp_img)
                                 if c_bulk is not None:
