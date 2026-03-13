@@ -196,6 +196,15 @@ Query Vector Design with Computer Vision and Vision LLM
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm4-streamlit-red)](https://experiments-informed-input-generator4.streamlit.app/) (cannot locate images from folders)
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm5-streamlit-red)](https://experiments-informed-input-generator5.streamlit.app/) (can locate images from folders, not able to detect structures, scales and labels)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm6-streamlit-red)](https://experiments-informed-input-generator6.streamlit.app/) (can locate images from folders, able able to detect core structures, but not the scale and labels)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm7-streamlit-red)](https://experiments-informed-input-generator7.streamlit.app/) (can locate images from folders, able able to detect core structures, but not the scale and labels)
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/exptllm8-streamlit-red)](https://experiments-informed-input-generator8.streamlit.app/) (can locate images from folders, able able to detect core structures, but not the scale and labels)
+
+
 
 
 
