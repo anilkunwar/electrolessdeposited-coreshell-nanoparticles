@@ -3,7 +3,7 @@
 """
 CoreShellGPT – Intelligent Experimental Input Generator
 (Fully enhanced: colour‑aware detection, auto scale value, LLM verification,
- plot detection for composition figures, publication‑ready annotations)
+ plot detection with robust OCR + LLM parsing, publication‑ready annotations)
 """
 
 import streamlit as st
@@ -595,7 +595,7 @@ with col1:
                 st.session_state.geo_annotated.save(buf, format="PNG")
                 st.download_button("Download PNG", data=buf.getvalue(), file_name="annotated_geometry.png", mime="image/png")
 
-# -------------------- COMPOSITION IMAGE (UPDATED) --------------------
+# -------------------- COMPOSITION IMAGE (UPDATED with robust parsing) --------------------
 with col2:
     st.subheader("📁 Elemental Mapping / Composition Image")
     comp_img, comp_source, comp_path = image_selector(COMPOSITION_FOLDER, "Composition Image", "comp")
@@ -605,7 +605,7 @@ with col2:
         st.session_state['comp_image'] = comp_img
 
         if SKIMAGE_AVAILABLE:
-            # ---- UPDATED AUTO‑EXTRACT BUTTON ----
+            # ---- UPDATED AUTO‑EXTRACT BUTTON with improved regex and LLM fallback ----
             if st.button("🔍 Auto-extract Composition", key="auto_comp"):
                 with st.spinner("Analyzing..."):
                     # 1. Check if this is a plot (line‑scan figure)
@@ -613,7 +613,7 @@ with col2:
                         st.info("📊 Plot detected – using OCR to read labels")
                         # Run OCR
                         text = google_vision_ocr(comp_img) if GOOGLE_VISION_AVAILABLE else ""
-                        # If OCR fails and LLM is loaded, ask the LLM to describe what it sees
+                        # If no text from OCR and LLM available, ask LLM to describe image (fallback)
                         if not text and st.session_state.get('llm_model'):
                             prompt = "What text labels related to Cu, Ag, ratio, or c_bulk do you see in this image? Output only the numbers."
                             tokenizer = st.session_state.llm_tokenizer
@@ -626,34 +626,94 @@ with col2:
                             text = tokenizer.decode(outputs[0], skip_special_tokens=True)
                             st.info(f"LLM raw output: {text}")
 
-                        # 2. Parse both ratio and c_bulk using improved regex
-                        ratio_match = re.search(r'Cu:Ag\s*[:=]\s*(\d+(?:\.\d+)?)\s*[:=]\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
-                        bulk_match  = re.search(r'c_bulk\s*[:=]\s*([0-9.]+)', text, re.IGNORECASE)
-
-                        if bulk_match:
-                            c_bulk = float(bulk_match.group(1))
+                        # 2. Try to parse with flexible regex
+                        # More robust ratio patterns
+                        ratio_patterns = [
+                            r'Cu:Ag\s*[:=]\s*(\d+(?:\.\d+)?)\s*[:=]\s*(\d+(?:\.\d+)?)',  # Cu:Ag=1:1 or Cu:Ag=1=1
+                            r'Cu:Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',        # Cu:Ag = 1:1
+                            r'Cu\s*:\s*Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',  # Cu : Ag = 1:1
+                            r'Cu:Ag\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',            # Cu:Ag 1:1
+                        ]
+                        ratio_match = None
+                        for pat in ratio_patterns:
+                            ratio_match = re.search(pat, text, re.IGNORECASE)
                             if ratio_match:
-                                ratio_str = f"{ratio_match.group(1)}:{ratio_match.group(2)}"
-                            else:
-                                ratio_str = "1:1"
+                                break
+
+                        # Bulk pattern with variations
+                        bulk_match = re.search(r'(?:c_?bulk|bulk|c bulk)\s*[:=]\s*([0-9.]+)', text, re.IGNORECASE)
+
+                        # 3. If regex succeeded, use it
+                        if bulk_match or ratio_match:
+                            if bulk_match:
+                                c_bulk = float(bulk_match.group(1))
+                                ratio_str = f"{ratio_match.group(1)}:{ratio_match.group(2)}" if ratio_match else "1:1"
+                            else:  # only ratio found
+                                cu = float(ratio_match.group(1))
+                                ag = float(ratio_match.group(2))
+                                ratio = cu / ag
+                                c_bulk = 1.0 / ratio if ratio > 0 else 1.0
+                                c_bulk = np.clip(c_bulk, 0.1, 1.0)
+                                ratio_str = f"{cu}:{ag}"
                             annotated = annotate_composition(comp_img, ratio_str, c_bulk)
                             st.session_state.temp_comp_detection = {
                                 'c_bulk': round(c_bulk, 3),
                                 'ratio_str': ratio_str,
                                 'annotated': annotated,
                             }
-                            st.success(f"✅ Extracted c_bulk = {c_bulk} and ratio = {ratio_str} from text")
+                            st.success(f"✅ Extracted c_bulk = {c_bulk:.3f} and ratio = {ratio_str} from text")
                         else:
-                            st.warning("Could not read labels; falling back to colour analysis.")
-                            c_bulk, ratio_str, conf, annotated = extract_composition_skimage(comp_img)
-                            if c_bulk is not None:
-                                st.session_state.temp_comp_detection = {
-                                    'c_bulk': c_bulk,
-                                    'ratio_str': ratio_str,
-                                    'annotated': annotated,
-                                }
+                            # 4. If text exists but regex failed, try LLM parsing as a last resort
+                            if text and st.session_state.get('llm_model'):
+                                st.info("Attempting LLM-based parsing of messy OCR text...")
+                                prompt = f"""Extract the Cu:Ag ratio and c_bulk value from this OCR text. 
+Possible formats: Cu:Ag=1:1, c_bulk=1.000, Cu:Ag 1:1, etc.
+Output ONLY in the format: RATIO: 1:1 | CBULK: 1.000
+Text: {text}"""
+                                tokenizer = st.session_state.llm_tokenizer
+                                model = st.session_state.llm_model
+                                inputs = tokenizer.encode(prompt, return_tensors='pt', truncation=True, max_length=256)
+                                if torch.cuda.is_available():
+                                    inputs = inputs.to('cuda')
+                                with torch.no_grad():
+                                    outputs = model.generate(inputs, max_new_tokens=30, temperature=0.0)
+                                answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                                # Parse LLM's structured output
+                                ratio_part = re.search(r'RATIO:\s*([\d:.]+)', answer, re.IGNORECASE)
+                                bulk_part = re.search(r'CBULK:\s*([0-9.]+)', answer, re.IGNORECASE)
+                                if bulk_part:
+                                    c_bulk = float(bulk_part.group(1))
+                                    ratio_str = ratio_part.group(1) if ratio_part else "1:1"
+                                    annotated = annotate_composition(comp_img, ratio_str, c_bulk)
+                                    st.session_state.temp_comp_detection = {
+                                        'c_bulk': round(c_bulk, 3),
+                                        'ratio_str': ratio_str,
+                                        'annotated': annotated,
+                                    }
+                                    st.success("✅ LLM successfully parsed messy OCR text!")
+                                else:
+                                    st.warning("Could not read labels even with LLM; falling back to colour analysis.")
+                                    c_bulk, ratio_str, conf, annotated = extract_composition_skimage(comp_img)
+                                    if c_bulk is not None:
+                                        st.session_state.temp_comp_detection = {
+                                            'c_bulk': c_bulk,
+                                            'ratio_str': ratio_str,
+                                            'annotated': annotated,
+                                        }
+                                    else:
+                                        st.error("Automatic extraction failed. Please enter manually.")
                             else:
-                                st.error("Automatic extraction failed. Please enter manually.")
+                                # No text or no LLM: fallback to colour analysis
+                                st.warning("Could not read labels; falling back to colour analysis.")
+                                c_bulk, ratio_str, conf, annotated = extract_composition_skimage(comp_img)
+                                if c_bulk is not None:
+                                    st.session_state.temp_comp_detection = {
+                                        'c_bulk': c_bulk,
+                                        'ratio_str': ratio_str,
+                                        'annotated': annotated,
+                                    }
+                                else:
+                                    st.error("Automatic extraction failed. Please enter manually.")
                     else:
                         # Not a plot – use original colour‑based method
                         c_bulk, ratio_str, conf, annotated = extract_composition_skimage(comp_img)
@@ -689,8 +749,19 @@ with col2:
                     text = google_vision_ocr(comp_img)
                     if text:
                         st.text_area("OCR result", text, height=100)
-                        ratio_match = re.search(r'Cu:Ag\s*[:=]\s*(\d+(?:\.\d+)?)\s*[:=]\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
-                        bulk_match  = re.search(r'c_bulk\s*[:=]\s*([0-9.]+)', text, re.IGNORECASE)
+                        # Use same improved regex
+                        ratio_patterns = [
+                            r'Cu:Ag\s*[:=]\s*(\d+(?:\.\d+)?)\s*[:=]\s*(\d+(?:\.\d+)?)',
+                            r'Cu:Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',
+                            r'Cu\s*:\s*Ag\s*=\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',
+                            r'Cu:Ag\s*(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)',
+                        ]
+                        ratio_match = None
+                        for pat in ratio_patterns:
+                            ratio_match = re.search(pat, text, re.IGNORECASE)
+                            if ratio_match:
+                                break
+                        bulk_match = re.search(r'(?:c_?bulk|bulk|c bulk)\s*[:=]\s*([0-9.]+)', text, re.IGNORECASE)
 
                         if bulk_match:
                             c_bulk = float(bulk_match.group(1))
