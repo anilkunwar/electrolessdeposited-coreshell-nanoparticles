@@ -3563,7 +3563,8 @@ def render_intelligent_designer_tab():
     model_choice = st.selectbox(
         "🧠 LLM Backend for Parsing & Completeness",
         options=list(LLM_MODELS.keys()),
-        index=1,  # default = Qwen2.5-1.5B (recommended)
+        index=0,  # default = Qwen2.5-0.5B (recommended)
+        #index=1,  # default = Qwen2.5-1.5B (recommended)
         key="llm_backend"
     )
     
