@@ -26,6 +26,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - **NEW**: Logo support – place a PNG or JPG file in the "logo" folder to display in the sidebar
 - **NEW**: Enhanced visual appeal with improved CSS gradients and card-like styling
 - **CLOUD EFFICIENCY**: Optimised LLM loader (low_memory, CPU‑safe, caching), lazy imports, memory‑aware model selection
+- **FIXED OOM ON MODEL SWITCH**: Explicit unloading + gc.collect() + torch.cuda.empty_cache()
 """
 
 import streamlit as st
@@ -3354,14 +3355,6 @@ def set_template(text: str):
 # ============================================================================
 # LLM LOADER – STREAMLIT CLOUD OPTIMIZED (0.5B → 3B safe)
 # ============================================================================
-#LLM_MODELS = {
-#    "Qwen2.5-0.5B-Instruct (tiny & fastest)": "Qwen/Qwen2.5-0.5B-Instruct",
-#    "Qwen2.5-1.5B-Instruct (RECOMMENDED – best balance)": "Qwen/Qwen2.5-1.5B-Instruct",
-#    "Gemma-2B (2B, good quality)": "google/gemma-2b",
-#    "Phi-3-mini-4k (3.8B – borderline, may be slow)": "microsoft/Phi-3-mini-4k-instruct",
-#    "Qwen2.5-3B-Instruct (MAX 3B – risky on Cloud)": "Qwen/Qwen2.5-3B-Instruct",
-#    "GPT-2 Medium (355M – ultra-light fallback)": "gpt2-medium",
-#}
 LLM_MODELS = {
     # --- NON-GATED (Works immediately without HF Token) ---
     "Qwen2.5-0.5B-Instruct (tiny & fastest)": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -3385,6 +3378,13 @@ def load_llm_cpu_safe(model_name: str):
     if not TRANSFORMERS_AVAILABLE:
         st.error("❌ transformers not installed.")
         return None, None, model_name
+
+    # --- FIX: force garbage collection before loading a new model ---
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    # -------------------------------------------------------------
 
     model_id = LLM_MODELS.get(model_name, model_name)
 
@@ -3576,10 +3576,29 @@ def render_intelligent_designer_tab():
         "🧠 LLM Backend for Parsing & Completeness",
         options=list(LLM_MODELS.keys()),
         index=0,  # default = Qwen2.5-0.5B (recommended)
-        #index=1,  # default = Qwen2.5-1.5B (recommended)
         key="llm_backend"
     )
-    
+
+    # ====================== FIX: EXPLICIT MODEL UNLOADING ======================
+    # Detect switch and force-free the previous model BEFORE loading the new one
+    prev_backend = st.session_state.get('llm_backend_loaded')
+    if prev_backend and prev_backend != model_choice and st.session_state.get('llm_model') is not None:
+        with st.spinner("🧹 Unloading previous LLM (freeing RAM)..."):
+            import gc
+            # Break all references
+            if 'llm_model' in st.session_state:
+                del st.session_state.llm_model
+            if 'llm_tokenizer' in st.session_state:
+                del st.session_state.llm_tokenizer
+            st.session_state.llm_model = None
+            st.session_state.llm_tokenizer = None
+            
+            gc.collect()                    # force Python GC
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()    # harmless on CPU, needed on GPU
+            st.success("✅ Previous model unloaded – ready for new LLM")
+    # ===========================================================================
+
     # Unified loader – store loaded backend in separate key
     if st.session_state.llm_available:
         tokenizer, model, active_backend = load_llm_cpu_safe(model_choice)
