@@ -3363,20 +3363,16 @@ def set_template(text: str):
 #    "GPT-2 Medium (355M – ultra-light fallback)": "gpt2-medium",
 #}
 LLM_MODELS = {
-    # --- SUB-1B MODELS (Safest & Fastest for Streamlit Cloud) ---
-    "Llama-3.2-1B-Instruct (High Logic <1B)": "meta-llama/Llama-3.2-1B-Instruct",
+    # --- NON-GATED (Works immediately without HF Token) ---
     "Qwen3.5-0.8B-Instruct (Latest 2026 - Best Efficiency)": "Qwen/Qwen3.5-0.8B-Instruct",
-    "Qwen2.5-0.5B-Instruct (tiny & fastest)": "Qwen/Qwen2.5-0.5B-Instruct",    
+    "Qwen2.5-0.5B-Instruct (tiny & fastest)": "Qwen/Qwen2.5-0.5B-Instruct",
+    "Qwen2.5-1.5B-Instruct (RECOMMENDED – best balance)": "Qwen/Qwen2.5-1.5B-Instruct",
+    "Qwen2.5-3B-Instruct (MAX 3B – risky on Cloud)": "Qwen/Qwen2.5-3B-Instruct",
     "SmolLM2-360M-Instruct (Ultra-lightweight)": "HuggingFaceTB/SmolLM2-360M-Instruct",
     "SmolLM2-135M-Instruct (Extreme Speed / Testing)": "HuggingFaceTB/SmolLM2-135M-Instruct",
     "GPT-2 Medium (355M – ultra-light fallback)": "gpt2-medium",
-    "OpenELM-450M-Instruct (Apple Edge Research)": "apple/OpenELM-450M-Instruct",
-
-    # --- 1B to 3B+ MODELS (Original List & Mid-Range) ---
-    "Qwen2.5-1.5B-Instruct (RECOMMENDED – best balance)": "Qwen/Qwen2.5-1.5B-Instruct",
-    "Gemma-2B (2B, good quality)": "google/gemma-2b",
     "Phi-3-mini-4k (3.8B – borderline, may be slow)": "microsoft/Phi-3-mini-4k-instruct",
-    "Qwen2.5-3B-Instruct (MAX 3B – risky on Cloud)": "Qwen/Qwen2.5-3B-Instruct",
+    "OpenELM-450M-Instruct (Apple Edge Research)": "apple/OpenELM-450M-Instruct",
 }
 
 @st.cache_resource(
