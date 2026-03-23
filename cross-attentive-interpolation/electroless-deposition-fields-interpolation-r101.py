@@ -3364,10 +3364,10 @@ def set_template(text: str):
 #}
 LLM_MODELS = {
     # --- NON-GATED (Works immediately without HF Token) ---
-    "Qwen3.5-0.8B-Instruct (Latest 2026 - Best Efficiency)": "Qwen/Qwen3.5-0.8B-Instruct",
     "Qwen2.5-0.5B-Instruct (tiny & fastest)": "Qwen/Qwen2.5-0.5B-Instruct",
+    "Qwen3.5-0.8B-Instruct (Latest 2026 - Best Efficiency)": "Qwen/Qwen3.5-0.8B-Instruct", # not openly available now
     "Qwen2.5-1.5B-Instruct (RECOMMENDED – best balance)": "Qwen/Qwen2.5-1.5B-Instruct",
-    "Qwen2.5-3B-Instruct (MAX 3B – risky on Cloud)": "Qwen/Qwen2.5-3B-Instruct",
+    "Qwen2.5-3B-Instruct (MAX 3B – slow on Cloud)": "Qwen/Qwen2.5-3B-Instruct",
     "SmolLM2-360M-Instruct (Ultra-lightweight)": "HuggingFaceTB/SmolLM2-360M-Instruct",
     "SmolLM2-135M-Instruct (Extreme Speed / Testing)": "HuggingFaceTB/SmolLM2-135M-Instruct",
     "GPT-2 Medium (355M – ultra-light fallback)": "gpt2-medium",
