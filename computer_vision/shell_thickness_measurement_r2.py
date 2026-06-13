@@ -1,10 +1,10 @@
 """
 CoreShellGPT: Geometric EDS Shell Thickness Extractor
 =====================================================
-Streamlit Cloud-ready application with AUTO-LOADING of all EDS images.
-Place cropped EDS images in the `images/` folder (same directory as app.py).
+Streamlit Cloud-ready with AUTO-LOADING.
+Searches app directory, parent directory, AND cwd for .png/.jpg files.
 
-Version: 2.2 (Fixed Auto-Loading for Streamlit Cloud)
+Version: 2.3 (Fixed Path Resolution for Streamlit Cloud)
 """
 
 import streamlit as st
@@ -32,11 +32,8 @@ st.title("🔬 CoreShellGPT: Geometric EDS Shell Thickness Extractor")
 st.markdown("""
 **Automated extraction of Ag shell thickness and Cu/Ag mole fraction proxies from EDS line-scan images.**
 
-📁 **Setup Instructions:**
-1. Create a folder named `images/` in the same directory as this `app.py` file
-2. Place your **cropped** EDS images inside `images/` (only colored curves, no axes/legends/TEM insets)
-3. Name files with the ratio: `CuAg_11.png`, `CuAg_21.png`, `CuAg_31.png`, `CuAg_41.png`, `CuAg_51.png`
-4. The app will auto-discover and process all images on startup
+📁 The app auto-discovers all `.png`/`.jpg` files in the app directory, its parent directory,
+AND the current working directory. Images should be **cropped** to contain ONLY the colored curves.
 """)
 
 
@@ -184,20 +181,20 @@ def detect_molar_ratio(filename):
     return "?:?"
 
 
-def discover_images(directory):
-    """Discover all image files in the specified directory."""
-    if not os.path.exists(directory):
-        return []
-    
+def discover_images(*directories):
+    """Discover all image files in the given directories (case-insensitive extension)."""
     image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}
     image_files = []
     
-    for f in sorted(os.listdir(directory)):
-        ext = Path(f).suffix.lower()
-        if ext in image_extensions:
-            filepath = os.path.join(directory, f)
-            ratio = detect_molar_ratio(f)
-            image_files.append((filepath, ratio, f))
+    for directory in directories:
+        if not os.path.exists(directory) or not os.path.isdir(directory):
+            continue
+        for f in sorted(os.listdir(directory)):
+            ext = Path(f).suffix.lower()
+            if ext in image_extensions:
+                filepath = os.path.join(directory, f)
+                ratio = detect_molar_ratio(f)
+                image_files.append((filepath, ratio, f))
     
     return image_files
 
@@ -207,13 +204,6 @@ def discover_images(directory):
 # =============================================================================
 with st.sidebar:
     st.header("⚙️ Configuration")
-    
-    # Image directory setting
-    img_dir = st.text_input(
-        "Image directory",
-        value="images",
-        help="Folder containing cropped EDS images (relative to app.py)"
-    )
     
     st.markdown("---")
     st.header("🔧 Calibration")
@@ -252,7 +242,6 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("📁 Manual Upload (Optional)")
-    st.markdown("Use only if auto-discovery fails:")
     manual_files = st.file_uploader(
         "Upload cropped EDS images", type=["png", "jpg", "jpeg"],
         accept_multiple_files=True, key="manual_upload"
@@ -260,70 +249,84 @@ with st.sidebar:
 
 
 # =============================================================================
-# RESOLVE IMAGE DIRECTORY AND DISCOVER IMAGES
+# AUTO-DISCOVER IMAGES FROM ALL RELEVANT DIRECTORIES
 # =============================================================================
 
-# Resolve the image directory path
-# In Streamlit Cloud, __file__ gives the app path, so we use its directory
+# Resolve app directory using multiple strategies
 try:
     app_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:
-    # Fallback for environments where __file__ is not defined
-    app_dir = os.getcwd()
+    app_dir = os.path.dirname(os.path.abspath("")) if os.path.abspath("") else os.getcwd()
 
-# Try multiple possible locations for images
-possible_dirs = [
-    os.path.join(app_dir, img_dir),           # images/ next to app.py
-    os.path.join(app_dir, "images"),           # default images/
-    os.path.join(os.getcwd(), img_dir),        # images/ in cwd
-    os.path.join(os.getcwd(), "images"),       # default images/ in cwd
-    img_dir,                                  # absolute or relative path as-is
-]
+parent_dir = os.path.dirname(app_dir) if app_dir else os.getcwd()
+cwd = os.getcwd()
 
+# Search ALL relevant directories
 image_list = []
-discovered_from = None
+searched_dirs = []
 
-# Try auto-discovery from each possible location
-for test_dir in possible_dirs:
-    if os.path.exists(test_dir) and os.path.isdir(test_dir):
-        found = discover_images(test_dir)
-        if found:
-            image_list = found
-            discovered_from = test_dir
-            break
+# Strategy 1: App directory itself (images next to app.py)
+if os.path.isdir(app_dir):
+    searched_dirs.append(app_dir)
+    found = discover_images(app_dir)
+    image_list.extend(found)
 
-# Fall back to manual uploads if auto-discovery found nothing
+# Strategy 2: Parent directory (images in repo root, app in subfolder)
+if os.path.isdir(parent_dir) and parent_dir != app_dir:
+    searched_dirs.append(parent_dir)
+    found = discover_images(parent_dir)
+    image_list.extend(found)
+
+# Strategy 3: Current working directory
+if os.path.isdir(cwd) and cwd not in searched_dirs:
+    searched_dirs.append(cwd)
+    found = discover_images(cwd)
+    image_list.extend(found)
+
+# Remove duplicates by filepath
+seen = set()
+unique_images = []
+for item in image_list:
+    if item[0] not in seen:
+        seen.add(item[0])
+        unique_images.append(item)
+image_list = unique_images
+
+# Fall back to manual uploads
 if manual_files and not image_list:
     image_list = []
     for f in manual_files:
         ratio = detect_molar_ratio(f.name)
         image_list.append((f, ratio, f.name))
     discovered_from = "manual upload"
-
-# =============================================================================
-# DISPLAY DISCOVERY STATUS
-# =============================================================================
-
-if discovered_from:
-    st.success(f"✅ Found {len(image_list)} image(s)" + 
-               (f" in `{discovered_from}`" if discovered_from != "manual upload" else " via manual upload"))
+elif image_list:
+    discovered_from = f"{len(image_list)} image(s) from: {', '.join(searched_dirs)}"
 else:
-    st.error("""
+    discovered_from = None
+
+
+# =============================================================================
+# DISPLAY STATUS
+# =============================================================================
+
+if discovered_from and image_list:
+    st.success(f"✅ Auto-discovered {discovered_from}")
+elif discovered_from == "manual upload":
+    st.info(f"📁 Using {len(image_list)} manually uploaded image(s)")
+else:
+    st.error(f"""
     ❌ No images found!
     
-    **Please check:**
-    1. Create a folder named `images/` in the same directory as `app.py`
-    2. Place your cropped EDS images in that folder
-    3. Or use the Manual Upload option in the sidebar
+    **Searched directories:**
+    {chr(10).join(f"  - `{d}`" for d in searched_dirs)}
     
     **Current working directory:** `{cwd}`
     **App directory:** `{app_dir}`
-    **Searched paths:** `{paths}`
-    """.format(
-        cwd=os.getcwd(),
-        app_dir=app_dir,
-        paths="`, `".join(possible_dirs)
-    ))
+    **Parent directory:** `{parent_dir}`
+    
+    Please place your `.png` or `.jpg` EDS images in one of these locations,
+    or use the Manual Upload option in the sidebar.
+    """)
 
 
 # =============================================================================
@@ -334,6 +337,17 @@ all_results = {}
 batch_results = []
 
 if image_list:
+    # Sort by ratio for consistent ordering
+    def sort_key(item):
+        ratio = item[1]
+        try:
+            parts = ratio.split(':')
+            return (int(parts[0]), int(parts[1]))
+        except:
+            return (999, 999)
+    
+    image_list = sorted(image_list, key=sort_key)
+    
     # Create tabs for each image
     tab_labels = [f"{ratio}" for _, ratio, _ in image_list]
     tabs = st.tabs(tab_labels)
@@ -550,9 +564,5 @@ with st.expander("🧠 Methodology: Improved Geometric Measurement with Ag Valid
     | Ag not detectable OR not edge-dominant | Discontinuous / No shell | 5:1 |
     | $\\delta < 1.0$ nm | Ultra-thin shell | — |
     | Otherwise | Valid Core-Shell | 3:1, 4:1 |
-    
-    ### Mole Fraction Proxy
-    
-    $$\\text{Ag \\%} \\approx \\frac{\\int I_{Ag}(x) \\, dx}{\\int I_{Ag}(x) \\, dx + \\int I_{Cu}(x) \\, dx}$$
     """)
 
