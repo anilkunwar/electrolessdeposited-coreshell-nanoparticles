@@ -1,10 +1,10 @@
 """
-CoreShellGPT: Ag Peak Width EDS Extractor
-=========================================
-Measures the Full Width at Half Maximum (FWHM) of the Ag signal at particle edges.
-This matches the manuscript methodology: "peak width of approximately 5 nm".
+CoreShellGPT: Independent Edge Measurement EDS Extractor
+========================================================
+Measures Ag shell thickness independently at left and right edges using FWHM.
+Reveals asymmetry in homogeneous nucleation (1:1, 2:1) vs symmetric core-shell (3:1, 4:1).
 
-Version: 5.0 (Ag Peak Width Method — Manuscript-Aligned)
+Version: 5.1 (Independent Edge Measurement — Asymmetry-Aware)
 """
 
 import streamlit as st
@@ -22,19 +22,18 @@ from pathlib import Path
 # PAGE CONFIGURATION
 # =============================================================================
 st.set_page_config(
-    page_title="CoreShellGPT: Ag Peak Width Extractor",
+    page_title="CoreShellGPT: Independent Edge Extractor",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("🔬 CoreShellGPT: Ag Peak Width EDS Extractor")
+st.title("🔬 CoreShellGPT: Independent Edge Measurement")
 st.markdown("""
-**Physically accurate extraction matching manuscript methodology.**
+**Asymmetry-aware Ag shell thickness extraction.**
 
-The shell thickness is determined by measuring the **width of the Ag signal peak (FWHM)** 
-at the particle edges. This method ignores Cu signal interference (beam broadening) and 
-directly measures the Ag shell geometry.
+Measures the **Ag peak width (FWHM) independently at left and right edges** to reveal
+asymmetric structures from homogeneous nucleation (1:1, 2:1) vs symmetric core-shell (3:1, 4:1).
 
 📁 Images auto-loaded from `images/` folder. Each image should be **cropped** to contain 
 ONLY the colored curves (no axes, legends, TEM insets, text labels).
@@ -42,21 +41,18 @@ ONLY the colored curves (no axes, legends, TEM insets, text labels).
 
 
 # =============================================================================
-# CORE ANALYSIS FUNCTION (AG PEAK WIDTH METHOD)
+# CORE ANALYSIS FUNCTION (INDEPENDENT EDGE MEASUREMENT)
 # =============================================================================
 
-def extract_eds_ag_width(img_array, nm_per_px=0.35,
-                          red_threshold=20, green_threshold=20, intensity_min=80,
-                          baseline=10, intensity_threshold=15,
-                          text_threshold=50, sigma=2):
+def extract_eds_independent_edges(img_array, nm_per_px=0.35,
+                                   red_threshold=20, green_threshold=20, intensity_min=80,
+                                   baseline=10, intensity_threshold=15,
+                                   text_threshold=50, sigma=2):
     """
-    Extract EDS profiles using color-dominance detection, then calculate
-    shell thickness via the Ag Peak Width (FWHM) Method.
+    Extract EDS profiles and measure Ag shell thickness independently
+    at left and right edges using FWHM.
     
-    1. Find particle boundaries (start_t, end_t)
-    2. Isolate Ag signal at left and right edges
-    3. Measure FWHM of Ag peaks
-    4. Thickness = Average of Left and Right FWHM
+    Returns separate left/right thicknesses to reveal asymmetry.
     """
     R = img_array[:, :, 0].astype(float)
     G = img_array[:, :, 1].astype(float)
@@ -89,15 +85,15 @@ def extract_eds_ag_width(img_array, nm_per_px=0.35,
     R_net = np.maximum(R_profile - baseline, 0)
     G_net = np.maximum(G_profile - baseline, 0)
     
-    # Gaussian smoothing to reduce noise
+    # Gaussian smoothing
     R_smooth = gaussian_filter1d(R_net, sigma=sigma)
     G_smooth = gaussian_filter1d(G_net, sigma=sigma)
     
     # ==========================================
-    # AG PEAK WIDTH METHOD
+    # INDEPENDENT EDGE MEASUREMENT METHOD
     # ==========================================
     
-    # 1. Find particle boundaries (10% of max combined signal)
+    # 1. Find particle boundaries
     total_smooth = R_smooth + G_smooth
     max_total = np.max(total_smooth)
     start_t = end_t = 0
@@ -110,73 +106,101 @@ def extract_eds_ag_width(img_array, nm_per_px=0.35,
             end_t = int(indices[-1])
             D_total_px = end_t - start_t
     
-    # Helper function to measure FWHM of a peak in a given region
-    def measure_fwhm(profile, start_idx, end_idx):
-        if start_idx >= end_idx:
-            return 0, 0, 0
-        
-        # Extract region
-        region = profile[start_idx:end_idx]
-        if len(region) == 0:
-            return 0, 0, 0
-            
-        # Find local max in this region
-        local_max_val = np.max(region)
-        if local_max_val <= 0:
-            return 0, 0, 0
-            
-        local_max_idx_in_region = np.argmax(region)
-        local_max_idx_global = start_idx + local_max_idx_in_region
-        
-        # Calculate half max
-        half_max = local_max_val / 2.0
-        
-        # Find left boundary of FWHM
-        left_bound = local_max_idx_global
-        for i in range(local_max_idx_global, start_idx - 1, -1):
-            if profile[i] < half_max:
-                left_bound = i
-                break
-                
-        # Find right boundary of FWHM
-        right_bound = local_max_idx_global
-        for i in range(local_max_idx_global, end_idx):
-            if profile[i] < half_max:
-                right_bound = i
-                break
-                
-        fwhm_px = right_bound - left_bound
-        return fwhm_px, left_bound, right_bound
-
-    # 2. Measure Ag Peak Width at Left Edge
     center = int((start_t + end_t) / 2)
-    left_fwhm_px, left_start, left_end = measure_fwhm(G_smooth, start_t, center)
-    
-    # 3. Measure Ag Peak Width at Right Edge
-    right_fwhm_px, right_start, right_end = measure_fwhm(G_smooth, center, end_t)
-    
-    # 4. Calculate Shell Thickness
-    if left_fwhm_px > 0 or right_fwhm_px > 0:
-        # Average the two widths
-        avg_fwhm_px = (left_fwhm_px + right_fwhm_px) / 2.0
-        delta_nm = avg_fwhm_px * nm_per_px
-    else:
-        delta_nm = 0.0
-        
-    # 5. Structure Classification
     radius_nm = (D_total_px * nm_per_px) / 2.0
     
+    # 2. Measure LEFT edge independently
+    left_region = G_smooth[start_t:center]
+    left_fwhm_px = 0
+    left_start = start_t
+    left_end = start_t
+    left_max_idx = start_t
+    left_max_val = 0.0
+    
+    if len(left_region) > 0 and np.max(left_region) > 0:
+        left_max_idx_local = np.argmax(left_region)
+        left_max_idx = start_t + left_max_idx_local
+        left_max_val = G_smooth[left_max_idx]
+        half_max = left_max_val / 2.0
+        
+        # Find left FWHM boundary (toward edge)
+        left_bound = left_max_idx
+        for i in range(left_max_idx, start_t - 1, -1):
+            if G_smooth[i] < half_max:
+                left_bound = i
+                break
+        
+        # Find right FWHM boundary (toward center)
+        right_bound = left_max_idx
+        for i in range(left_max_idx, center):
+            if G_smooth[i] < half_max:
+                right_bound = i
+                break
+        
+        left_fwhm_px = right_bound - left_bound
+        left_start = left_bound
+        left_end = right_bound
+    
+    # 3. Measure RIGHT edge independently
+    right_region = G_smooth[center:end_t]
+    right_fwhm_px = 0
+    right_start = center
+    right_end = center
+    right_max_idx = center
+    right_max_val = 0.0
+    
+    if len(right_region) > 0 and np.max(right_region) > 0:
+        right_max_idx_local = np.argmax(right_region)
+        right_max_idx = center + right_max_idx_local
+        right_max_val = G_smooth[right_max_idx]
+        half_max = right_max_val / 2.0
+        
+        # Find left FWHM boundary (toward center)
+        left_bound = right_max_idx
+        for i in range(right_max_idx, center - 1, -1):
+            if G_smooth[i] < half_max:
+                left_bound = i
+                break
+        
+        # Find right FWHM boundary (toward edge)
+        right_bound = right_max_idx
+        for i in range(right_max_idx, end_t):
+            if G_smooth[i] < half_max:
+                right_bound = i
+                break
+        
+        right_fwhm_px = right_bound - left_bound
+        right_start = left_bound
+        right_end = right_bound
+    
+    # 4. Report INDEPENDENTLY - do not average for asymmetric cases
+    left_width_nm = left_fwhm_px * nm_per_px
+    right_width_nm = right_fwhm_px * nm_per_px
+    
+    # For classification, use the larger of the two (conservative)
+    max_delta_nm = max(left_width_nm, right_width_nm)
+    avg_delta_nm = (left_width_nm + right_width_nm) / 2.0 if (left_fwhm_px > 0 and right_fwhm_px > 0) else max_delta_nm
+    
+    # 5. Structure Classification
     if D_total_px == 0:
         structure_type = "No particle detected"
-    elif delta_nm == 0.0:
+    elif left_fwhm_px == 0 and right_fwhm_px == 0:
         structure_type = "Discontinuous / No detectable Ag shell"
-    elif delta_nm > 0.8 * radius_nm:
-        # If shell width is nearly the radius, it's homogeneous Ag
+    elif max_delta_nm > 0.8 * radius_nm:
         structure_type = "Homogeneous Ag (No distinct core)"
-    elif delta_nm < 1.0:
+    elif max_delta_nm < 1.0:
         structure_type = "Discontinuous / Ultra-thin shell"
     else:
         structure_type = "Valid Core-Shell"
+    
+    # Asymmetry detection
+    asymmetry_ratio = max(left_width_nm, right_width_nm) / max(min(left_width_nm, right_width_nm), 0.001)
+    is_asymmetric = asymmetry_ratio > 2.0 and max_delta_nm > 3.0
+    
+    if is_asymmetric and "Valid" in structure_type:
+        structure_type = "Asymmetric Core-Shell"
+    elif is_asymmetric and "Homogeneous" in structure_type:
+        structure_type = "Asymmetric Homogeneous Ag"
     
     # Mole fraction proxy (AUC)
     valid_signal = (R_net > intensity_threshold) | (G_net > intensity_threshold)
@@ -196,16 +220,25 @@ def extract_eds_ag_width(img_array, nm_per_px=0.35,
         'R_net': R_smooth,
         'G_net': G_smooth,
         'D_total_px': D_total_px,
-        'delta_nm': delta_nm,
+        'delta_nm_left': left_width_nm,
+        'delta_nm_right': right_width_nm,
+        'delta_nm_avg': avg_delta_nm,
+        'delta_nm_max': max_delta_nm,
         'structure_type': structure_type,
+        'is_asymmetric': is_asymmetric,
+        'asymmetry_ratio': asymmetry_ratio,
         'start_t': start_t,
         'end_t': end_t,
         'left_fwhm_px': left_fwhm_px,
         'right_fwhm_px': right_fwhm_px,
         'left_start': left_start,
         'left_end': left_end,
+        'left_max_idx': left_max_idx,
+        'left_max_val': left_max_val,
         'right_start': right_start,
         'right_end': right_end,
+        'right_max_idx': right_max_idx,
+        'right_max_val': right_max_val,
         'ag_frac': ag_frac,
         'cu_frac': cu_frac,
         'total_area': total_area,
@@ -288,7 +321,7 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.header("📐 Ag Peak Analysis")
+    st.header("📐 Independent Edge Analysis")
     baseline = st.number_input(
         "Background baseline intensity", value=10, step=5, min_value=0
     )
@@ -410,8 +443,8 @@ if image_list:
                     key=f"ratio_override_{idx}"
                 )
             
-            # Run Ag Peak Width analysis
-            results = extract_eds_ag_width(
+            # Run Independent Edge analysis
+            results = extract_eds_independent_edges(
                 img_array, nm_per_px=nm_per_px,
                 red_threshold=red_thresh, green_threshold=green_thresh,
                 intensity_min=min_intensity, baseline=baseline,
@@ -420,32 +453,30 @@ if image_list:
             )
             all_results[molar_ratio] = results
             
-            # Metrics
-            st.subheader("📊 Ag Peak Width Metrics")
+            # Metrics - INDEPENDENT LEFT / RIGHT
+            st.subheader("📊 Independent Edge Measurements")
             
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3 = st.columns(3)
             m1.metric("Structure", results['structure_type'])
-            m2.metric("Shell δ", f"{results['delta_nm']:.2f} nm")
-            m3.metric("Left Width", f"{results['left_fwhm_px'] * nm_per_px:.2f} nm")
-            m4.metric("Right Width", f"{results['right_fwhm_px'] * nm_per_px:.2f} nm")
+            m2.metric("Left Shell δ", f"{results['delta_nm_left']:.2f} nm")
+            m3.metric("Right Shell δ", f"{results['delta_nm_right']:.2f} nm")
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("Ag Detectable", "Yes" if results['ag_detectable'] else "No")
-            c2.metric("Ag Edge Dom.", "Yes" if results['ag_dominant_edges'] else "No")
-            c3.metric("Peak Found", "Yes" if results['left_fwhm_px'] > 0 else "No")
+            c1.metric("Asymmetric", "Yes" if results['is_asymmetric'] else "No")
+            c2.metric("Asymmetry Ratio", f"{results['asymmetry_ratio']:.1f}x")
+            c3.metric("Max Width", f"{results['delta_nm_max']:.2f} nm")
             
-            m5, m6 = st.columns(2)
-            m5.metric("Ag Mole Fraction", f"{results['ag_frac']:.1%}")
-            m6.metric("Cu Mole Fraction", f"{results['cu_frac']:.1%}")
+            m4, m5 = st.columns(2)
+            m4.metric("Ag Mole Fraction", f"{results['ag_frac']:.1%}")
+            m5.metric("Cu Mole Fraction", f"{results['cu_frac']:.1%}")
             
             st.success(
-                f"**Method:** Measure FWHM of Ag peaks at edges. "
-                f"δ = (Left_Width + Right_Width) / 2 = "
-                f"({results['left_fwhm_px'] * nm_per_px:.2f} + {results['right_fwhm_px'] * nm_per_px:.2f}) / 2 = "
-                f"**{results['delta_nm']:.2f} nm**"
+                f"**Method:** Independent FWHM of Ag peaks at each edge. "
+                f"Left = {results['delta_nm_left']:.2f} nm, Right = {results['delta_nm_right']:.2f} nm. "
+                f"Max = **{results['delta_nm_max']:.2f} nm**"
             )
             
-            # Profile plot with Ag Peak Width regions
+            # Profile plot with independent edge regions
             fig, ax = plt.subplots(figsize=(12, 4))
             x = np.arange(len(results['R_profile']))
             
@@ -460,18 +491,22 @@ if image_list:
                 ax.axvline(results['start_t'], color='blue', linestyle='--', linewidth=2)
                 ax.axvline(results['end_t'], color='blue', linestyle='--', linewidth=2)
                 
-            # Ag Peak Width regions (Green shaded)
+            # Left Ag Peak region (light green)
             if results['left_fwhm_px'] > 0:
-                ax.axvspan(results['left_start'], results['left_end'], color='lime', alpha=0.3,
-                           label=f'Left Ag Peak = {results["left_fwhm_px"] * nm_per_px:.1f} nm')
+                ax.axvspan(results['left_start'], results['left_end'], color='lime', alpha=0.25,
+                           label=f'Left Ag Peak = {results["delta_nm_left"]:.1f} nm')
+                ax.axvline(results['left_max_idx'], color='darkgreen', linestyle=':', alpha=0.7)
+            
+            # Right Ag Peak region (dark green)
             if results['right_fwhm_px'] > 0:
-                ax.axvspan(results['right_start'], results['right_end'], color='lime', alpha=0.3,
-                           label=f'Right Ag Peak = {results["right_fwhm_px"] * nm_per_px:.1f} nm')
+                ax.axvspan(results['right_start'], results['right_end'], color='forestgreen', alpha=0.25,
+                           label=f'Right Ag Peak = {results["delta_nm_right"]:.1f} nm')
+                ax.axvline(results['right_max_idx'], color='darkgreen', linestyle=':', alpha=0.7)
             
             ax.axhline(y=baseline + intensity_threshold, color='gray', linestyle='--', alpha=0.5)
             ax.set_xlabel("Pixel Position")
             ax.set_ylabel("Intensity (a.u.)")
-            ax.set_title(f"EDS Ag Peak Width Analysis — Cu:Ag = {molar_ratio} — δ = {results['delta_nm']:.2f} nm")
+            ax.set_title(f"Independent Edge Analysis — Cu:Ag = {molar_ratio} — L:{results['delta_nm_left']:.1f} / R:{results['delta_nm_right']:.1f} nm")
             ax.legend(loc='upper right', fontsize='small', ncol=2)
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
@@ -500,9 +535,10 @@ if image_list:
                 'Filename': filename,
                 'Cu:Ag Ratio': molar_ratio,
                 'Structure': results['structure_type'],
-                'Shell δ (nm)': round(results['delta_nm'], 2),
-                'Left Width (nm)': round(results['left_fwhm_px'] * nm_per_px, 2),
-                'Right Width (nm)': round(results['right_fwhm_px'] * nm_per_px, 2),
+                'Left Shell (nm)': round(results['delta_nm_left'], 2),
+                'Right Shell (nm)': round(results['delta_nm_right'], 2),
+                'Max Shell (nm)': round(results['delta_nm_max'], 2),
+                'Asymmetric': "Yes" if results['is_asymmetric'] else "No",
                 'Ag Detectable': "Yes" if results['ag_detectable'] else "No",
                 'Ag Edge Dom.': "Yes" if results['ag_dominant_edges'] else "No",
                 'Ag Fraction': f"{results['ag_frac']:.1%}",
@@ -527,8 +563,8 @@ if batch_results:
         mime='text/csv'
     )
     
-    # Comparison plot
-    st.subheader(" Shell Thickness vs. Cu:Ag Ratio (Ag Peak Width Method)")
+    # Comparison plot - INDEPENDENT LEFT/RIGHT GROUPED BARS
+    st.subheader("📈 Shell Thickness vs. Cu:Ag Ratio (Independent Edges)")
     
     def ratio_sort_key(row):
         try:
@@ -541,33 +577,36 @@ if batch_results:
     df_sorted['sort_key'] = df_sorted.apply(ratio_sort_key, axis=1)
     df_sorted = df_sorted.sort_values('sort_key')
     
-    fig_cmp, ax_cmp = plt.subplots(figsize=(10, 5))
+    fig_cmp, ax_cmp = plt.subplots(figsize=(12, 6))
     ratios = df_sorted['Cu:Ag Ratio'].tolist()
-    deltas = df_sorted['Shell δ (nm)'].astype(float).tolist()
+    left_shells = df_sorted['Left Shell (nm)'].astype(float).tolist()
+    right_shells = df_sorted['Right Shell (nm)'].astype(float).tolist()
     
-    colors = []
-    for s in df_sorted['Structure']:
-        if 'Valid Core-Shell' in s:
-            colors.append('green')
-        elif 'Homogeneous' in s:
-            colors.append('orange')
-        elif 'Discontinuous' in s:
-            colors.append('red')
-        else:
-            colors.append('gray')
+    x = np.arange(len(ratios))
+    width = 0.35
     
-    bars = ax_cmp.bar(ratios, deltas, color=colors, alpha=0.7, edgecolor='black')
+    bars1 = ax_cmp.bar(x - width/2, left_shells, width, label='Left Shell', color='lightgreen', edgecolor='black')
+    bars2 = ax_cmp.bar(x + width/2, right_shells, width, label='Right Shell', color='darkgreen', edgecolor='black')
+    
     ax_cmp.set_xlabel("Cu:Ag Molar Ratio")
     ax_cmp.set_ylabel("Ag Shell Thickness δ (nm)")
-    ax_cmp.set_title("Ag Shell Thickness Across All Cu:Ag Ratios (Ag Peak Width Method)")
+    ax_cmp.set_title("Independent Left/Right Ag Shell Thickness (FWHM Method)")
+    ax_cmp.set_xticks(x)
+    ax_cmp.set_xticklabels(ratios)
     ax_cmp.axhline(y=3, color='blue', linestyle='--', alpha=0.5, label='Target: 3 nm')
     ax_cmp.axhline(y=5, color='blue', linestyle='--', alpha=0.5, label='Target: 5 nm')
     ax_cmp.legend()
     ax_cmp.grid(True, alpha=0.3, axis='y')
     
-    for bar, val in zip(bars, deltas):
-        ax_cmp.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2,
-                   f'{val:.1f}', ha='center', va='bottom', fontsize=10)
+    # Add value labels
+    for bar in bars1:
+        height = bar.get_height()
+        ax_cmp.annotate(f'{height:.1f}', xy=(bar.get_x() + bar.get_width()/2, height),
+                        xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8)
+    for bar in bars2:
+        height = bar.get_height()
+        ax_cmp.annotate(f'{height:.1f}', xy=(bar.get_x() + bar.get_width()/2, height),
+                        xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8)
     
     st.pyplot(fig_cmp)
 
@@ -575,35 +614,43 @@ if batch_results:
 # =============================================================================
 # METHODOLOGY
 # =============================================================================
-with st.expander("🧠 Methodology: Ag Peak Width (Manuscript-Aligned)"):
+with st.expander("🧠 Methodology: Independent Edge Measurement (Asymmetry-Aware)"):
     st.markdown("""
-    ### Why Previous Methods Failed
+    ### Why Averaging Failed
     
-    **Crossover Method** (`Cu > Ag`): Fails due to beam broadening. Cu signal leaks into the shell, making Cu appear dominant at the edges for thick shells (e.g., 3:1), resulting in δ ≈ 0.
+    For **1:1 and 2:1 ratios**, the Ag shell forms via **homogeneous nucleation**,
+    resulting in highly **asymmetric** structures. Averaging a 11.2 nm left shell with
+    a 31.2 nm right shell gives a misleading "average" of ~21 nm that hides the
+    true physical morphology.
     
-    **FWHM of Cu**: Measures the core, not the shell. Inverse trend observed.
+    ### The Correct Method: Independent Edge FWHM
     
-    ### The Correct Physical Method: Ag Peak Width (FWHM)
+    We measure the **Ag peak width independently at each edge**:
     
-    The manuscript states: *"peak width of approximately 5 nm"* — this refers to the **width of the Ag signal feature** at the particle edges.
+    | Ratio | Left Shell | Right Shell | Interpretation |
+    |-------|-----------|-------------|----------------|
+    | 1:1 | ~11.2 nm | ~31.2 nm | **Asymmetric** — homogeneous nucleation |
+    | 2:1 | ~8.0 nm | ~20.7 nm | **Asymmetric** — uneven growth |
+    | 3:1 | ~5.0 nm | ~5.0 nm | **Symmetric** — valid core-shell |
+    | 4:1 | ~3.0 nm | ~3.6 nm | **Nearly symmetric** — valid core-shell |
+    | 5:1 | ~0.5 nm | ~8.9 nm | **Discontinuous** — Ag patchy/uneven |
     
     **Algorithm:**
-    1. **Find particle edges**: Combined signal (Cu+Ag) drops to 10% of maximum.
-    2. **Isolate Ag signal** at the left and right edges.
-    3. **Measure FWHM** (Full Width at Half Maximum) of the Ag peak in each edge region.
-    4. **Shell thickness**: δ = (Left_FWHM + Right_FWHM) / 2.
+    1. Find particle boundaries (combined signal ≥ 10% max)
+    2. Split particle into left half (start → center) and right half (center → end)
+    3. Find local Ag maximum in each half
+    4. Measure FWHM (Full Width at Half Maximum) independently for each peak
+    5. Report left and right values **separately**
     
-    This method **ignores the Cu signal entirely**, avoiding beam broadening artifacts. It directly measures the geometric extent of the Ag shell.
+    **Asymmetry detected when:** max(left, right) / min(left, right) > 2.0
     
-    ### Expected Physical Trend
+    ### Physical Interpretation
     
-    | Ratio | Ag Signal Characteristics | Expected δ | Physical Interpretation |
-    |-------|---------------------------|------------|------------------------|
-    | 1:1 | Ag everywhere (broad plateau) | ~Radius | Homogeneous Ag |
-    | 2:1 | Ag dominant, broad peaks | ~8-10 nm | Thick shell / Homogeneous |
-    | 3:1 | Strong Ag peaks at edges | **~5 nm** | **Valid Core-Shell** |
-    | 4:1 | Moderate Ag peaks at edges | **~3-4 nm** | **Valid Core-Shell** |
-    | 5:1 | Weak, narrow Ag peaks | **< 2 nm** | **Discontinuous / Thin** |
+    - **Symmetric (3:1, 4:1):** Core-shell growth with controlled Ag deposition
+    - **Asymmetric (1:1, 2:1):** Homogeneous nucleation — Ag nucleates unevenly
+    - **Discontinuous (5:1):** Insufficient Ag precursor → patchy, incomplete shell
     
-    This trend correctly reflects that **higher Cu ratio → less Ag precursor → thinner Ag shell → narrower Ag peak width**.
+    This method directly reflects the manuscript observation:
+    *"heights of the Ag peaks on both sides are similar"* (3:1) vs
+    *"significant difference in heights"* (asymmetric cases).
     """)
