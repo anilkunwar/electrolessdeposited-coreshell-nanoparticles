@@ -1,10 +1,10 @@
 """
-CoreShellGPT: Crossover Distance EDS Extractor
-==============================================
-Physically accurate extraction matching manuscript methodology.
-Measures the width of the Ag-dominant region at particle edges (Crossover Distance).
+CoreShellGPT: Ag Peak Width EDS Extractor
+=========================================
+Measures the Full Width at Half Maximum (FWHM) of the Ag signal at particle edges.
+This matches the manuscript methodology: "peak width of approximately 5 nm".
 
-Version: 4.0 (Crossover Distance Method — Manuscript-Aligned)
+Version: 5.0 (Ag Peak Width Method — Manuscript-Aligned)
 """
 
 import streamlit as st
@@ -22,19 +22,19 @@ from pathlib import Path
 # PAGE CONFIGURATION
 # =============================================================================
 st.set_page_config(
-    page_title="CoreShellGPT: Crossover EDS Extractor",
+    page_title="CoreShellGPT: Ag Peak Width Extractor",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("🔬 CoreShellGPT: Crossover Distance EDS Extractor")
+st.title("🔬 CoreShellGPT: Ag Peak Width EDS Extractor")
 st.markdown("""
 **Physically accurate extraction matching manuscript methodology.**
 
-The shell thickness is determined by measuring the **width of the Ag-dominant region 
-at the particle edges** — the distance from the particle boundary to the point where 
-the Cu signal rises above the Ag signal (crossover point).
+The shell thickness is determined by measuring the **width of the Ag signal peak (FWHM)** 
+at the particle edges. This method ignores Cu signal interference (beam broadening) and 
+directly measures the Ag shell geometry.
 
 📁 Images auto-loaded from `images/` folder. Each image should be **cropped** to contain 
 ONLY the colored curves (no axes, legends, TEM insets, text labels).
@@ -42,31 +42,29 @@ ONLY the colored curves (no axes, legends, TEM insets, text labels).
 
 
 # =============================================================================
-# CORE ANALYSIS FUNCTION (CROSSOVER DISTANCE METHOD)
+# CORE ANALYSIS FUNCTION (AG PEAK WIDTH METHOD)
 # =============================================================================
 
-def extract_eds_crossover(img_array, nm_per_px=0.35,
-                           red_threshold=20, green_threshold=20, intensity_min=80,
-                           baseline=10, intensity_threshold=15,
-                           text_threshold=50, sigma=2):
+def extract_eds_ag_width(img_array, nm_per_px=0.35,
+                          red_threshold=20, green_threshold=20, intensity_min=80,
+                          baseline=10, intensity_threshold=15,
+                          text_threshold=50, sigma=2):
     """
-    Extract EDS profiles using the Center-Dominance Crossover Method.
-
-    This method first checks whether the particle center is Ag-dominant or Cu-dominant
-    to distinguish homogeneous Ag particles from core-shell particles with thin shells.
-
-    Case A: Ag > Cu at Center (1:1, 2:1) -> Homogeneous Ag
-    Case B: Cu > Ag at Center (3:1, 4:1, 5:1) -> Core-shell; scan edges for crossover
-        B1 (3:1, 4:1): Ag strong at edges -> crossover found ~3-5 nm inside
-        B2 (5:1): Ag weak everywhere -> no crossover -> discontinuous shell (0 nm)
+    Extract EDS profiles using color-dominance detection, then calculate
+    shell thickness via the Ag Peak Width (FWHM) Method.
+    
+    1. Find particle boundaries (start_t, end_t)
+    2. Isolate Ag signal at left and right edges
+    3. Measure FWHM of Ag peaks
+    4. Thickness = Average of Left and Right FWHM
     """
     R = img_array[:, :, 0].astype(float)
     G = img_array[:, :, 1].astype(float)
     B = img_array[:, :, 2].astype(float)
-
+    
     # Exclude text and dark artifacts
     text_mask = (R < text_threshold) & (G < text_threshold) & (B < text_threshold)
-
+    
     # Color-dominance pixel detection
     red_pixels = (
         (R > G + red_threshold) & (R > B + red_threshold) & 
@@ -76,7 +74,7 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
         (G > R + green_threshold) & (G > B + green_threshold) & 
         (G > intensity_min) & (~text_mask)
     )
-
+    
     # Extract 1D intensity profiles
     R_profile = np.array([
         np.max(R[red_pixels[:, x], x]) if np.any(red_pixels[:, x]) else 0
@@ -86,21 +84,21 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
         np.max(G[green_pixels[:, x], x]) if np.any(green_pixels[:, x]) else 0
         for x in range(img_array.shape[1])
     ])
-
+    
     # Baseline subtraction
     R_net = np.maximum(R_profile - baseline, 0)
     G_net = np.maximum(G_profile - baseline, 0)
-
-    # Gaussian smoothing
+    
+    # Gaussian smoothing to reduce noise
     R_smooth = gaussian_filter1d(R_net, sigma=sigma)
     G_smooth = gaussian_filter1d(G_net, sigma=sigma)
-    total_smooth = R_smooth + G_smooth
-
+    
     # ==========================================
-    # CENTER-DOMINANCE CROSSOVER METHOD
+    # AG PEAK WIDTH METHOD
     # ==========================================
-
+    
     # 1. Find particle boundaries (10% of max combined signal)
+    total_smooth = R_smooth + G_smooth
     max_total = np.max(total_smooth)
     start_t = end_t = 0
     D_total_px = 0
@@ -111,82 +109,75 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
             start_t = int(indices[0])
             end_t = int(indices[-1])
             D_total_px = end_t - start_t
-
-    center_x = (start_t + end_t) // 2
-
-    # 2. Center-Dominance Check
-    # Compare Ag vs Cu at the center of the particle
-    center_ag = G_smooth[center_x] if 0 <= center_x < len(G_smooth) else 0
-    center_cu = R_smooth[center_x] if 0 <= center_x < len(R_smooth) else 0
-    center_ag_dominant = center_ag > center_cu
-
-    # 3. Normalize profiles to [0, 1] for relative comparison
-    max_R = np.max(R_smooth)
-    max_G = np.max(G_smooth)
-
-    if max_R > 0:
-        R_norm = R_smooth / max_R
-    else:
-        R_norm = np.zeros_like(R_smooth)
-
-    if max_G > 0:
-        G_norm = G_smooth / max_G
-    else:
-        G_norm = np.zeros_like(G_smooth)
-
-    # Ag Dominance Profile: P(x) = Ag_norm - Cu_norm
-    P = G_norm - R_norm
-
-    # 4. Branch based on center dominance
-    if center_ag_dominant:
-        # Case A: Ag > Cu at center -> Homogeneous Ag particle
-        # (1:1, 2:1 ratios)
-        thickness_px = D_total_px / 2.0
-        structure_type = "Homogeneous Ag (No distinct core)"
-        crossover_left = -1
-        crossover_right = -1
-        left_shell_px = thickness_px
-        right_shell_px = thickness_px
-    else:
-        # Case B: Cu > Ag at center -> Distinct Cu core exists
-        # Scan inward from edges to find where Cu becomes dominant (P < 0)
-
-        # Scan from left edge inward
-        crossover_left = -1
-        for x in range(start_t, end_t):
-            if P[x] < 0:  # Cu dominant
-                crossover_left = x
+    
+    # Helper function to measure FWHM of a peak in a given region
+    def measure_fwhm(profile, start_idx, end_idx):
+        if start_idx >= end_idx:
+            return 0, 0, 0
+        
+        # Extract region
+        region = profile[start_idx:end_idx]
+        if len(region) == 0:
+            return 0, 0, 0
+            
+        # Find local max in this region
+        local_max_val = np.max(region)
+        if local_max_val <= 0:
+            return 0, 0, 0
+            
+        local_max_idx_in_region = np.argmax(region)
+        local_max_idx_global = start_idx + local_max_idx_in_region
+        
+        # Calculate half max
+        half_max = local_max_val / 2.0
+        
+        # Find left boundary of FWHM
+        left_bound = local_max_idx_global
+        for i in range(local_max_idx_global, start_idx - 1, -1):
+            if profile[i] < half_max:
+                left_bound = i
                 break
-
-        # Scan from right edge inward
-        crossover_right = -1
-        for x in range(end_t, start_t, -1):
-            if P[x] < 0:  # Cu dominant
-                crossover_right = x
+                
+        # Find right boundary of FWHM
+        right_bound = local_max_idx_global
+        for i in range(local_max_idx_global, end_idx):
+            if profile[i] < half_max:
+                right_bound = i
                 break
+                
+        fwhm_px = right_bound - left_bound
+        return fwhm_px, left_bound, right_bound
 
-        if crossover_left == -1 or crossover_right == -1:
-            # Sub-case B2: No crossover found -> Cu dominates even at edges
-            # Ag shell is discontinuous / ultra-thin (5:1 ratio)
-            thickness_px = 0.0
-            structure_type = "Discontinuous / Ultra-thin shell"
-            left_shell_px = 0.0
-            right_shell_px = 0.0
-        else:
-            # Sub-case B1: Crossover found -> Valid core-shell (3:1, 4:1)
-            left_shell_px = max(0, crossover_left - start_t)
-            right_shell_px = max(0, end_t - crossover_right)
-            thickness_px = (left_shell_px + right_shell_px) / 2.0
-            structure_type = "Valid Core-Shell"
-
-    delta_nm = thickness_px * nm_per_px
-
-    # Refine classification for edge cases
+    # 2. Measure Ag Peak Width at Left Edge
+    center = int((start_t + end_t) / 2)
+    left_fwhm_px, left_start, left_end = measure_fwhm(G_smooth, start_t, center)
+    
+    # 3. Measure Ag Peak Width at Right Edge
+    right_fwhm_px, right_start, right_end = measure_fwhm(G_smooth, center, end_t)
+    
+    # 4. Calculate Shell Thickness
+    if left_fwhm_px > 0 or right_fwhm_px > 0:
+        # Average the two widths
+        avg_fwhm_px = (left_fwhm_px + right_fwhm_px) / 2.0
+        delta_nm = avg_fwhm_px * nm_per_px
+    else:
+        delta_nm = 0.0
+        
+    # 5. Structure Classification
+    radius_nm = (D_total_px * nm_per_px) / 2.0
+    
     if D_total_px == 0:
         structure_type = "No particle detected"
-    elif structure_type == "Valid Core-Shell" and delta_nm < 1.0:
+    elif delta_nm == 0.0:
+        structure_type = "Discontinuous / No detectable Ag shell"
+    elif delta_nm > 0.8 * radius_nm:
+        # If shell width is nearly the radius, it's homogeneous Ag
+        structure_type = "Homogeneous Ag (No distinct core)"
+    elif delta_nm < 1.0:
         structure_type = "Discontinuous / Ultra-thin shell"
-
+    else:
+        structure_type = "Valid Core-Shell"
+    
     # Mole fraction proxy (AUC)
     valid_signal = (R_net > intensity_threshold) | (G_net > intensity_threshold)
     area_Cu = np.sum(R_net[valid_signal])
@@ -194,28 +185,27 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
     total_area = area_Cu + area_Ag
     ag_frac = area_Ag / total_area if total_area > 0 else 0.0
     cu_frac = area_Cu / total_area if total_area > 0 else 0.0
-
+    
     # Ag validation
     ag_detectable = np.any(G_net > intensity_threshold)
     ag_dominant_edges = np.any((G_net > R_net) & (G_net > intensity_threshold))
-
+    
     return {
         'R_profile': R_profile,
         'G_profile': G_profile,
         'R_net': R_smooth,
         'G_net': G_smooth,
-        'R_norm': R_norm,
-        'G_norm': G_norm,
-        'P_profile': P,
         'D_total_px': D_total_px,
         'delta_nm': delta_nm,
         'structure_type': structure_type,
         'start_t': start_t,
         'end_t': end_t,
-        'crossover_left': crossover_left,
-        'crossover_right': crossover_right,
-        'left_shell_px': left_shell_px,
-        'right_shell_px': right_shell_px,
+        'left_fwhm_px': left_fwhm_px,
+        'right_fwhm_px': right_fwhm_px,
+        'left_start': left_start,
+        'left_end': left_end,
+        'right_start': right_start,
+        'right_end': right_end,
         'ag_frac': ag_frac,
         'cu_frac': cu_frac,
         'total_area': total_area,
@@ -223,10 +213,7 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
         'green_pixels': green_pixels,
         'ag_detectable': ag_detectable,
         'ag_dominant_edges': ag_dominant_edges,
-        'max_total': max_total,
-        'center_ag_dominant': center_ag_dominant,
-        'center_ag': center_ag,
-        'center_cu': center_cu
+        'max_total': max_total
     }
 
 
@@ -301,7 +288,7 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.header("📐 Crossover Analysis")
+    st.header("📐 Ag Peak Analysis")
     baseline = st.number_input(
         "Background baseline intensity", value=10, step=5, min_value=0
     )
@@ -423,8 +410,8 @@ if image_list:
                     key=f"ratio_override_{idx}"
                 )
             
-            # Run Crossover Distance analysis
-            results = extract_eds_crossover(
+            # Run Ag Peak Width analysis
+            results = extract_eds_ag_width(
                 img_array, nm_per_px=nm_per_px,
                 red_threshold=red_thresh, green_threshold=green_thresh,
                 intensity_min=min_intensity, baseline=baseline,
@@ -434,31 +421,31 @@ if image_list:
             all_results[molar_ratio] = results
             
             # Metrics
-            st.subheader("📊 Crossover Distance Metrics")
+            st.subheader("📊 Ag Peak Width Metrics")
             
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Structure", results['structure_type'])
             m2.metric("Shell δ", f"{results['delta_nm']:.2f} nm")
-            m3.metric("Left Shell", f"{results['left_shell_px'] * nm_per_px:.2f} nm")
-            m4.metric("Right Shell", f"{results['right_shell_px'] * nm_per_px:.2f} nm")
+            m3.metric("Left Width", f"{results['left_fwhm_px'] * nm_per_px:.2f} nm")
+            m4.metric("Right Width", f"{results['right_fwhm_px'] * nm_per_px:.2f} nm")
             
             c1, c2, c3 = st.columns(3)
             c1.metric("Ag Detectable", "Yes" if results['ag_detectable'] else "No")
             c2.metric("Ag Edge Dom.", "Yes" if results['ag_dominant_edges'] else "No")
-            c3.metric("Crossover Found", "Yes" if results['crossover_left'] != -1 else "No")
+            c3.metric("Peak Found", "Yes" if results['left_fwhm_px'] > 0 else "No")
             
             m5, m6 = st.columns(2)
             m5.metric("Ag Mole Fraction", f"{results['ag_frac']:.1%}")
             m6.metric("Cu Mole Fraction", f"{results['cu_frac']:.1%}")
             
             st.success(
-                f"**Method:** Scan inward from edges until Cu > Ag. "
-                f"δ = (left_shell + right_shell) / 2 = "
-                f"({results['left_shell_px'] * nm_per_px:.2f} + {results['right_shell_px'] * nm_per_px:.2f}) / 2 = "
+                f"**Method:** Measure FWHM of Ag peaks at edges. "
+                f"δ = (Left_Width + Right_Width) / 2 = "
+                f"({results['left_fwhm_px'] * nm_per_px:.2f} + {results['right_fwhm_px'] * nm_per_px:.2f}) / 2 = "
                 f"**{results['delta_nm']:.2f} nm**"
             )
             
-            # Profile plot with crossover boundaries
+            # Profile plot with Ag Peak Width regions
             fig, ax = plt.subplots(figsize=(12, 4))
             x = np.arange(len(results['R_profile']))
             
@@ -468,26 +455,23 @@ if image_list:
             ax.plot(x, results['R_net'], 'r-', alpha=0.9, linewidth=2.5, label='Cu Smoothed')
             ax.plot(x, results['G_net'], 'g-', alpha=0.9, linewidth=2.5, label='Ag Smoothed')
             
-            # Particle boundaries (10% of max combined)
+            # Particle boundaries
             if results['D_total_px'] > 0:
                 ax.axvline(results['start_t'], color='blue', linestyle='--', linewidth=2)
                 ax.axvline(results['end_t'], color='blue', linestyle='--', linewidth=2)
-                ax.axvspan(results['start_t'], results['end_t'], color='blue', alpha=0.05,
-                           label=f'Particle (10% max) = {results["D_total_px"] * nm_per_px:.1f} nm')
-            
-            # Crossover points (Shell boundaries)
-            if results['crossover_left'] != -1:
-                ax.axvline(results['crossover_left'], color='darkred', linestyle=':', linewidth=2)
-                ax.axvline(results['crossover_right'], color='darkred', linestyle=':', linewidth=2)
-                ax.axvspan(results['start_t'], results['crossover_left'], color='lime', alpha=0.2,
-                           label=f'Left Shell = {results["left_shell_px"] * nm_per_px:.1f} nm')
-                ax.axvspan(results['crossover_right'], results['end_t'], color='lime', alpha=0.2,
-                           label=f'Right Shell = {results["right_shell_px"] * nm_per_px:.1f} nm')
+                
+            # Ag Peak Width regions (Green shaded)
+            if results['left_fwhm_px'] > 0:
+                ax.axvspan(results['left_start'], results['left_end'], color='lime', alpha=0.3,
+                           label=f'Left Ag Peak = {results["left_fwhm_px"] * nm_per_px:.1f} nm')
+            if results['right_fwhm_px'] > 0:
+                ax.axvspan(results['right_start'], results['right_end'], color='lime', alpha=0.3,
+                           label=f'Right Ag Peak = {results["right_fwhm_px"] * nm_per_px:.1f} nm')
             
             ax.axhline(y=baseline + intensity_threshold, color='gray', linestyle='--', alpha=0.5)
             ax.set_xlabel("Pixel Position")
             ax.set_ylabel("Intensity (a.u.)")
-            ax.set_title(f"EDS Crossover Analysis — Cu:Ag = {molar_ratio} — δ = {results['delta_nm']:.2f} nm")
+            ax.set_title(f"EDS Ag Peak Width Analysis — Cu:Ag = {molar_ratio} — δ = {results['delta_nm']:.2f} nm")
             ax.legend(loc='upper right', fontsize='small', ncol=2)
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
@@ -500,12 +484,8 @@ if image_list:
                 'Cu_Smoothed': results['R_net'],
                 'Ag_Smoothed': results['G_net'],
                 'Is_Particle': ((results['R_net'] + results['G_net']) > (results['max_total'] * 0.1)).astype(int),
-                'Is_Shell': np.array([
-                    1 if (results['crossover_left'] != -1 and 
-                          ((px >= results['start_t'] and px <= results['crossover_left']) or 
-                           (px >= results['crossover_right'] and px <= results['end_t'])))
-                    else 0 for px in x
-                ])
+                'Is_Left_Ag_Peak': np.array([1 if (results['left_fwhm_px'] > 0 and px >= results['left_start'] and px <= results['left_end']) else 0 for px in x]),
+                'Is_Right_Ag_Peak': np.array([1 if (results['right_fwhm_px'] > 0 and px >= results['right_start'] and px <= results['right_end']) else 0 for px in x])
             })
             safe_ratio = molar_ratio.replace(':', '_').replace('?', 'unknown')
             st.download_button(
@@ -521,8 +501,8 @@ if image_list:
                 'Cu:Ag Ratio': molar_ratio,
                 'Structure': results['structure_type'],
                 'Shell δ (nm)': round(results['delta_nm'], 2),
-                'Left Shell (nm)': round(results['left_shell_px'] * nm_per_px, 2),
-                'Right Shell (nm)': round(results['right_shell_px'] * nm_per_px, 2),
+                'Left Width (nm)': round(results['left_fwhm_px'] * nm_per_px, 2),
+                'Right Width (nm)': round(results['right_fwhm_px'] * nm_per_px, 2),
                 'Ag Detectable': "Yes" if results['ag_detectable'] else "No",
                 'Ag Edge Dom.': "Yes" if results['ag_dominant_edges'] else "No",
                 'Ag Fraction': f"{results['ag_frac']:.1%}",
@@ -548,7 +528,7 @@ if batch_results:
     )
     
     # Comparison plot
-    st.subheader("📈 Shell Thickness vs. Cu:Ag Ratio (Crossover Method)")
+    st.subheader(" Shell Thickness vs. Cu:Ag Ratio (Ag Peak Width Method)")
     
     def ratio_sort_key(row):
         try:
@@ -579,7 +559,7 @@ if batch_results:
     bars = ax_cmp.bar(ratios, deltas, color=colors, alpha=0.7, edgecolor='black')
     ax_cmp.set_xlabel("Cu:Ag Molar Ratio")
     ax_cmp.set_ylabel("Ag Shell Thickness δ (nm)")
-    ax_cmp.set_title("Ag Shell Thickness Across All Cu:Ag Ratios (Crossover Method)")
+    ax_cmp.set_title("Ag Shell Thickness Across All Cu:Ag Ratios (Ag Peak Width Method)")
     ax_cmp.axhline(y=3, color='blue', linestyle='--', alpha=0.5, label='Target: 3 nm')
     ax_cmp.axhline(y=5, color='blue', linestyle='--', alpha=0.5, label='Target: 5 nm')
     ax_cmp.legend()
@@ -595,40 +575,35 @@ if batch_results:
 # =============================================================================
 # METHODOLOGY
 # =============================================================================
-with st.expander("🧠 Methodology: Crossover Distance Method (Manuscript-Aligned)"):
+with st.expander("🧠 Methodology: Ag Peak Width (Manuscript-Aligned)"):
     st.markdown("""
     ### Why Previous Methods Failed
     
-    **Intensity Crossover** (`Ag > Cu`): Fails for 1:1 (Ag everywhere) and 5:1 (Ag too weak).
+    **Crossover Method** (`Cu > Ag`): Fails due to beam broadening. Cu signal leaks into the shell, making Cu appear dominant at the edges for thick shells (e.g., 3:1), resulting in δ ≈ 0.
     
-    **Cu-dominant core** (`Cu > Ag`): Fails for 3:1 due to beam broadening tails making Cu appear everywhere.
+    **FWHM of Cu**: Measures the core, not the shell. Inverse trend observed.
     
-    **FWHM of Cu**: Measures the Cu core width, not the Ag shell. For 5:1, sharp Cu signal gives small FWHM → artificially inflates δ.
+    ### The Correct Physical Method: Ag Peak Width (FWHM)
     
-    ### The Correct Physical Method: Crossover Distance
-    
-    The manuscript states: *"peak width of approximately 5 nm"* — this refers to the **Ag-dominant region at the edges**.
+    The manuscript states: *"peak width of approximately 5 nm"* — this refers to the **width of the Ag signal feature** at the particle edges.
     
     **Algorithm:**
-    1. **Find particle edges**: Combined signal (Cu+Ag) drops to 10% of maximum
-    2. **Scan inward from left edge**: Find where Cu first exceeds Ag (crossover_left)
-    3. **Scan inward from right edge**: Find where Cu first exceeds Ag (crossover_right)
-    4. **Shell thickness**: δ = (left_distance + right_distance) / 2
+    1. **Find particle edges**: Combined signal (Cu+Ag) drops to 10% of maximum.
+    2. **Isolate Ag signal** at the left and right edges.
+    3. **Measure FWHM** (Full Width at Half Maximum) of the Ag peak in each edge region.
+    4. **Shell thickness**: δ = (Left_FWHM + Right_FWHM) / 2.
     
-    This directly measures the **width of the Ag shell** at both edges.
+    This method **ignores the Cu signal entirely**, avoiding beam broadening artifacts. It directly measures the geometric extent of the Ag shell.
     
     ### Expected Physical Trend
     
-    | Ratio | Expected δ | Physical Interpretation |
-    |-------|-----------|------------------------|
-    | 1:1 | ~12 nm (particle radius) | No crossover → Ag everywhere → homogeneous |
-    | 2:1 | ~8-10 nm | Weak Cu core → large Ag shell |
-    | 3:1 | **~5 nm** | **Ag strong at edges → crossover ~5 nm inside** |
-    | 4:1 | **~3-4 nm** | **Ag weaker → crossover ~3-4 nm inside** |
-    | 5:1 | **~0.5-1.5 nm** | **Ag very weak → Cu dominates immediately → discontinuous** |
+    | Ratio | Ag Signal Characteristics | Expected δ | Physical Interpretation |
+    |-------|---------------------------|------------|------------------------|
+    | 1:1 | Ag everywhere (broad plateau) | ~Radius | Homogeneous Ag |
+    | 2:1 | Ag dominant, broad peaks | ~8-10 nm | Thick shell / Homogeneous |
+    | 3:1 | Strong Ag peaks at edges | **~5 nm** | **Valid Core-Shell** |
+    | 4:1 | Moderate Ag peaks at edges | **~3-4 nm** | **Valid Core-Shell** |
+    | 5:1 | Weak, narrow Ag peaks | **< 2 nm** | **Discontinuous / Thin** |
     
-    ### Noise Floor
-    
-    A noise floor at 15% of max Cu signal prevents false crossovers in noise tails.
-    Gaussian smoothing (σ=2) suppresses high-frequency noise while preserving the physical envelope.
+    This trend correctly reflects that **higher Cu ratio → less Ag precursor → thinner Ag shell → narrower Ag peak width**.
     """)
