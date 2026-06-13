@@ -54,6 +54,13 @@ Robust models
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/pfm23-streamlit-red)](https://electrolessdeposition-phasefieldsimulation23.streamlit.app/)  # theory of electrostatic double layer incorporated in pfm22
 
+# Experimental Validation of Phase Field Model
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/validation1-streamlit-blue)](https://shell-thickness-measurement1.streamlit.app/ )  # measurement is not theoretically accurate
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/validation2-streamlit-blue)](https://shell-thickness-measurement2.streamlit.app/ )  # measurement is theoretically accurate
+
+
 
 Cross-Attentive Interpolator for Optimization of Deposit Concentration and Lengths
 
