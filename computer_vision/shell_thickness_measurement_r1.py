@@ -129,13 +129,28 @@ if uploaded_file is not None:
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader("️ Image & Mask Analysis")
+        st.subheader("🖼️ Image & Mask Analysis")
         st.image(image, caption="Uploaded Cropped Image", use_column_width=True)
         
-        # Generate Binary Mask for Visual Proof
+        # Generate 2D Binary Mask for Visual Proof
+        # Create a 2D mask by extending the 1D profile vertically
+        mask_2d = np.zeros_like(R, dtype=bool)  # Same shape as R channel (2D)
+        mask_2d[ag_dominant_mask, :] = True  # Apply 1D mask to all rows
+        
+        # Create RGB mask image
         mask_img = np.zeros_like(img_array)
-        mask_img[ag_dominant_mask] = [0, 255, 0] # Highlight Ag regions in pure green
-        st.image(mask_img, caption="Algorithm Mask (Green = Identified Ag Shell)", use_column_width=True)
+        mask_img[mask_2d] = [0, 255, 0]  # Highlight Ag regions in pure green
+        
+        st.image(mask_img, caption="Algorithm Mask (Green = Identified Ag Shell Regions)", use_column_width=True)
+        
+        # Show the 1D profile mask
+        st.markdown("**1D Ag-Dominant Mask Profile:**")
+        fig_mask, ax_mask = plt.subplots(figsize=(10, 1))
+        ax_mask.imshow(ag_dominant_mask.reshape(1, -1), aspect='auto', cmap='Greens', vmin=0, vmax=1)
+        ax_mask.set_xlabel("Pixel Position (x)")
+        ax_mask.set_yticks([])
+        ax_mask.set_title("Binary Mask: Green = Ag > Cu")
+        st.pyplot(fig_mask)
 
     with col2:
         st.subheader("📊 Extracted Metrics")
@@ -170,7 +185,7 @@ if uploaded_file is not None:
     # DATA EXPORT
     # ==========================================
     st.markdown("---")
-    st.subheader(" Export Extracted Data")
+    st.subheader("💾 Export Extracted Data")
     
     df = pd.DataFrame({
         'Pixel_X': x,
@@ -188,7 +203,7 @@ if uploaded_file is not None:
     )
 
 else:
-    st.info(" Please upload an image in the sidebar to begin analysis.")
+    st.info("👈 Please upload an image in the sidebar to begin analysis.")
 
 # ==========================================
 # THEORETICAL FOOTER
