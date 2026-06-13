@@ -50,12 +50,12 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
                            baseline=10, intensity_threshold=15,
                            text_threshold=50, sigma=2):
     """
-    Extract EDS profiles using color-dominance detection, then calculate
-    shell thickness via the Crossover Distance Method.
+    Extract EDS profiles using the Normalized Crossover Method.
     
-    1. Find particle edges: combined signal (Cu+Ag) drops to 10% of maximum
-    2. Scan inward from edges to find where Cu > Ag (crossover point)
-    3. Shell thickness = distance from edge to crossover point
+    This method compares the RELATIVE dominance of Ag vs. Cu signals,
+    which directly correlates with shell thickness:
+    - Ag dominant (P(x) > 0) → Thick shell
+    - Cu dominant (P(x) < 0) → Thin shell
     """
     R = img_array[:, :, 0].astype(float)
     G = img_array[:, :, 1].astype(float)
@@ -88,16 +88,35 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
     R_net = np.maximum(R_profile - baseline, 0)
     G_net = np.maximum(G_profile - baseline, 0)
     
-    # Gaussian smoothing to reduce noise
+    # Gaussian smoothing
     R_smooth = gaussian_filter1d(R_net, sigma=sigma)
     G_smooth = gaussian_filter1d(G_net, sigma=sigma)
+    
+    # ==========================================
+    # NORMALIZED CROSSOVER METHOD
+    # ==========================================
+    
+    # 1. Normalize profiles to [0, 1]
+    max_R = np.max(R_smooth)
+    max_G = np.max(G_smooth)
+    
+    if max_R > 0:
+        R_norm = R_smooth / max_R
+    else:
+        R_norm = np.zeros_like(R_smooth)
+        
+    if max_G > 0:
+        G_norm = G_smooth / max_G
+    else:
+        G_norm = np.zeros_like(G_smooth)
+    
+    # 2. Calculate Ag Dominance Profile: P(x) = Ag_norm - Cu_norm
+    # P(x) > 0 means Ag is dominant (thick shell)
+    # P(x) < 0 means Cu is dominant (thin shell)
+    P = G_norm - R_norm
+    
+    # 3. Find particle boundaries (10% of max combined signal)
     total_smooth = R_smooth + G_smooth
-    
-    # ==========================================
-    # CROSSOVER DISTANCE METHOD
-    # ==========================================
-    
-    # 1. Find particle boundaries (10% of max combined signal)
     max_total = np.max(total_smooth)
     start_t = end_t = 0
     D_total_px = 0
@@ -109,46 +128,41 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
             end_t = int(indices[-1])
             D_total_px = end_t - start_t
     
-    # 2. Find crossover points: scan inward from edges until Cu > Ag
-    # Use noise floor to avoid false crossovers in noise tails
-    max_cu = np.max(R_smooth)
-    noise_floor = max_cu * 0.15  # Ignore noise below 15% of max Cu
+    # 4. Scan inward from edges to find where P(x) drops below 0 (crossover)
+    # This is where Cu becomes dominant over Ag
     
     # Scan from left edge inward
     crossover_left = -1
     for x in range(start_t, end_t):
-        if R_smooth[x] > G_smooth[x] and R_smooth[x] > noise_floor:
+        if P[x] < 0:  # Cu dominant
             crossover_left = x
             break
     
     # Scan from right edge inward
     crossover_right = -1
     for x in range(end_t, start_t, -1):
-        if R_smooth[x] > G_smooth[x] and R_smooth[x] > noise_floor:
+        if P[x] < 0:  # Cu dominant
             crossover_right = x
             break
     
-    # 3. Calculate shell thickness
+    # 5. Calculate shell thickness
     if crossover_left == -1 or crossover_right == -1:
         # No crossover found: Ag > Cu everywhere → homogeneous Ag
         thickness_px = D_total_px / 2.0
         structure_type = "Homogeneous Ag (No distinct core)"
     else:
-        left_shell_px = crossover_left - start_t
-        right_shell_px = end_t - crossover_right
+        left_shell_px = max(0, crossover_left - start_t)
+        right_shell_px = max(0, end_t - crossover_right)
         thickness_px = (left_shell_px + right_shell_px) / 2.0
         structure_type = "Valid Core-Shell"
     
     delta_nm = thickness_px * nm_per_px
     
-    # 4. Refine structure classification
+    # 6. Refine structure classification
     if D_total_px == 0:
         structure_type = "No particle detected"
     elif delta_nm < 1.0 and structure_type == "Valid Core-Shell":
         structure_type = "Discontinuous / Ultra-thin shell"
-    elif structure_type == "Homogeneous Ag (No distinct core)" and delta_nm > 15:
-        # For 1:1, the "shell" is the whole particle → show as homogeneous
-        structure_type = "Homogeneous Ag (No distinct core)"
     
     # Mole fraction proxy (AUC)
     valid_signal = (R_net > intensity_threshold) | (G_net > intensity_threshold)
@@ -167,6 +181,9 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
         'G_profile': G_profile,
         'R_net': R_smooth,
         'G_net': G_smooth,
+        'R_norm': R_norm,
+        'G_norm': G_norm,
+        'P_profile': P,  # Ag dominance profile
         'D_total_px': D_total_px,
         'delta_nm': delta_nm,
         'structure_type': structure_type,
@@ -183,8 +200,7 @@ def extract_eds_crossover(img_array, nm_per_px=0.35,
         'green_pixels': green_pixels,
         'ag_detectable': ag_detectable,
         'ag_dominant_edges': ag_dominant_edges,
-        'max_total': max_total,
-        'max_cu': max_cu
+        'max_total': max_total
     }
 
 
