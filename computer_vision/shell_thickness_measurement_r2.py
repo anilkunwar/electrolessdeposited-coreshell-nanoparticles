@@ -1,10 +1,9 @@
 """
 CoreShellGPT: Geometric EDS Shell Thickness Extractor
 =====================================================
-Streamlit Cloud-ready with AUTO-LOADING.
-Searches app directory, parent directory, AND cwd for .png/.jpg files.
+Auto-loads all .png/.jpg files from the `images/` folder next to app.py.
 
-Version: 2.3 (Fixed Path Resolution for Streamlit Cloud)
+Version: 2.4 (Fixed: images/ adjacent to app.py)
 """
 
 import streamlit as st
@@ -32,8 +31,8 @@ st.title("🔬 CoreShellGPT: Geometric EDS Shell Thickness Extractor")
 st.markdown("""
 **Automated extraction of Ag shell thickness and Cu/Ag mole fraction proxies from EDS line-scan images.**
 
-📁 The app auto-discovers all `.png`/`.jpg` files in the app directory, its parent directory,
-AND the current working directory. Images should be **cropped** to contain ONLY the colored curves.
+📁 Images are auto-loaded from the `images/` folder (same directory as `app.py`).
+Each image should be **cropped** to contain ONLY the colored curves (no axes, legends, TEM insets).
 """)
 
 
@@ -174,29 +173,28 @@ def detect_molar_ratio(filename):
         match = re.search(pattern, filename, re.IGNORECASE)
         if match:
             return f"{match.group(1)}:{match.group(2)}"
-    # Fallback: extract first two digits
     digits = re.findall(r'(\d)', filename)
     if len(digits) >= 2:
         return f"{digits[0]}:{digits[1]}"
     return "?:?"
 
 
-def discover_images(*directories):
-    """Discover all image files in the given directories (case-insensitive extension)."""
+def load_images_from_dir(directory):
+    """Load all image files from a directory. Returns list of (filepath, ratio, filename)."""
     image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}
-    image_files = []
+    results = []
     
-    for directory in directories:
-        if not os.path.exists(directory) or not os.path.isdir(directory):
-            continue
-        for f in sorted(os.listdir(directory)):
-            ext = Path(f).suffix.lower()
-            if ext in image_extensions:
-                filepath = os.path.join(directory, f)
-                ratio = detect_molar_ratio(f)
-                image_files.append((filepath, ratio, f))
+    if not os.path.exists(directory) or not os.path.isdir(directory):
+        return results
     
-    return image_files
+    for f in sorted(os.listdir(directory)):
+        ext = Path(f).suffix.lower()
+        if ext in image_extensions:
+            filepath = os.path.join(directory, f)
+            ratio = detect_molar_ratio(f)
+            results.append((filepath, ratio, f))
+    
+    return results
 
 
 # =============================================================================
@@ -249,83 +247,62 @@ with st.sidebar:
 
 
 # =============================================================================
-# AUTO-DISCOVER IMAGES FROM ALL RELEVANT DIRECTORIES
+# AUTO-DISCOVER IMAGES FROM images/ FOLDER
 # =============================================================================
 
-# Resolve app directory using multiple strategies
+# Primary location: images/ folder next to app.py
 try:
     app_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:
-    app_dir = os.path.dirname(os.path.abspath("")) if os.path.abspath("") else os.getcwd()
+    app_dir = os.getcwd()
 
-parent_dir = os.path.dirname(app_dir) if app_dir else os.getcwd()
-cwd = os.getcwd()
+images_dir = os.path.join(app_dir, "images")
 
-# Search ALL relevant directories
-image_list = []
-searched_dirs = []
+# Fallback locations if images/ doesn't exist
+fallback_dirs = [
+    os.path.join(os.path.dirname(app_dir), "images") if app_dir else None,
+    os.path.join(os.getcwd(), "images"),
+    os.path.join(os.getcwd(), "images"),
+]
 
-# Strategy 1: App directory itself (images next to app.py)
-if os.path.isdir(app_dir):
-    searched_dirs.append(app_dir)
-    found = discover_images(app_dir)
-    image_list.extend(found)
+# Load images
+image_list = load_images_from_dir(images_dir)
 
-# Strategy 2: Parent directory (images in repo root, app in subfolder)
-if os.path.isdir(parent_dir) and parent_dir != app_dir:
-    searched_dirs.append(parent_dir)
-    found = discover_images(parent_dir)
-    image_list.extend(found)
+# Try fallbacks if primary is empty
+if not image_list:
+    for fallback in fallback_dirs:
+        if fallback and os.path.isdir(fallback):
+            image_list = load_images_from_dir(fallback)
+            if image_list:
+                images_dir = fallback
+                break
 
-# Strategy 3: Current working directory
-if os.path.isdir(cwd) and cwd not in searched_dirs:
-    searched_dirs.append(cwd)
-    found = discover_images(cwd)
-    image_list.extend(found)
-
-# Remove duplicates by filepath
-seen = set()
-unique_images = []
-for item in image_list:
-    if item[0] not in seen:
-        seen.add(item[0])
-        unique_images.append(item)
-image_list = unique_images
-
-# Fall back to manual uploads
+# Manual upload fallback
 if manual_files and not image_list:
     image_list = []
     for f in manual_files:
         ratio = detect_molar_ratio(f.name)
         image_list.append((f, ratio, f.name))
-    discovered_from = "manual upload"
-elif image_list:
-    discovered_from = f"{len(image_list)} image(s) from: {', '.join(searched_dirs)}"
-else:
-    discovered_from = None
-
+    images_dir = "manual upload"
 
 # =============================================================================
 # DISPLAY STATUS
 # =============================================================================
 
-if discovered_from and image_list:
-    st.success(f"✅ Auto-discovered {discovered_from}")
-elif discovered_from == "manual upload":
-    st.info(f"📁 Using {len(image_list)} manually uploaded image(s)")
+if image_list:
+    st.success(f"✅ Loaded {len(image_list)} image(s) from `{images_dir}`")
 else:
     st.error(f"""
-    ❌ No images found!
+    ❌ No images found in `images/` folder!
     
-    **Searched directories:**
-    {chr(10).join(f"  - `{d}`" for d in searched_dirs)}
-    
-    **Current working directory:** `{cwd}`
+    **Expected location:** `{images_dir}`
     **App directory:** `{app_dir}`
-    **Parent directory:** `{parent_dir}`
+    **Current working directory:** `{os.getcwd()}`
     
-    Please place your `.png` or `.jpg` EDS images in one of these locations,
-    or use the Manual Upload option in the sidebar.
+    Please ensure:
+    1. A folder named `images/` exists next to `app.py`
+    2. Your cropped `.png` or `.jpg` EDS files are inside it
+    3. Or use the Manual Upload option in the sidebar
     """)
 
 
@@ -337,18 +314,17 @@ all_results = {}
 batch_results = []
 
 if image_list:
-    # Sort by ratio for consistent ordering
+    # Sort by ratio
     def sort_key(item):
-        ratio = item[1]
         try:
-            parts = ratio.split(':')
+            parts = item[1].split(':')
             return (int(parts[0]), int(parts[1]))
         except:
             return (999, 999)
     
     image_list = sorted(image_list, key=sort_key)
     
-    # Create tabs for each image
+    # Create tabs
     tab_labels = [f"{ratio}" for _, ratio, _ in image_list]
     tabs = st.tabs(tab_labels)
     
@@ -362,7 +338,7 @@ if image_list:
             
             img_array = np.array(image)
             
-            # Allow manual override of ratio
+            # Ratio display with override
             col_info1, col_info2 = st.columns([1, 2])
             with col_info1:
                 st.image(image, caption=f"{filename}", use_column_width=True)
@@ -383,7 +359,7 @@ if image_list:
             )
             all_results[molar_ratio] = results
             
-            # Display metrics
+            # Metrics
             st.subheader("📊 Geometric Metrics")
             
             m1, m2, m3, m4 = st.columns(4)
@@ -430,7 +406,7 @@ if image_list:
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
             
-            # Data export
+            # Export
             df = pd.DataFrame({
                 'Pixel_X': x,
                 'Cu_Intensity': results['R_profile'],
@@ -449,7 +425,6 @@ if image_list:
                 key=f"download_{idx}"
             )
             
-            # Add to batch results
             batch_results.append({
                 'Filename': filename,
                 'Cu:Ag Ratio': molar_ratio,
@@ -466,7 +441,7 @@ if image_list:
 
 
 # =============================================================================
-# BATCH SUMMARY TABLE
+# BATCH SUMMARY
 # =============================================================================
 if batch_results:
     st.markdown("---")
@@ -528,7 +503,7 @@ if batch_results:
 
 
 # =============================================================================
-# FOOTER: METHODOLOGY
+# METHODOLOGY
 # =============================================================================
 with st.expander("🧠 Methodology: Improved Geometric Measurement with Ag Validation"):
     st.markdown("""
@@ -565,4 +540,3 @@ with st.expander("🧠 Methodology: Improved Geometric Measurement with Ag Valid
     | $\\delta < 1.0$ nm | Ultra-thin shell | — |
     | Otherwise | Valid Core-Shell | 3:1, 4:1 |
     """)
-
