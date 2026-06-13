@@ -1,11 +1,10 @@
-
 """
 CoreShellGPT: Geometric EDS Shell Thickness Extractor
 =====================================================
-Streamlit Cloud-ready application for automated EDS line-scan analysis
-of Cu-Ag core-shell nanoparticles using the geometric diameter method.
+Streamlit Cloud-ready application with AUTO-LOADING of all EDS images
+in the app directory. Processes all Cu:Ag ratios automatically on startup.
 
-Version: 2.0 (Improved with Ag Validation)
+Version: 2.1 (Auto-Loading + Ag Validation)
 """
 
 import streamlit as st
@@ -15,6 +14,8 @@ import matplotlib.pyplot as plt
 from scipy import ndimage
 import pandas as pd
 import re
+import os
+from pathlib import Path
 
 
 # =============================================================================
@@ -31,8 +32,8 @@ st.title("🔬 CoreShellGPT: Geometric EDS Shell Thickness Extractor")
 st.markdown("""
 **Automated extraction of Ag shell thickness and Cu/Ag mole fraction proxies from EDS line-scan images.**
 
-⚠️ **CRITICAL PRE-PROCESSING:** Before uploading, crop each image to contain **ONLY** the colored 
-line-scan curves (red = Cu, green = Ag). Remove axes, legends, TEM insets, text labels, and scale bars.
+⚠️ **PRE-PROCESSING:** Place your cropped EDS images (containing ONLY the colored curves, no axes/legends/TEM insets)
+in the same directory as this app. The app will auto-discover and process all of them on startup.
 """)
 
 
@@ -183,8 +184,9 @@ def detect_molar_ratio(filename):
         r'Cu[;:]?Ag[=:]?(\d+)[;:](\d+)',
         r'(\d+)[;:](\d+).*?(?:Cu|Ag)',
         r'(?:ratio|molar)[_\s]?(\d+)[;:](\d+)',
-        r'(\d+)[_\-]?(\d+).*?(?:EDS|line|scan)',
+        r'(\d+)[_\-]?(?:to|_)(\d+)',
         r'Fig\w*[_\s]?(\d+)[_\-]?(\d+)',
+        r'[_\s](\d+)[_\-](\d+)[_\s]',
     ]
     for pattern in patterns:
         match = re.search(pattern, filename, re.IGNORECASE)
@@ -193,16 +195,37 @@ def detect_molar_ratio(filename):
     return None
 
 
+def discover_images(directory="."):
+    """
+    Auto-discover all image files in the app directory.
+    Returns a sorted list of (filepath, detected_ratio, label) tuples.
+    """
+    image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}
+    image_files = []
+    
+    for f in sorted(os.listdir(directory)):
+        ext = Path(f).suffix.lower()
+        if ext in image_extensions:
+            filepath = os.path.join(directory, f)
+            ratio = detect_molar_ratio(f)
+            # If no ratio detected, try to infer from common naming
+            if not ratio:
+                # Check for single digits that might be ratios
+                digits = re.findall(r'(\d)', f)
+                if len(digits) >= 2:
+                    ratio = f"{digits[0]}:{digits[1]}"
+                else:
+                    ratio = "?:?"
+            image_files.append((filepath, ratio, f))
+    
+    return image_files
+
+
 # =============================================================================
 # SIDEBAR: SETTINGS
 # =============================================================================
 with st.sidebar:
-    st.header("⚙️ Analysis Mode")
-    mode = st.radio(
-        "Select mode",
-        ["Single Image", "Batch Processing"],
-        help="Batch mode processes all uploaded images and compiles a summary table."
-    )
+    st.header("⚙️ Configuration")
     
     st.markdown("---")
     st.header("🔧 Calibration")
@@ -242,78 +265,87 @@ with st.sidebar:
     intensity_threshold = st.number_input(
         "Signal detection threshold", value=15, step=5, min_value=0
     )
-
-
-# =============================================================================
-# MAIN: SINGLE IMAGE MODE
-# =============================================================================
-if mode == "Single Image":
-    uploaded_file = st.file_uploader(
-        "Upload a cropped EDS line-scan image",
-        type=["png", "jpg", "jpeg"],
-        help="Image should contain ONLY the colored curves. No axes, legends, or insets."
-    )
     
-    if uploaded_file is not None:
-        image = Image.open(uploaded_file).convert("RGB")
-        img_array = np.array(image)
-        
-        # Molar ratio detection
-        detected_ratio = detect_molar_ratio(uploaded_file.name)
-        
-        st.subheader("📋 Sample Information")
-        info_col1, info_col2 = st.columns(2)
-        with info_col1:
-            if detected_ratio:
-                st.success(f"Auto-detected Cu:Ag ratio: **{detected_ratio}**")
-                molar_ratio = detected_ratio
+    st.markdown("---")
+    st.header("📁 Manual Upload (Optional)")
+    st.markdown("If auto-discovery fails, upload images manually:")
+    manual_files = st.file_uploader(
+        "Upload cropped EDS images", type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True, key="manual_upload"
+    )
+
+
+# =============================================================================
+# AUTO-DISCOVER AND PROCESS ALL IMAGES
+# =============================================================================
+st.subheader("📁 Auto-Discovered Images")
+
+# Try to auto-discover images
+auto_images = discover_images(".")
+
+# Use manual uploads if provided, otherwise use auto-discovered
+if manual_files:
+    st.info(f"Using {len(manual_files)} manually uploaded images.")
+    image_list = []
+    for f in manual_files:
+        ratio = detect_molar_ratio(f.name) or "?:?"
+        image_list.append((f, ratio, f.name))
+elif auto_images:
+    st.info(f"Auto-discovered {len(auto_images)} image(s) in app directory.")
+    image_list = auto_images
+else:
+    st.warning("No images found. Please upload images manually using the sidebar.")
+    image_list = []
+
+# Store results for summary table
+all_results = {}
+batch_results = []
+
+if image_list:
+    # Create tabs for each image
+    tabs = st.tabs([f"{ratio}" for _, ratio, _ in image_list])
+    
+    for idx, (image_source, detected_ratio, filename) in enumerate(image_list):
+        with tabs[idx]:
+            # Load image
+            if isinstance(image_source, str):
+                # Auto-discovered file path
+                image = Image.open(image_source).convert("RGB")
             else:
-                st.warning("Could not auto-detect Cu:Ag ratio from filename.")
-                molar_ratio = st.text_input(
-                    "Enter Cu:Ag molar ratio manually (e.g., 3:1)", value="?:?"
-                )
-        with info_col2:
-            st.text_input("Filename", value=uploaded_file.name, disabled=True)
-        
-        # Run analysis
-        results = extract_eds_geometric(
-            img_array, nm_per_px=nm_per_px,
-            red_threshold=red_thresh, green_threshold=green_thresh,
-            intensity_min=min_intensity, baseline=baseline,
-            intensity_threshold=intensity_threshold, text_threshold=text_thresh
-        )
-        
-        # Display results
-        col_left, col_right = st.columns([1, 1])
-        
-        with col_left:
-            st.subheader("📷 Image & Color Detection")
-            st.image(image, caption="Uploaded Cropped Curves", use_column_width=True)
+                # Uploaded file object
+                image = Image.open(image_source).convert("RGB")
             
-            mask_vis = np.zeros_like(img_array)
-            mask_vis[results['red_pixels']] = [255, 0, 0]
-            mask_vis[results['green_pixels']] = [0, 255, 0]
-            st.image(mask_vis, caption="Detected: Red = Cu, Green = Ag", use_column_width=True)
-        
-        with col_right:
+            img_array = np.array(image)
+            
+            # Allow manual override of ratio
+            col_info1, col_info2 = st.columns([1, 2])
+            with col_info1:
+                st.image(image, caption=f"{filename}", use_column_width=True)
+            with col_info2:
+                st.markdown(f"**Detected ratio:** `{detected_ratio}`")
+                molar_ratio = st.text_input(
+                    "Override Cu:Ag ratio if needed:",
+                    value=detected_ratio,
+                    key=f"ratio_override_{idx}"
+                )
+            
+            # Run analysis
+            results = extract_eds_geometric(
+                img_array, nm_per_px=nm_per_px,
+                red_threshold=red_thresh, green_threshold=green_thresh,
+                intensity_min=min_intensity, baseline=baseline,
+                intensity_threshold=intensity_threshold, text_threshold=text_thresh
+            )
+            all_results[molar_ratio] = results
+            
+            # Display metrics
             st.subheader("📊 Geometric Metrics")
             
-            st.info(f"**Cu:Ag Molar Ratio:** {molar_ratio}")
-            
-            m1, m2 = st.columns(2)
-            m1.metric("Structure Type", results['structure_type'])
-            m2.metric("Ag Shell Thickness (δ)", f"{results['delta_nm']:.2f} nm")
-            
-            m3, m4 = st.columns(2)
-            m3.metric("Total Diameter (D_total)", f"{results['D_total_nm']:.2f} nm")
-            m4.metric("Core Diameter (D_core)", f"{results['D_core_nm']:.2f} nm")
-            
-            st.divider()
-            st.success(
-                f"**Formula:** δ = (D_total − D_core) / 2 = "
-                f"({results['D_total_nm']:.2f} − {results['D_core_nm']:.2f}) / 2 = "
-                f"**{results['delta_nm']:.2f} nm**"
-            )
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Structure", results['structure_type'])
+            m2.metric("Shell δ", f"{results['delta_nm']:.2f} nm")
+            m3.metric("D_total", f"{results['D_total_nm']:.2f} nm")
+            m4.metric("D_core", f"{results['D_core_nm']:.2f} nm")
             
             c1, c2, c3 = st.columns(3)
             c1.metric("Ag Detectable", "Yes" if results['ag_detectable'] else "No")
@@ -325,7 +357,7 @@ if mode == "Single Image":
             m6.metric("Cu Mole Fraction", f"{results['cu_frac']:.1%}")
             
             # Profile plot
-            fig, ax = plt.subplots(figsize=(10, 4))
+            fig, ax = plt.subplots(figsize=(12, 4))
             x = np.arange(len(results['R_profile']))
             ax.plot(x, results['R_profile'], 'r-', label='Cu Signal', alpha=0.8, linewidth=2)
             ax.plot(x, results['G_profile'], 'g-', label='Ag Signal', alpha=0.8, linewidth=2)
@@ -348,76 +380,34 @@ if mode == "Single Image":
             ax.axhline(y=baseline + intensity_threshold, color='gray', linestyle='--', alpha=0.5)
             ax.set_xlabel("Pixel Position")
             ax.set_ylabel("Intensity (a.u.)")
-            ax.set_title("EDS Line Scan with Geometric Boundaries")
+            ax.set_title(f"EDS Line Scan — Cu:Ag = {molar_ratio} — δ = {results['delta_nm']:.2f} nm")
             ax.legend(loc='upper right', fontsize='small')
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
-        
-        # Data export
-        df = pd.DataFrame({
-            'Pixel_X': x,
-            'Cu_Intensity': results['R_profile'],
-            'Ag_Intensity': results['G_profile'],
-            'Cu_Net': results['R_net'],
-            'Ag_Net': results['G_net'],
-            'Is_Particle': results['particle_mask'].astype(int),
-            'Is_Core': results['cu_dominant'].astype(int)
-        })
-        safe_ratio = molar_ratio.replace(':', '_').replace('?', 'unknown')
-        st.download_button(
-            label="📥 Download Extracted Data (CSV)",
-            data=df.to_csv(index=False),
-            file_name=f'eds_{safe_ratio}_data.csv',
-            mime='text/csv'
-        )
-
-
-# =============================================================================
-# MAIN: BATCH PROCESSING MODE
-# =============================================================================
-else:
-    st.subheader("📁 Batch Processing")
-    st.markdown("""
-    Upload multiple cropped EDS images. The app will analyze each and compile a summary table.
-    Name files with the ratio for auto-detection (e.g., `CuAg_31.png`, `3-1.png`).
-    """)
-    
-    uploaded_files = st.file_uploader(
-        "Upload multiple cropped images", type=["png", "jpg", "jpeg"],
-        accept_multiple_files=True
-    )
-    
-    if uploaded_files:
-        batch_results = []
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for idx, uploaded_file in enumerate(uploaded_files):
-            progress = (idx + 1) / len(uploaded_files)
-            progress_bar.progress(progress)
-            status_text.text(f"Processing {idx + 1} of {len(uploaded_files)}: {uploaded_file.name}...")
             
-            image = Image.open(uploaded_file).convert("RGB")
-            img_array = np.array(image)
-            
-            detected_ratio = detect_molar_ratio(uploaded_file.name)
-            if not detected_ratio:
-                detected_ratio = st.text_input(
-                    f"Enter Cu:Ag ratio for `{uploaded_file.name}`",
-                    value="?:?", key=f"manual_ratio_{idx}"
-                )
-            
-            results = extract_eds_geometric(
-                img_array, nm_per_px=nm_per_px,
-                red_threshold=red_thresh, green_threshold=green_thresh,
-                intensity_min=min_intensity, baseline=baseline,
-                intensity_threshold=intensity_threshold, text_threshold=text_thresh
+            # Data export for this image
+            df = pd.DataFrame({
+                'Pixel_X': x,
+                'Cu_Intensity': results['R_profile'],
+                'Ag_Intensity': results['G_profile'],
+                'Cu_Net': results['R_net'],
+                'Ag_Net': results['G_net'],
+                'Is_Particle': results['particle_mask'].astype(int),
+                'Is_Core': results['cu_dominant'].astype(int)
+            })
+            safe_ratio = molar_ratio.replace(':', '_').replace('?', 'unknown')
+            st.download_button(
+                label=f"📥 Download CSV for {molar_ratio}",
+                data=df.to_csv(index=False),
+                file_name=f'eds_{safe_ratio}_data.csv',
+                mime='text/csv',
+                key=f"download_{idx}"
             )
             
+            # Add to batch results
             batch_results.append({
-                'Filename': uploaded_file.name,
-                'Cu:Ag Ratio': detected_ratio,
+                'Filename': filename,
+                'Cu:Ag Ratio': molar_ratio,
                 'Structure': results['structure_type'],
                 'D_total (nm)': round(results['D_total_nm'], 2),
                 'D_core (nm)': round(results['D_core_nm'], 2),
@@ -428,42 +418,70 @@ else:
                 'Ag Fraction': f"{results['ag_frac']:.1%}",
                 'Cu Fraction': f"{results['cu_frac']:.1%}"
             })
-            
-            with st.expander(
-                f"📊 {uploaded_file.name} — {detected_ratio} — "
-                f"δ = {results['delta_nm']:.2f} nm — {results['structure_type']}"
-            ):
-                p_col1, p_col2 = st.columns([1, 2])
-                with p_col1:
-                    st.image(image, use_column_width=True)
-                with p_col2:
-                    fig, ax = plt.subplots(figsize=(8, 3))
-                    x = np.arange(len(results['R_profile']))
-                    ax.plot(x, results['R_profile'], 'r-', label='Cu', alpha=0.8, linewidth=2)
-                    ax.plot(x, results['G_profile'], 'g-', label='Ag', alpha=0.8, linewidth=2)
-                    if results['D_total_px'] > 0:
-                        ax.axvline(results['start_t'], color='blue', linestyle='--')
-                        ax.axvline(results['end_t'], color='blue', linestyle='--')
-                    if results['D_core_px'] > 0:
-                        ax.axvline(results['start_c'], color='darkred', linestyle=':')
-                        ax.axvline(results['end_c'], color='darkred', linestyle=':')
-                    ax.legend(fontsize='small')
-                    ax.set_title(f"δ = {results['delta_nm']:.2f} nm")
-                    st.pyplot(fig)
-        
-        progress_bar.empty()
-        status_text.empty()
-        
-        st.subheader("📋 Batch Summary Table")
-        df_batch = pd.DataFrame(batch_results)
-        st.dataframe(df_batch, use_container_width=True)
-        
-        st.download_button(
-            label="📥 Download Batch Summary (CSV)",
-            data=df_batch.to_csv(index=False),
-            file_name='batch_eds_analysis.csv',
-            mime='text/csv'
-        )
+
+
+# =============================================================================
+# BATCH SUMMARY TABLE (Always visible if images processed)
+# =============================================================================
+if batch_results:
+    st.markdown("---")
+    st.subheader("📋 Complete Batch Summary")
+    
+    df_batch = pd.DataFrame(batch_results)
+    st.dataframe(df_batch, use_container_width=True)
+    
+    st.download_button(
+        label="📥 Download Complete Batch Summary (CSV)",
+        data=df_batch.to_csv(index=False),
+        file_name='batch_eds_analysis.csv',
+        mime='text/csv'
+    )
+    
+    # Comparison plot
+    st.subheader("📈 Shell Thickness vs. Cu:Ag Ratio")
+    
+    # Sort by ratio for plotting
+    def ratio_sort_key(row):
+        try:
+            parts = row['Cu:Ag Ratio'].split(':')
+            return int(parts[0]) / int(parts[1])
+        except:
+            return 999
+    
+    df_sorted = df_batch.copy()
+    df_sorted['sort_key'] = df_sorted.apply(ratio_sort_key, axis=1)
+    df_sorted = df_sorted.sort_values('sort_key')
+    
+    fig_cmp, ax_cmp = plt.subplots(figsize=(10, 5))
+    ratios = df_sorted['Cu:Ag Ratio'].tolist()
+    deltas = df_sorted['Shell δ (nm)'].astype(float).tolist()
+    
+    colors = []
+    for s in df_sorted['Structure']:
+        if 'Valid Core-Shell' in s:
+            colors.append('green')
+        elif 'Homogeneous' in s:
+            colors.append('orange')
+        elif 'Discontinuous' in s:
+            colors.append('red')
+        else:
+            colors.append('gray')
+    
+    bars = ax_cmp.bar(ratios, deltas, color=colors, alpha=0.7, edgecolor='black')
+    ax_cmp.set_xlabel("Cu:Ag Molar Ratio")
+    ax_cmp.set_ylabel("Ag Shell Thickness δ (nm)")
+    ax_cmp.set_title("Ag Shell Thickness Across All Cu:Ag Ratios")
+    ax_cmp.axhline(y=3, color='blue', linestyle='--', alpha=0.5, label='Target: 3 nm')
+    ax_cmp.axhline(y=5, color='blue', linestyle='--', alpha=0.5, label='Target: 5 nm')
+    ax_cmp.legend()
+    ax_cmp.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels on bars
+    for bar, val in zip(bars, deltas):
+        ax_cmp.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2,
+                   f'{val:.1f}', ha='center', va='bottom', fontsize=10)
+    
+    st.pyplot(fig_cmp)
 
 
 # =============================================================================
