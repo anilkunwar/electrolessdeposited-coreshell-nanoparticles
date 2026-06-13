@@ -1,10 +1,10 @@
 """
 CoreShellGPT: Geometric EDS Shell Thickness Extractor
 =====================================================
-Streamlit Cloud-ready application with AUTO-LOADING of all EDS images
-in the app directory. Processes all Cu:Ag ratios automatically on startup.
+Streamlit Cloud-ready application with AUTO-LOADING of all EDS images.
+Place cropped EDS images in the `images/` folder (same directory as app.py).
 
-Version: 2.1 (Auto-Loading + Ag Validation)
+Version: 2.2 (Fixed Auto-Loading for Streamlit Cloud)
 """
 
 import streamlit as st
@@ -32,8 +32,11 @@ st.title("🔬 CoreShellGPT: Geometric EDS Shell Thickness Extractor")
 st.markdown("""
 **Automated extraction of Ag shell thickness and Cu/Ag mole fraction proxies from EDS line-scan images.**
 
-⚠️ **PRE-PROCESSING:** Place your cropped EDS images (containing ONLY the colored curves, no axes/legends/TEM insets)
-in the same directory as this app. The app will auto-discover and process all of them on startup.
+📁 **Setup Instructions:**
+1. Create a folder named `images/` in the same directory as this `app.py` file
+2. Place your **cropped** EDS images inside `images/` (only colored curves, no axes/legends/TEM insets)
+3. Name files with the ratio: `CuAg_11.png`, `CuAg_21.png`, `CuAg_31.png`, `CuAg_41.png`, `CuAg_51.png`
+4. The app will auto-discover and process all images on startup
 """)
 
 
@@ -45,18 +48,13 @@ def extract_eds_geometric(img_array, nm_per_px=0.35,
                            red_threshold=20, green_threshold=20, intensity_min=80,
                            baseline=10, intensity_threshold=15,
                            text_threshold=50):
-    """
-    Extract EDS line-scan profiles using color-dominance detection and
-    calculate shell thickness via the geometric diameter method with Ag validation.
-    """
+    """Extract EDS profiles and calculate shell thickness via geometric method with Ag validation."""
     R = img_array[:, :, 0].astype(float)
     G = img_array[:, :, 1].astype(float)
     B = img_array[:, :, 2].astype(float)
     
-    # Step 1: Exclude text and dark artifacts
     text_mask = (R < text_threshold) & (G < text_threshold) & (B < text_threshold)
     
-    # Step 2: Color-dominance pixel detection
     red_pixels = (
         (R > G + red_threshold) & 
         (R > B + red_threshold) & 
@@ -70,7 +68,6 @@ def extract_eds_geometric(img_array, nm_per_px=0.35,
         (~text_mask)
     )
     
-    # Step 3: Extract 1D intensity profiles
     R_profile = np.array([
         np.max(R[red_pixels[:, x], x]) if np.any(red_pixels[:, x]) else 0
         for x in range(img_array.shape[1])
@@ -80,26 +77,17 @@ def extract_eds_geometric(img_array, nm_per_px=0.35,
         for x in range(img_array.shape[1])
     ])
     
-    # Step 4: Baseline subtraction
     R_net = np.maximum(R_profile - baseline, 0)
     G_net = np.maximum(G_profile - baseline, 0)
     
-    # ==========================================
-    # GEOMETRIC METHOD WITH AG VALIDATION
-    # ==========================================
-    
-    # D_total: spatial extent where ANY signal exceeds background
+    # Geometric method with Ag validation
     total_signal = R_net + G_net
     particle_mask = total_signal > intensity_threshold
-    
-    # D_core: spatial extent where Cu DOMINATES Ag (critical fix)
     cu_dominant = (R_net > G_net) & (R_net > intensity_threshold)
     
-    # Ag validation checks
     ag_detectable = np.any(G_net > intensity_threshold)
     ag_dominant_edges = np.any((G_net > R_net) & (G_net > intensity_threshold))
     
-    # Connected component analysis for Ag-dominant regions
     ag_dominant_mask = (G_net > R_net) & (G_net > intensity_threshold)
     labeled_array, num_features = ndimage.label(ag_dominant_mask)
     
@@ -127,7 +115,6 @@ def extract_eds_geometric(img_array, nm_per_px=0.35,
     D_total_nm = D_total_px * nm_per_px
     D_core_nm = D_core_px * nm_per_px
     
-    # Shell thickness with Ag validation
     if not ag_detectable or not ag_dominant_edges:
         delta_nm = 0.0
         structure_type = "Discontinuous / No detectable Ag shell"
@@ -138,7 +125,6 @@ def extract_eds_geometric(img_array, nm_per_px=0.35,
         delta_nm = 0.0
         structure_type = "No particle detected"
     
-    # Structure classification
     if D_total_px == 0:
         structure_type = "No particle detected"
     elif not ag_detectable:
@@ -150,7 +136,6 @@ def extract_eds_geometric(img_array, nm_per_px=0.35,
     else:
         structure_type = "Valid Core-Shell"
     
-    # Mole fraction proxy (AUC)
     valid_signal = (R_net > intensity_threshold) | (G_net > intensity_threshold)
     area_Cu = np.sum(R_net[valid_signal])
     area_Ag = np.sum(G_net[valid_signal])
@@ -179,7 +164,7 @@ def extract_eds_geometric(img_array, nm_per_px=0.35,
 
 
 def detect_molar_ratio(filename):
-    """Auto-detect Cu:Ag molar ratio from filename using regex patterns."""
+    """Auto-detect Cu:Ag molar ratio from filename."""
     patterns = [
         r'Cu[;:]?Ag[=:]?(\d+)[;:](\d+)',
         r'(\d+)[;:](\d+).*?(?:Cu|Ag)',
@@ -192,14 +177,18 @@ def detect_molar_ratio(filename):
         match = re.search(pattern, filename, re.IGNORECASE)
         if match:
             return f"{match.group(1)}:{match.group(2)}"
-    return None
+    # Fallback: extract first two digits
+    digits = re.findall(r'(\d)', filename)
+    if len(digits) >= 2:
+        return f"{digits[0]}:{digits[1]}"
+    return "?:?"
 
 
-def discover_images(directory="."):
-    """
-    Auto-discover all image files in the app directory.
-    Returns a sorted list of (filepath, detected_ratio, label) tuples.
-    """
+def discover_images(directory):
+    """Discover all image files in the specified directory."""
+    if not os.path.exists(directory):
+        return []
+    
     image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}
     image_files = []
     
@@ -208,14 +197,6 @@ def discover_images(directory="."):
         if ext in image_extensions:
             filepath = os.path.join(directory, f)
             ratio = detect_molar_ratio(f)
-            # If no ratio detected, try to infer from common naming
-            if not ratio:
-                # Check for single digits that might be ratios
-                digits = re.findall(r'(\d)', f)
-                if len(digits) >= 2:
-                    ratio = f"{digits[0]}:{digits[1]}"
-                else:
-                    ratio = "?:?"
             image_files.append((filepath, ratio, f))
     
     return image_files
@@ -226,6 +207,13 @@ def discover_images(directory="."):
 # =============================================================================
 with st.sidebar:
     st.header("⚙️ Configuration")
+    
+    # Image directory setting
+    img_dir = st.text_input(
+        "Image directory",
+        value="images",
+        help="Folder containing cropped EDS images (relative to app.py)"
+    )
     
     st.markdown("---")
     st.header("🔧 Calibration")
@@ -238,23 +226,19 @@ with st.sidebar:
     st.header("🎨 Color Detection")
     red_thresh = st.slider(
         "Red (Cu) dominance threshold", min_value=5, max_value=60,
-        value=20, step=5,
-        help="How much R must exceed G and B to count as a Cu pixel."
+        value=20, step=5
     )
     green_thresh = st.slider(
         "Green (Ag) dominance threshold", min_value=5, max_value=60,
-        value=20, step=5,
-        help="How much G must exceed R and B to count as an Ag pixel."
+        value=20, step=5
     )
     min_intensity = st.slider(
         "Minimum color intensity", min_value=30, max_value=200,
-        value=80, step=10,
-        help="Exclude faint anti-aliasing artifacts."
+        value=80, step=10
     )
     text_thresh = st.slider(
         "Text exclusion threshold", min_value=10, max_value=100,
-        value=50, step=5,
-        help="Pixels darker than this in ALL channels are treated as text/axes."
+        value=50, step=5
     )
     
     st.markdown("---")
@@ -268,7 +252,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("📁 Manual Upload (Optional)")
-    st.markdown("If auto-discovery fails, upload images manually:")
+    st.markdown("Use only if auto-discovery fails:")
     manual_files = st.file_uploader(
         "Upload cropped EDS images", type=["png", "jpg", "jpeg"],
         accept_multiple_files=True, key="manual_upload"
@@ -276,43 +260,90 @@ with st.sidebar:
 
 
 # =============================================================================
-# AUTO-DISCOVER AND PROCESS ALL IMAGES
+# RESOLVE IMAGE DIRECTORY AND DISCOVER IMAGES
 # =============================================================================
-st.subheader("📁 Auto-Discovered Images")
 
-# Try to auto-discover images
-auto_images = discover_images(".")
+# Resolve the image directory path
+# In Streamlit Cloud, __file__ gives the app path, so we use its directory
+try:
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    # Fallback for environments where __file__ is not defined
+    app_dir = os.getcwd()
 
-# Use manual uploads if provided, otherwise use auto-discovered
-if manual_files:
-    st.info(f"Using {len(manual_files)} manually uploaded images.")
+# Try multiple possible locations for images
+possible_dirs = [
+    os.path.join(app_dir, img_dir),           # images/ next to app.py
+    os.path.join(app_dir, "images"),           # default images/
+    os.path.join(os.getcwd(), img_dir),        # images/ in cwd
+    os.path.join(os.getcwd(), "images"),       # default images/ in cwd
+    img_dir,                                  # absolute or relative path as-is
+]
+
+image_list = []
+discovered_from = None
+
+# Try auto-discovery from each possible location
+for test_dir in possible_dirs:
+    if os.path.exists(test_dir) and os.path.isdir(test_dir):
+        found = discover_images(test_dir)
+        if found:
+            image_list = found
+            discovered_from = test_dir
+            break
+
+# Fall back to manual uploads if auto-discovery found nothing
+if manual_files and not image_list:
     image_list = []
     for f in manual_files:
-        ratio = detect_molar_ratio(f.name) or "?:?"
+        ratio = detect_molar_ratio(f.name)
         image_list.append((f, ratio, f.name))
-elif auto_images:
-    st.info(f"Auto-discovered {len(auto_images)} image(s) in app directory.")
-    image_list = auto_images
-else:
-    st.warning("No images found. Please upload images manually using the sidebar.")
-    image_list = []
+    discovered_from = "manual upload"
 
-# Store results for summary table
+# =============================================================================
+# DISPLAY DISCOVERY STATUS
+# =============================================================================
+
+if discovered_from:
+    st.success(f"✅ Found {len(image_list)} image(s)" + 
+               (f" in `{discovered_from}`" if discovered_from != "manual upload" else " via manual upload"))
+else:
+    st.error("""
+    ❌ No images found!
+    
+    **Please check:**
+    1. Create a folder named `images/` in the same directory as `app.py`
+    2. Place your cropped EDS images in that folder
+    3. Or use the Manual Upload option in the sidebar
+    
+    **Current working directory:** `{cwd}`
+    **App directory:** `{app_dir}`
+    **Searched paths:** `{paths}`
+    """.format(
+        cwd=os.getcwd(),
+        app_dir=app_dir,
+        paths="`, `".join(possible_dirs)
+    ))
+
+
+# =============================================================================
+# PROCESS AND DISPLAY ALL IMAGES
+# =============================================================================
+
 all_results = {}
 batch_results = []
 
 if image_list:
     # Create tabs for each image
-    tabs = st.tabs([f"{ratio}" for _, ratio, _ in image_list])
+    tab_labels = [f"{ratio}" for _, ratio, _ in image_list]
+    tabs = st.tabs(tab_labels)
     
     for idx, (image_source, detected_ratio, filename) in enumerate(image_list):
         with tabs[idx]:
             # Load image
             if isinstance(image_source, str):
-                # Auto-discovered file path
                 image = Image.open(image_source).convert("RGB")
             else:
-                # Uploaded file object
                 image = Image.open(image_source).convert("RGB")
             
             img_array = np.array(image)
@@ -385,7 +416,7 @@ if image_list:
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
             
-            # Data export for this image
+            # Data export
             df = pd.DataFrame({
                 'Pixel_X': x,
                 'Cu_Intensity': results['R_profile'],
@@ -421,7 +452,7 @@ if image_list:
 
 
 # =============================================================================
-# BATCH SUMMARY TABLE (Always visible if images processed)
+# BATCH SUMMARY TABLE
 # =============================================================================
 if batch_results:
     st.markdown("---")
@@ -440,7 +471,6 @@ if batch_results:
     # Comparison plot
     st.subheader("📈 Shell Thickness vs. Cu:Ag Ratio")
     
-    # Sort by ratio for plotting
     def ratio_sort_key(row):
         try:
             parts = row['Cu:Ag Ratio'].split(':')
@@ -476,7 +506,6 @@ if batch_results:
     ax_cmp.legend()
     ax_cmp.grid(True, alpha=0.3, axis='y')
     
-    # Add value labels on bars
     for bar, val in zip(bars, deltas):
         ax_cmp.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2,
                    f'{val:.1f}', ha='center', va='bottom', fontsize=10)
@@ -505,16 +534,13 @@ with st.expander("🧠 Methodology: Improved Geometric Measurement with Ag Valid
     Where:
     - **$D_{total}$**: Full spatial width where combined signal (Cu + Ag) exceeds background.
     - **$D_{core}$**: Spatial width where **Cu dominates Ag** (not just exceeds a threshold).
-      This is the critical improvement — Cu must be the stronger element in the core region.
     
     ### Ag Validation Checks
     
-    Two independent checks prevent false shell detection:
     1. **Ag Detectable**: Is there any region where Ag signal exceeds the noise floor?
     2. **Ag Edge Dominant**: Does Ag dominate at the particle edges (characteristic of core-shell)?
     
-    If **either check fails**, shell thickness is forced to **0 nm** and the structure
-    is classified as discontinuous.
+    If **either check fails**, shell thickness is forced to **0 nm**.
     
     ### Structure Classification
     
@@ -525,19 +551,8 @@ with st.expander("🧠 Methodology: Improved Geometric Measurement with Ag Valid
     | $\\delta < 1.0$ nm | Ultra-thin shell | — |
     | Otherwise | Valid Core-Shell | 3:1, 4:1 |
     
-    ### Color-Dominance Detection
-    
-    Unlike simple `np.max()` projection (which captures white background at RGB=255),
-    this algorithm identifies pixels where one color channel **significantly exceeds** the others.
-    This excludes white/gray background, black text/axes, and anti-aliasing artifacts.
-    
     ### Mole Fraction Proxy
     
-    Assuming linear detector response, the atomic fraction is approximated by the
-    Area Under the Curve (AUC) ratio:
-    
     $$\\text{Ag \\%} \\approx \\frac{\\int I_{Ag}(x) \\, dx}{\\int I_{Ag}(x) \\, dx + \\int I_{Cu}(x) \\, dx}$$
-    
-    *Note: This is an intensity proxy. True atomic percentages require ZAF correction
-    from the EDS software, but this proxy is consistent for comparative analysis.*
     """)
+
