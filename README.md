@@ -60,6 +60,12 @@ Robust models
 
 [![machinelearningcuagtensormechanics](https://img.shields.io/badge/validation2-streamlit-blue)](https://shell-thickness-measurement2.streamlit.app/ )  # measurement is theoretically accurate
 
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/validation3-streamlit-blue)](https://shell-thickness-measurement3.streamlit.app/ )  # measurement is theoretically accurate, improvement needed
+
+[![machinelearningcuagtensormechanics](https://img.shields.io/badge/validation4-streamlit-blue)](https://shell-thickness-measurement4.streamlit.app/ )  # measurement is theoretically accurate, improvement needed
+
+
+
 
 
 Cross-Attentive Interpolator for Optimization of Deposit Concentration and Lengths
