@@ -3970,7 +3970,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.markdown('<h1 class="main-header">🧪 CoreShell-LLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
+    st.markdown('<h1 class="main-header">🧪 CoreShellLLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
                unsafe_allow_html=True)
     
     initialize_session_state()
