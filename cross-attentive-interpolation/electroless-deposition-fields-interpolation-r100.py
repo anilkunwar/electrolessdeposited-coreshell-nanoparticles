@@ -3405,7 +3405,7 @@ def display_logo():
         st.sidebar.image(logo_path, use_container_width=True)
     else:
         # Optional: display a placeholder or nothing
-        st.sidebar.markdown("### 🧪 CoreShellGPT")
+        st.sidebar.markdown("### 🧪 CoreShellLLM")
         # Could also show a default text logo
 
 # =============================================
