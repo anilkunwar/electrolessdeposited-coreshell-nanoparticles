@@ -4017,30 +4017,26 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        # --- Copy to Clipboard Logic ---
-        # Safely import pyperclip
-        try:
-            import pyperclip
-        except ImportError:
-            pyperclip = None
-
+        # --- Browser-friendly Copy to Clipboard ---
         citation_text = ('[1] H. Ma et al., "EDL-catalyzed phase-field modeling and numerically '
                          'attentive interpolation framework for the intelligent design of Cu@Ag '
                          'core-shell nanoparticles," Journal of Materiomics, vol. 12, no. 6, '
                          'p. 101287, Nov. 2026, doi: 10.1016/j.jmat.2026.101287.')
 
-        if st.button("📋 Copy Citation", help="Copy citation to clipboard"):
-            if pyperclip:
-                try:
-                    pyperclip.copy(citation_text)
-                    st.success("✅ Citation copied to clipboard!")
-                except Exception as e:
-                    st.code(citation_text, language='text')
-                    st.caption("Copy the text above manually.")
-            else:
-                # Fallback if pyperclip is not installed
-                st.code(citation_text, language='text')
-                st.warning("⚠️ `pyperclip` is not installed. Copy the text above manually.")
+        st.components.v1.html(f"""
+        <textarea id="citationText" style="position:absolute; left:-9999px;">{citation_text}</textarea>
+        <button onclick="copyCitation()" style="background-color:#3B82F6;color:white;border:none;padding:0.5rem 1rem;border-radius:0.4rem;cursor:pointer;font-size:1rem;transition: all 0.3s ease;">📋 Copy Citation</button>
+        <script>
+        function copyCitation() {{
+            var text = document.getElementById("citationText").value;
+            navigator.clipboard.writeText(text).then(function() {{
+                alert("✅ Citation copied to clipboard!");
+            }}).catch(function(err) {{
+                alert("Failed to copy: " + err);
+            }});
+        }}
+        </script>
+        """, height=50)
 
     initialize_session_state()
     
