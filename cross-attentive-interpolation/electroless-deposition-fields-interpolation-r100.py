@@ -3977,21 +3977,25 @@ def main():
     st.markdown('<h1 class="main-header">🧪 CoreShellLLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
                unsafe_allow_html=True)
 
+    
     # =========================================
     # HOW TO CITE SECTION (Main Page)
     # =========================================
     with st.expander("📖 How to Cite", expanded=False):
-        st.markdown("""
-<div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-left: 5px solid #3B82F6; padding: 1.5rem; border-radius: 0.5rem; margin: 1rem 0; font-family: 'Arial', sans-serif; color: #1E293B; line-height: 1.6;">
-    <strong style="font-size: 1.1rem; color: #1E3A8A;">How to Cite Info in the Above Code:</strong><br><br>
-    If you use this code or the intelligent core‑shell designer framework in your research, please cite the following paper:<br><br>
-    
-    <div style="background-color: #ECFDF5; border-left: 4px solid #10B981; padding: 1rem; border-radius: 0.4rem; margin: 1rem 0; font-style: italic; color: #064E3B;">
-        [1] H. Ma et al., "EDL‑catalyzed phase‑field modeling and numerically attentive interpolation framework for the intelligent design of Cu@Ag core‑shell nanoparticles," <em>Journal of Materiomics</em>, vol. 12, no. 6, p. 101287, Nov. 2026, doi: <a href="https://doi.org/10.1016/j.jmat.2026.101287" target="_blank" style="color: #3B82F6; text-decoration: none;">10.1016/j.jmat.2026.101287</a>.
-    </div>
-
-    <strong style="display: block; margin-top: 1.5rem; color: #1E3A8A;">BibTeX:</strong>
-    <pre style="background-color: #1E293B; color: #E2E8F0; padding: 1rem; border-radius: 0.4rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.4; margin-top: 0.5rem;"><code>@article{Ma2026EDL,
+        st.markdown("### How to Cite Info in the Above Code")
+        st.markdown("If you use this code or the intelligent core‑shell designer framework in your research, please cite the following paper:")
+        
+        # Native Streamlit info box for the citation
+        st.info("""
+        **[1]** H. Ma et al., *"EDL‑catalyzed phase‑field modeling and numerically attentive interpolation framework for the intelligent design of Cu@Ag core‑shell nanoparticles,"* **Journal of Materiomics**, vol. 12, no. 6, p. 101287, Nov. 2026.
+        
+        🔗 **DOI:** [10.1016/j.jmat.2026.101287](https://doi.org/10.1016/j.jmat.2026.101287)
+        """)
+        
+        st.markdown("#### BibTeX:")
+        
+        # Native Streamlit code block (automatically provides a copy button in the top right!)
+        bibtex = """@article{Ma2026EDL,
   title   = {EDL-catalyzed phase-field modeling and numerically attentive 
              interpolation framework for the intelligent design of 
              Cu@Ag core-shell nanoparticles},
@@ -4003,11 +4007,12 @@ def main():
   month   = nov,
   year    = {2026},
   doi     = {10.1016/j.jmat.2026.101287}
-}</code></pre>
-</div>
-        """, unsafe_allow_html=True)
+}"""
+        st.code(bibtex, language='bibtex')
         
-        # --- Browser-friendly Copy to Clipboard ---
+        st.markdown("") # Spacer
+        
+        # --- Browser-friendly Copy to Clipboard for plain text citation ---
         citation_text = ('[1] H. Ma et al., "EDL-catalyzed phase-field modeling and numerically '
                          'attentive interpolation framework for the intelligent design of Cu@Ag '
                          'core-shell nanoparticles," Journal of Materiomics, vol. 12, no. 6, '
@@ -4015,7 +4020,7 @@ def main():
 
         st.components.v1.html(f"""
         <textarea id="citationText" style="position:absolute; left:-9999px;">{citation_text}</textarea>
-        <button onclick="copyCitation()" style="background-color:#3B82F6;color:white;border:none;padding:0.6rem 1.2rem;border-radius:0.4rem;cursor:pointer;font-size:0.95rem;font-weight:bold;box-shadow: 0 4px 6px rgba(0,0,0,0.1);transition: all 0.3s ease;">📋 Copy Citation</button>
+        <button onclick="copyCitation()" style="background-color:#3B82F6;color:white;border:none;padding:0.6rem 1.2rem;border-radius:0.4rem;cursor:pointer;font-size:0.95rem;font-weight:bold;box-shadow: 0 4px 6px rgba(0,0,0,0.1);transition: all 0.3s ease;">📋 Copy Plain Text Citation</button>
         <script>
         function copyCitation() {{
             var text = document.getElementById("citationText").value;
