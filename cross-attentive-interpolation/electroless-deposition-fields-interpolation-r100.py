@@ -3982,7 +3982,7 @@ def main():
     # HOW TO CITE SECTION (Main Page)
     # =========================================
     with st.expander("📖 How to Cite", expanded=False):
-        st.markdown("### How to Cite Info in the Above Code")
+        st.markdown("### How to Cite Info")
         st.markdown("If you use this code or the intelligent core‑shell designer framework in your research, please cite the following paper:")
         
         # Native Streamlit info box for the citation
