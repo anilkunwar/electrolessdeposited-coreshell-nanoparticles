@@ -2,6 +2,8 @@
 
  H. Ma et al., “EDL-catalyzed phase-field modeling and numerically attentive interpolation framework for the intelligent design of Cu@Ag core-shell nanoparticles,” Journal of Materiomics, vol. 12, no. 6, p. 101287, Nov. 2026, doi: https://doi.org/10.1016/j.jmat.2026.101287.
 
+ ![Image of CoreShellLLM](images/core-shell-llm-logo.jpg)
+
 # Materials design of electrodeposited Cu@Ag core-shell nanoparticles
 
 [![integratedcoreshelldesign](https://img.shields.io/badge/minidatapdftodb-streamlit-red)](https://computervision-for-coreshellgeometry.streamlit.app/)
