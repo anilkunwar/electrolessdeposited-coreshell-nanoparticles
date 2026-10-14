@@ -63,7 +63,6 @@ import itertools
 import threading
 import shutil
 import glob  # for logo detection
-import pyperclip  # pip install pyperclip
 
 # NEW IMPORTS FOR GPT‑2 AND QWEN
 try:
