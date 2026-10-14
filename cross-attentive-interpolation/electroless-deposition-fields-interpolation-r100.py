@@ -63,6 +63,7 @@ import itertools
 import threading
 import shutil
 import glob  # for logo detection
+import pyperclip  # pip install pyperclip
 
 # NEW IMPORTS FOR GPT‑2 AND QWEN
 try:
@@ -3970,10 +3971,80 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
+    #st.markdown('<h1 class="main-header">🧪 CoreShellLLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
+    #           unsafe_allow_html=True)
+    
+    #initialize_session_state()
     st.markdown('<h1 class="main-header">🧪 CoreShellLLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
                unsafe_allow_html=True)
-    
+
+    # =========================================
+    # HOW TO CITE SECTION (Main Page)
+    # =========================================
+    with st.expander("📖 How to Cite", expanded=False):
+        st.markdown("""
+        <div style="background-color: #F0F9FF; border-left: 5px solid #3B82F6; padding: 1.2rem; 
+                    border-radius: 0.6rem; margin: 1.2rem 0; font-size: 1.0rem;">
+        <strong>How to Cite Info in the Above Code:</strong><br><br>
+        
+        If you use this code or the intelligent core‑shell designer framework in your research, 
+        please cite the following paper:
+        
+        <blockquote style="border-left: 3px solid #10B981; margin: 1rem 0; padding: 0.5rem 1rem; 
+                           background-color: #ECFDF5; font-style: italic;">
+        [1] H. Ma et al., "EDL‑catalyzed phase‑field modeling and numerically attentive 
+        interpolation framework for the intelligent design of Cu@Ag core‑shell nanoparticles," 
+        <em>Journal of Materiomics</em>, vol. 12, no. 6, p. 101287, Nov. 2026, 
+        doi: <a href="https://doi.org/10.1016/j.jmat.2026.101287" target="_blank">10.1016/j.jmat.2026.101287</a>.
+        </blockquote>
+        
+        <strong>BibTeX:</strong>
+        <pre style="background-color: #1E293B; color: #E2E8F0; padding: 1rem; 
+                    border-radius: 0.5rem; overflow-x: auto; font-size: 0.9rem;">
+@article{Ma2026EDL,
+  title   = {EDL‑catalyzed phase‑field modeling and numerically attentive 
+             interpolation framework for the intelligent design of 
+             Cu@Ag core‑shell nanoparticles},
+  author  = {Ma, H. and others},
+  journal = {Journal of Materiomics},
+  volume  = {12},
+  number  = {6},
+  pages   = {101287},
+  month   = nov,
+  year    = {2026},
+  doi     = {10.1016/j.jmat.2026.101287}
+}
+        </pre>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # --- Copy to Clipboard Logic ---
+        # Safely import pyperclip
+        try:
+            import pyperclip
+        except ImportError:
+            pyperclip = None
+
+        citation_text = ('[1] H. Ma et al., "EDL-catalyzed phase-field modeling and numerically '
+                         'attentive interpolation framework for the intelligent design of Cu@Ag '
+                         'core-shell nanoparticles," Journal of Materiomics, vol. 12, no. 6, '
+                         'p. 101287, Nov. 2026, doi: 10.1016/j.jmat.2026.101287.')
+
+        if st.button("📋 Copy Citation", help="Copy citation to clipboard"):
+            if pyperclip:
+                try:
+                    pyperclip.copy(citation_text)
+                    st.success("✅ Citation copied to clipboard!")
+                except Exception as e:
+                    st.code(citation_text, language='text')
+                    st.caption("Copy the text above manually.")
+            else:
+                # Fallback if pyperclip is not installed
+                st.code(citation_text, language='text')
+                st.warning("⚠️ `pyperclip` is not installed. Copy the text above manually.")
+
     initialize_session_state()
+    
     
     with st.sidebar:
         # ========== LOGO ==========
