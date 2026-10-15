@@ -372,8 +372,9 @@ with st.expander("🔧 Debug Info", expanded=True):
         st.info("Simulation mode is active. The map point is synthetic and is labelled as simulated.")
     elif ip and not is_public_ip(ip):
         st.warning(
-            "A non-public IP was detected. This is common behind proxies and private networks; "
-            "it cannot be mapped to a visitor's physical location."
+            "A non-public IP was detected in the request headers. This is likely an internal "
+            "proxy address, not the visitor's public IP. It cannot be geolocated. Your hosting "
+            "proxy must expose the original client IP for real visitor mapping."
         )
     elif not ip:
         st.warning(
@@ -471,8 +472,28 @@ for key, info in log.items():
     except (ValueError, TypeError):
         continue
 
-if map_data:
-    with st.expander("🗺️ Visitor Map", expanded=True):
+# Always render the map so map functionality can be tested even when IP
+# geolocation is unavailable. If there are no real mapped records, show a
+# separate synthetic diagnostic point (never save it as a visitor).
+showing_demo_only = not bool(map_data)
+if showing_demo_only:
+    map_data.append({
+        "key": "__MAP_DIAGNOSTIC_ONLY__",
+        "lat": 52.2297,
+        "lon": 21.0122,
+        "city": "Warsaw (map test)",
+        "country": "Poland",
+        "visits": 0,
+        "last_seen": now,
+        "first_seen": now,
+        "color": "#8B5CF6",
+        "status": "🧪 Map rendering test — not a visitor",
+        "size": 16,
+        "flag": "🧪",
+        "simulated": True,
+    })
+
+with st.expander("🗺️ Visitor Map", expanded=True):
         df = pd.DataFrame(map_data)
         fig = go.Figure()
         fig.add_trace(go.Scattergeo(
@@ -514,10 +535,12 @@ if map_data:
             "IP-based locations are approximate and may identify a network gateway rather than a person. "
             "The purple marker is synthetic when simulation mode is enabled."
         )
-else:
+if showing_demo_only:
     st.info(
-        "No logged records currently have valid coordinates. Use **🧪 Simulate Map Point** "
-        "to test the map without relying on IP detection or a geolocation API."
+        "No real visitor records currently have valid coordinates. The purple Warsaw marker "
+        "is a map-rendering diagnostic only; it is not saved to the visitor log and does not "
+        "represent your location. To map real visitors, your deployment must expose a valid "
+        "public client IP and the geolocation lookup must return coordinates."
     )
 
 if log:
