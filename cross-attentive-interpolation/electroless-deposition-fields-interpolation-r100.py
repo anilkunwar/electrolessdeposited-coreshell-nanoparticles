@@ -8,7 +8,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - All enhanced visualizations: Sankey, chord, radar, 3D thickness, ground‑truth comparison, etc.
 - Temporal caching, animation streaming, and memory‑efficient key frames
 - **Enhanced time interpolation (progress‑based)** and **phi shell tracking diagnostics**
-- FIX: Strictly increasing thickness for spline construction (solves "x must be strictly increasing" error)
+- FIX: Strictly increasing thickness for spline construction
 - **FIXED**: GPT‑2 / Qwen integration – robust JSON extraction, better prompts, fallback mechanisms
 - **FIXED**: Shell completeness detection – median radial profile, coverage capping, softer threshold
 - **NEW**: Hybrid (regex + GPT‑2/Qwen) parameter extraction with confidence merging and ensemble voting
@@ -16,7 +16,12 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - **FIXED**: Session state conflict with widget key – separate loaded backend from widget value
 - **NEW**: Dynamic completeness analysis – updates when time slider moves (rule‑based and LLM)
 - **FIXED**: UnhashableParamError in LLM caching – manual cache via session_state (LRU)
-- **NEW**: Geographic visitor online tracker with world map, timeline, and rate-limit handling
+- **NEW**: Geographic visitor tracker with:
+    * Top 5 Visitor Countries leaderboard (with flag emojis)
+    * Fully interactive TIME‑LAPSE tracker map (Play/Pause + date slider)
+    * Status colors: Green (online), Orange (seen today), Grey (offline)
+    * Point sizes scale with visit count
+    * Flag emojis embedded in hover tooltips
 - **FIXED**: Plotly `go.Bar` line parameter now correctly nested inside `marker`
 """
 
@@ -619,10 +624,9 @@ class CoreShellInterpolator:
             # ---------- FIX: ensure strictly increasing thickness ----------
             th_vals = np.array(th_vals, dtype=float)
             if len(th_vals) > 1:
-                # Force non-decreasing (cumulative max) and then strictly increasing (+ tiny epsilon)
                 th_vals = np.maximum.accumulate(th_vals)
                 th_vals += np.arange(len(th_vals)) * 1e-14
-            t_vals_nd = np.array(t_vals_nd)   # also ensure array
+            t_vals_nd = np.array(t_vals_nd)
 
             source_thickness.append({
                 't_norm': common_t_norm,
@@ -886,9 +890,9 @@ class TemporalFieldManager:
         self.sources_data: Optional[List] = None
         self._compute_thickness_curve()
 
-        # Progress‑related attributes (NEW)
-        self.progress_splines: List[Optional[CubicSpline]] = []   # map thickness progress → t_norm
-        self.max_thickness_per_source: List[float] = []           # max thickness of each source
+        # Progress‑related attributes
+        self.progress_splines: List[Optional[CubicSpline]] = []
+        self.max_thickness_per_source: List[float] = []
 
         self.key_times: np.ndarray = np.linspace(0, 1, n_key_frames)
         self.key_frames: Dict[float, Dict[str, np.ndarray]] = {}
@@ -918,12 +922,11 @@ class TemporalFieldManager:
             self.avg_tau0 = 1e-4
             self.avg_t_max_nd = 1.0
 
-        # Build progress splines for each source (NEW)
+        # Build progress splines for each source
         self.progress_splines = []
         self.max_thickness_per_source = []
         for src in self.sources:
             params = src['params']
-            # Compute thickness curve for this source
             common_t_norm = np.linspace(0, 1, 100)
             th_vals = []
             for t_norm in common_t_norm:
@@ -935,10 +938,8 @@ class TemporalFieldManager:
                 th_nm = th_nd * params.get('L0_nm', 20.0)
                 th_vals.append(th_nm)
 
-            # ---------- FIX: ensure strictly increasing thickness ----------
             th_vals = np.array(th_vals, dtype=float)
             if len(th_vals) > 1:
-                # Force non-decreasing (cumulative max) and then strictly increasing (+ tiny epsilon)
                 th_vals = np.maximum.accumulate(th_vals)
                 th_vals += np.arange(len(th_vals)) * 1e-14
 
@@ -946,7 +947,6 @@ class TemporalFieldManager:
             self.max_thickness_per_source.append(max_th)
             if max_th > 1e-9:
                 progress = th_vals / max_th
-                # Spline: progress -> t_norm
                 if len(np.unique(progress)) >= 2:
                     spl = CubicSpline(progress, common_t_norm, extrapolate=True, bc_type='natural')
                 else:
@@ -959,20 +959,12 @@ class TemporalFieldManager:
         st.info(f"Pre-computing {self.n_key_frames} key frames using progress‑based time...")
         progress_bar = st.progress(0)
         for i, t in enumerate(self.key_times):
-            # t is target normalized time (0..1). Convert to progress using the interpolated thickness curve.
             if self.thickness_time and len(self.thickness_time['th_nm']) > 1:
-                # interpolate thickness at t
                 th_t = np.interp(t, self.thickness_time['t_norm'], self.thickness_time['th_nm'])
-                # target progress = th_t / max_thickness (where max is last thickness)
                 max_th = self.thickness_time['th_nm'][-1] if self.thickness_time['th_nm'] else 1.0
                 progress_target = th_t / max_th if max_th > 0 else t
             else:
                 progress_target = t
-            # Now we need fields at progress_target. But our key frames are stored at original t_norm.
-            # Instead, we compute fields at t (the normalized time) – we keep original key frames for consistency.
-            # However, when retrieving, we will map requested time to progress and then blend key frames.
-            # For pre-computation, we still compute at t_norm = t (this is okay, because key frames are evenly spaced in t_norm).
-            # The actual interpolation logic in get_fields will use progress to blend.
             res = self.interpolator.interpolate_fields(
                 self.sources, self.target_params, target_shape=(256, 256),
                 n_time_points=100, time_norm=t, recompute_thickness=True
@@ -992,21 +984,16 @@ class TemporalFieldManager:
         bytes_per_frame = sum(arr.nbytes for arr in sample_frame.values())
         return (bytes_per_frame * len(self.key_frames)) / (1024 * 1024)
 
-    # ------------------------------------------------------------------
-    # MODIFIED: get_fields now uses progress-based blending with progress_splines
-    # ------------------------------------------------------------------
     def get_fields(self, time_norm: float, use_interpolation: bool = True) -> Dict[str, np.ndarray]:
         """Return fields at given normalized time, using progress‑based blending."""
         t_key = round(time_norm, 4)
         time_real = time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
 
-        # Check LRU cache
         if t_key in self.lru_cache:
             entry = self.lru_cache.pop(t_key)
             self.lru_cache[t_key] = entry
             return entry.fields
 
-        # Map requested time_norm to progress (NEW)
         if self.thickness_time and len(self.thickness_time['th_nm']) > 1:
             th_t = np.interp(time_norm, self.thickness_time['t_norm'], self.thickness_time['th_nm'])
             max_th = self.thickness_time['th_nm'][-1] if self.thickness_time['th_nm'] else 1.0
@@ -1014,9 +1001,7 @@ class TemporalFieldManager:
         else:
             progress_target = time_norm
 
-        # Find key frames that bound the progress_target (using the stored t_norm of key frames)
         key_times_arr = np.array(list(self.key_frames.keys()))
-        # We need to map each key frame's t_norm to its thickness progress.
         key_progress = []
         for t in key_times_arr:
             th_t = np.interp(t, self.thickness_time['t_norm'], self.thickness_time['th_nm'])
@@ -1024,23 +1009,19 @@ class TemporalFieldManager:
             key_progress.append(th_t / max_th if max_th > 0 else t)
         key_progress = np.array(key_progress)
 
-        # Find interpolation indices in progress space
         idx = np.searchsorted(key_progress, progress_target)
 
         if idx == 0:
-            # before first key frame
             t0 = key_times_arr[0]
             fields = self.key_frames[t0]
             self._add_to_lru(t_key, fields, self.key_thickness[t0], time_real)
             return fields
         elif idx >= len(key_progress):
-            # after last key frame
             t1 = key_times_arr[-1]
             fields = self.key_frames[t1]
             self._add_to_lru(t_key, fields, self.key_thickness[t1], time_real)
             return fields
 
-        # linear interpolation in progress space
         t0, t1 = key_times_arr[idx-1], key_times_arr[idx]
         p0, p1 = key_progress[idx-1], key_progress[idx]
         if p1 - p0 > 0:
@@ -1445,11 +1426,8 @@ class NLParser:
             ],
         }
 
-    # NEW: Improved LLM-based parsing with robust JSON extraction and fallback
     def parse_with_llm(self, text: str, tokenizer, model, regex_params=None, temperature=None) -> dict:
-        """Use LLM (GPT‑2 or Qwen) to extract parameters from natural language.
-        If temperature is None, uses 0.0 for Qwen, 0.1 for GPT‑2.
-        """
+        """Use LLM (GPT‑2 or Qwen) to extract parameters from natural language."""
         if not text:
             return self.defaults.copy()
 
@@ -1457,7 +1435,6 @@ class NLParser:
         if temperature is None:
             temperature = 0.0 if "Qwen" in backend else 0.1
 
-        # Build a prompt with few-shot examples
         system = "You are an expert extractor. Always reply with valid JSON only. Clip every value to its exact range."
         examples = """
 Examples:
@@ -1481,7 +1458,6 @@ Defaults: {defaults_json}
 
 JSON:"""
 
-        # Use chat template for Qwen models
         if "Qwen" in backend:
             messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
             prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -1502,89 +1478,70 @@ JSON:"""
                 )
             generated = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-            # Robust JSON extraction
             json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
             match = re.search(json_pattern, generated, re.DOTALL)
             if not match:
-                # Try to find anything that looks like a JSON dict
                 match = re.search(r'\{.*\}', generated, re.DOTALL)
             if match:
                 json_str = match.group(0)
-                # Attempt to parse JSON
                 params = json.loads(json_str)
-                # Ensure all required keys exist
                 for key in self.defaults:
                     if key not in params:
                         params[key] = self.defaults[key]
-                # Clip values to valid ranges
                 for p in ['fc', 'rs', 'c_bulk', 'L0_nm']:
                     if p in params and isinstance(params[p], (int, float)):
                         low, high = DepositionParameters.RANGES[p]
                         params[p] = np.clip(params[p], low, high)
-                # Post-validation: if regex_params provided, check for mismatches
                 if regex_params is not None:
                     for key in ['L0_nm', 'fc', 'rs', 'c_bulk']:
                         if key in regex_params and key in params:
-                            # if regex extracted a value and LLM's differs significantly, warn and use regex
                             if abs(params[key] - regex_params[key]) > 1e-3:
                                 st.warning(f"LLM {key}={params[key]} mismatches regex {regex_params[key]}. Using regex for this parameter.")
                                 params[key] = regex_params[key]
                 return params
             else:
-                # Fallback: attempt to extract individual parameters using regex
                 st.warning("LLM did not produce a valid JSON. Falling back to regex extraction.")
                 return self._fallback_extract(generated)
         except Exception as e:
             st.warning(f"LLM parsing failed: {e}. Falling back to regex.")
-            return self.parse(text)  # fallback to regex
+            return self.parse(text)
 
-    # Ensemble method – run multiple generations and combine by averaging/consensus
     def parse_with_llm_ensemble(self, text: str, tokenizer, model, n_runs=3, regex_params=None, temperature=0.2) -> dict:
-        """Run LLM multiple times and combine results (average for floats, mode for categorical)."""
+        """Run LLM multiple times and combine results."""
         all_params = []
         for _ in range(n_runs):
             params = self.parse_with_llm(text, tokenizer, model, regex_params, temperature=temperature)
             all_params.append(params)
 
-        # Combine
         combined = {}
         for key in self.defaults:
             values = [p[key] for p in all_params]
             if isinstance(self.defaults[key], bool):
-                # mode for boolean
                 combined[key] = max(set(values), key=values.count)
             elif isinstance(self.defaults[key], str):
-                # mode for string
                 combined[key] = max(set(values), key=values.count)
             elif key == 'time' and self.defaults[key] is None:
-                # time can be None or float; take most common, if tie, average?
                 non_none = [v for v in values if v is not None]
                 if non_none:
                     combined[key] = np.mean(non_none)
                 else:
                     combined[key] = None
             else:
-                # average for numeric
                 combined[key] = np.mean([v for v in values if v is not None])
         return combined
 
-    # Hybrid parse – combines regex and LLM with confidence
     def hybrid_parse(self, text: str, tokenizer, model, use_ensemble=False, ensemble_runs=3) -> dict:
         """Run regex first, then LLM (optionally ensemble), and merge based on confidence."""
-        # Step 1: regex
         regex_params = self.parse(text)
         regex_conf = {}
         for key in self.defaults:
-            # high confidence if value differs from default, low if default (may indicate no match)
             regex_conf[key] = 1.0 if regex_params[key] != self.defaults[key] else 0.0
 
-        # Step 2: LLM if available
         if tokenizer is not None and model is not None:
             if use_ensemble:
                 llm_params = self.parse_with_llm_ensemble(text, tokenizer, model, n_runs=ensemble_runs, regex_params=regex_params)
             else:
                 llm_params = self.parse_with_llm(text, tokenizer, model, regex_params=regex_params)
-            # Confidence for LLM: moderate if extracted, lower if default
             llm_conf = {}
             for key in self.defaults:
                 llm_conf[key] = 0.7 if llm_params[key] != self.defaults[key] else 0.3
@@ -1592,7 +1549,6 @@ JSON:"""
             llm_params = self.defaults.copy()
             llm_conf = {k: 0.0 for k in self.defaults}
 
-        # Step 3: Merge with confidence
         final_params = {}
         for key in self.defaults:
             if regex_conf[key] > llm_conf[key]:
@@ -1600,15 +1556,13 @@ JSON:"""
             elif llm_conf[key] > regex_conf[key]:
                 final_params[key] = llm_params[key]
             else:
-                # tie: prefer regex if it matched, else average if numeric
                 if regex_conf[key] > 0:
                     final_params[key] = regex_params[key]
                 elif isinstance(regex_params[key], (int, float)) and isinstance(llm_params[key], (int, float)):
                     final_params[key] = (regex_params[key] + llm_params[key]) / 2
                 else:
-                    final_params[key] = regex_params[key]  # fallback
+                    final_params[key] = regex_params[key]
 
-        # Clip to ranges
         for p in ['fc', 'rs', 'c_bulk', 'L0_nm']:
             low, high = DepositionParameters.RANGES[p]
             final_params[p] = np.clip(final_params[p], low, high)
@@ -1618,7 +1572,6 @@ JSON:"""
     def _fallback_extract(self, generated: str) -> dict:
         """Fallback: use regex to extract parameters from LLM's output if JSON fails."""
         params = self.defaults.copy()
-        # Try to find numbers associated with known parameter names
         patterns = {
             'L0_nm': r'L0[:_]?\s*(\d+(?:\.\d+)?)',
             'fc': r'fc[:_]?\s*(\d+(?:\.\d+)?)',
@@ -1638,7 +1591,6 @@ JSON:"""
                         params[key] = val
                 except:
                     pass
-        # Handle boolean and categorical manually (not easily extracted via regex)
         return params
 
     def parse(self, text: str) -> dict:
@@ -1804,18 +1756,14 @@ class CompletionAnalyzer:
                           tolerance: float = 0.3,
                           use_median: bool = True,
                           completeness_threshold: float = 0.95) -> Tuple[Optional[float], Optional[float], bool]:
-        """Compute completion time, minimal thickness, and whether shell is complete.
-        If max_time_norm is provided, only consider key frames up to that time.
-        """
+        """Compute completion time, minimal thickness, and whether shell is complete."""
         key_times_norm = list(manager.key_frames.keys()) if hasattr(manager, 'key_frames') else []
         if not key_times_norm:
             return None, None, False
 
-        # Filter times up to max_time_norm if provided
         if max_time_norm is not None:
             key_times_norm = [t for t in key_times_norm if t <= max_time_norm]
             if not key_times_norm:
-                # No frames up to this time; return incomplete
                 final_th = manager.get_thickness_at_time(max_time_norm) if hasattr(manager, 'get_thickness_at_time') else 0.0
                 return None, final_th, False
 
@@ -1844,8 +1792,7 @@ class CompletionAnalyzer:
             if len(profile_from_core) == 0:
                 continue
 
-            # Softer check: require that at least completeness_threshold fraction of shell bins are above threshold
-            shell_bins = profile_from_core[profile_from_core < 1.5]  # exclude core region
+            shell_bins = profile_from_core[profile_from_core < 1.5]
             if len(shell_bins) > 0:
                 frac_above = np.mean(shell_bins >= 1.0 - tolerance)
                 is_continuous = frac_above >= completeness_threshold
@@ -1864,7 +1811,6 @@ class CompletionAnalyzer:
                 dr_min = max(0.0, dr_est)
                 break
 
-        # Check final state (last key frame considered)
         if sorted_times:
             final_t = sorted_times[-1]
             final_fields = manager.key_frames.get(final_t)
@@ -1892,40 +1838,26 @@ class CompletionAnalyzer:
     @staticmethod
     def compute_shell_quality(phi: np.ndarray, psi: np.ndarray, core_radius_nm: float,
                               L0_nm: float) -> Dict[str, float]:
-        """
-        Compute shell‑tracking diagnostics:
-          - Intrusion: mean phi inside core (psi > 0.5)
-          - Coverage: fraction of core boundary pixels adjacent to Ag shell
-          - Uniformity: standard deviation of radial thickness (proxy‑based)
-        """
-        # Intrusion
+        """Compute shell‑tracking diagnostics."""
         intrusion = np.mean(phi[psi > 0.5]) if np.any(psi > 0.5) else 0.0
 
-        # Coverage of core boundary
         core_mask = psi > 0.5
         if np.any(core_mask):
-            # Erode core to get boundary
             struct = generate_binary_structure(2, 1)
             eroded = binary_erosion(core_mask, struct)
             boundary = core_mask & (~eroded)
-            # Dilate boundary to find adjacent shell
             dilated_boundary = binary_dilation(boundary, struct)
             adjacent_shell = (DepositionPhysics.material_proxy(phi, psi) == 1.0) & dilated_boundary
             coverage = np.sum(adjacent_shell) / np.sum(boundary) if np.sum(boundary) > 0 else 0.0
-            # FIX: cap coverage at 1.0 to avoid dilation artifacts
             coverage = min(1.0, coverage)
         else:
             coverage = 0.0
 
-        # Uniformity: radial thickness variance
         proxy = DepositionPhysics.material_proxy(phi, psi)
         r_centers, profile = DepositionPhysics.compute_radial_profile(proxy, L0_nm, n_bins=100)
-        # thickness at each radius: distance from core radius
         core_radius_idx = np.argmin(np.abs(r_centers - core_radius_nm))
-        # shell region: proxy == 1.0 (Ag)
         shell_mask = proxy == 1.0
         if np.any(shell_mask):
-            # radial distances of shell pixels
             H, W = shell_mask.shape
             x = np.linspace(0, L0_nm, W)
             y = np.linspace(0, L0_nm, H)
@@ -1942,28 +1874,16 @@ class CompletionAnalyzer:
             'uniformity': float(uniformity)
         }
 
-    # ------------------------------------------------------------------
-    # MODIFIED: Improved LLM completeness inference with robust JSON extraction,
-    # example-driven prompt, simplified generation parameters, and strong fallback.
-    # Also includes relevance and entropy in the description.
-    # ------------------------------------------------------------------
     @staticmethod
     def _extract_json_robust(generated: str) -> Optional[Dict]:
-        """
-        Extract a JSON object from generated text, attempt repair of common errors.
-        Returns parsed dict or None.
-        """
-        # Try to find a JSON-like block: first non-greedy capture of {...}
+        """Extract a JSON object from generated text, attempt repair of common errors."""
         json_pattern = r'\{.*?\}'
         match = re.search(json_pattern, generated, re.DOTALL | re.MULTILINE)
         if not match:
             return None
         json_str = match.group(0)
 
-        # Repair: insert missing commas after true/false/null before a key
-        # e.g., "true" "t_complete" -> "true", "t_complete"
         json_str = re.sub(r'(true|false|null)\s*(")', r'\1,\2', json_str)
-        # Repair: remove trailing commas before } or ]
         json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
 
         try:
@@ -1973,21 +1893,15 @@ class CompletionAnalyzer:
 
     @staticmethod
     def llm_infer_completeness(desc: str, tokenizer, model, relevance: float = 0.5, entropy: float = 0.0) -> Tuple[bool, Optional[float], Optional[float], str]:
-        """Use LLM (GPT‑2 or Qwen) to infer completeness from a textual description of shell metrics.
-        Improved with example-driven prompt, deterministic generation, and robust extraction.
-        Also includes relevance and entropy in the description to calibrate confidence.
-        """
+        """Use LLM (GPT‑2 or Qwen) to infer completeness from a textual description of shell metrics."""
         backend = st.session_state.get('llm_backend_loaded', 'GPT-2 (default, fastest startup)')
-        # Use temperature=0.0 and do_sample=False for deterministic output (better JSON)
         temperature = 0.0
         do_sample = False
 
-        # Build prompt with a concrete example (like CODE 1)
         system = "You are a materials scientist. Output ONLY a JSON object."
         examples = """
 Example: {"complete": true, "t_complete": 0.001, "dr_min": 5.2, "explanation": "High coverage, low intrusion, uniform thickness."}
 """
-        # Append relevance and entropy to the description
         enhanced_desc = f"{desc}\n\nAdditional context: Relevance score (0-1, higher means the input query matches available data well): {relevance:.3f}. Entropy of source weights (higher means more uncertainty): {entropy:.3f}."
         user = f"""{examples}
 Data: {enhanced_desc}
@@ -2013,21 +1927,17 @@ JSON:"""
                 )
             generated = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-            # Step 1: try robust JSON extraction
             result = CompletionAnalyzer._extract_json_robust(generated)
             if result is not None:
-                # Ensure required keys exist (fallback to defaults if missing)
                 complete = result.get('complete', False)
                 t_complete = result.get('t_complete', None)
                 dr_min = result.get('dr_min', None)
                 explanation = result.get('explanation', 'No explanation provided.')
                 return complete, t_complete, dr_min, explanation
 
-            # Step 2: fallback – regex for "complete": true/false
             complete_match = re.search(r'"complete"\s*:\s*(true|false)', generated, re.IGNORECASE)
             if complete_match:
                 complete = complete_match.group(1).lower() == 'true'
-                # Try to extract t_complete and dr_min if present
                 t_match = re.search(r'"t_complete"\s*:\s*(\d+\.?\d*(?:e[+-]?\d+)?|null)', generated, re.IGNORECASE)
                 dr_match = re.search(r'"dr_min"\s*:\s*(\d+\.?\d*(?:e[+-]?\d+)?|null)', generated, re.IGNORECASE)
                 exp_match = re.search(r'"explanation"\s*:\s*"([^"]*)"', generated, re.IGNORECASE)
@@ -2036,7 +1946,6 @@ JSON:"""
                 explanation = exp_match.group(1) if exp_match else "LLM: Inferred completeness (keyword fallback)."
                 return complete, t_complete, dr_min, explanation
 
-            # Step 3: final fallback – look for the word "complete" in context
             if 'complete' in generated.lower():
                 if 'true' in generated.lower() or 'yes' in generated.lower():
                     return True, None, None, "LLM: Detected 'complete' with positive keyword."
@@ -2047,7 +1956,6 @@ JSON:"""
         except Exception as e:
             return False, None, None, f"LLM inference failed: {e}"
 
-    # MODIFIED: generate_recommendations now accepts llm_complete and adds a discrepancy note.
     @staticmethod
     def generate_recommendations(params: dict, relevance: float,
                                   t_complete: Optional[float],
@@ -2096,7 +2004,6 @@ JSON:"""
                 "⚠️ **Large core**: fc > 0.35 leaves limited space for shell. "
                 "Verify rs target is achievable with available domain space."
             )
-        # Add shell quality suggestions
         if shell_quality:
             if shell_quality['intrusion'] > 0.1:
                 suggestions.append(
@@ -2113,10 +2020,8 @@ JSON:"""
                     f"📉 **Non‑uniform shell**: Thickness std dev = {shell_quality['uniformity']:.2f} nm. "
                     "Consider adjusting parameters for more uniform growth."
                 )
-        # Add LLM explanation if available
         if llm_explanation:
             suggestions.append(f"🧠 **LLM insight**: {llm_explanation}")
-        # If LLM completeness differs from rule-based, add a note
         if llm_complete is not None and llm_complete != is_complete:
             suggestions.append(
                 f"⚠️ **LLM vs. rule‑based discrepancy**: LLM says the shell is {'complete' if llm_complete else 'incomplete'}, "
@@ -2134,7 +2039,6 @@ JSON:"""
 # ENHANCED HEATMAP VISUALIZER
 # =============================================
 class HeatMapVisualizer:
-    # Mapping from Matplotlib colormap names to Plotly-compatible names
     MATPLOTLIB_TO_PLOTLY = {
         'viridis': 'Viridis', 'plasma': 'Plasma', 'inferno': 'Inferno',
         'magma': 'Magma', 'cividis': 'Cividis', 'Greys': 'Greys',
@@ -2143,7 +2047,7 @@ class HeatMapVisualizer:
         'YlOrRd': 'YlOrRd', 'OrRd': 'OrRd', 'PuRd': 'PuRd',
         'RdPu': 'RdPu', 'BuPu': 'BuPu', 'GnBu': 'GnBu',
         'PuBu': 'PuBu', 'YlGnBu': 'YlGnBu', 'PuBuGn': 'PuBuGn',
-        'BuGn': 'BuGn', 'YlGn': 'YlGn', 'binary': 'Greys',  # approximate
+        'BuGn': 'BuGn', 'YlGn': 'YlGn', 'binary': 'Greys',
         'gist_yarg': 'Greys_r', 'gist_gray': 'Gray', 'gray': 'Gray',
         'bone': 'bone', 'pink': 'pink', 'spring': 'spring',
         'summer': 'summer', 'autumn': 'autumn', 'winter': 'winter',
@@ -2161,10 +2065,7 @@ class HeatMapVisualizer:
         'CMRmap': 'CMRmap', 'cubehelix': 'Cubehelix', 'brg': 'brg',
         'gist_earth': 'Earth', 'terrain': 'Terrain', 'ocean': 'Ocean',
         'gist_water': 'Blues', 'flag': 'flag', 'prism': 'Prism',
-        'tab10': 'Set1',  # approximate
-        'tab20': 'Set3',  # approximate
-        'tab20b': 'Set2', # approximate
-        'tab20c': 'Set2', # approximate
+        'tab10': 'Set1', 'tab20': 'Set3', 'tab20b': 'Set2', 'tab20c': 'Set2',
         'Set1': 'Set1', 'Set2': 'Set2', 'Set3': 'Set3',
         'Pastel1': 'Pastel1', 'Pastel2': 'Pastel2',
         'Paired': 'Paired', 'Accent': 'Accent', 'Dark2': 'Dark2'
@@ -2178,10 +2079,8 @@ class HeatMapVisualizer:
 
     def _is_material_proxy(self, field_data, colorbar_label, title):
         unique_vals = np.unique(field_data)
-        # Robust check: if values are exactly 0, 1, 2 (allowing for floats)
         valid_material_values = {0.0, 1.0, 2.0}
         is_discrete = set(unique_vals).issubset(valid_material_values) and len(unique_vals) <= 3
-        # Optional keyword check as a fallback, but data values are primary
         return is_discrete
 
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
@@ -2247,7 +2146,6 @@ class HeatMapVisualizer:
         else:
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Value={field_data[i,j]:.4f}"
                      for j in range(nx)] for i in range(ny)]
-            # Map Matplotlib colormap name to a Plotly-compatible one
             plotly_cmap = self.MATPLOTLIB_TO_PLOTLY.get(cmap_name, 'Viridis')
             fig = go.Figure(data=go.Heatmap(
                 z=field_data, x=x, y=y, colorscale=plotly_cmap,
@@ -2437,7 +2335,6 @@ class HybridWeightVisualizer:
 
         for i, source in enumerate(sources_data):
             source_idx = i + 1
-            source_color = color_palette[i % len(color_palette)]
 
             source_indices.append(source_idx)
             target_indices.append(component_start)
@@ -3373,7 +3270,6 @@ def format_time_ago(dt: datetime) -> str:
 
 def get_client_ip() -> Optional[str]:
     """Best-effort retrieval of the visitor's public IP."""
-    # 1) Try Streamlit's request headers (works behind proxies / tunnels)
     try:
         headers = st.context.headers  # Streamlit ≥ 1.37
         xff = headers.get("X-Forwarded-For")
@@ -3385,7 +3281,6 @@ def get_client_ip() -> Optional[str]:
     except Exception:
         pass
 
-    # 2) Fallback: external echo service
     try:
         r = requests.get("https://api.ipify.org?format=json", timeout=GEO_API_TIMEOUT)
         if r.status_code == 200:
@@ -3401,23 +3296,19 @@ def get_geo_info(ip: Optional[str]) -> Dict[str, Any]:
     if not ip:
         return empty
 
-    # Local / private ranges – don't query external API
     if (ip in ("127.0.0.1","::1","localhost")
             or ip.startswith(("192.168.","10.","172."))):
         return {**empty,
                 'country':'Local Network','country_code':'LO',
                 'city':'Local','region':'Local'}
 
-    # Check if we are in cooldown due to rate limits
     cooldown_until = st.session_state.get('geo_api_cooldown_until')
     if cooldown_until and datetime.now() < cooldown_until:
         return empty
 
     try:
-        # Free tier: 30k req/month, no API key required
         r = requests.get(f"https://ipapi.co/{ip}/json/", timeout=GEO_API_TIMEOUT)
 
-        # Handle ipapi.co rate limits (X-Rl: remaining, X-Ttl: seconds until reset)
         remaining = int(r.headers.get('X-Rl', 999))
         ttl = int(r.headers.get('X-Ttl', 60))
         if remaining <= 1:
@@ -3456,11 +3347,7 @@ def save_visitors_log(log: Dict[str, Any]) -> None:
         pass
 
 def track_visitor() -> Tuple[Optional[Dict], int, List[Dict]]:
-    """
-    Register / refresh the current visitor.
-    Returns (current_visitor_info, online_count, online_visitors_list).
-    """
-    # ---- Avoid hammering the geo API on every rerun ----
+    """Register / refresh the current visitor."""
     if 'vt_ip' not in st.session_state or st.session_state.vt_ip is None:
         st.session_state.vt_ip  = get_client_ip()
         st.session_state.vt_geo = get_geo_info(st.session_state.vt_ip)
@@ -3487,7 +3374,6 @@ def track_visitor() -> Tuple[Optional[Dict], int, List[Dict]]:
     }
     save_visitors_log(log)
 
-    # ---- Determine online visitors ----
     online = []
     for vip, info in log.items():
         try:
@@ -3498,8 +3384,17 @@ def track_visitor() -> Tuple[Optional[Dict], int, List[Dict]]:
             continue
     return log[ip], len(online), online
 
+# =============================================
+# FULLY INTERACTIVE TIME-LAPSE VISITOR TRACKER
+# =============================================
 def display_visitor_tracker() -> None:
-    """Render the geographic visitor tracker widget in the sidebar."""
+    """Render the geographic visitor tracker with:
+       - Top 5 Visitor Countries leaderboard
+       - Fully interactive time-lapse map (Play/Pause + date slider)
+       - Status colors (Online/Seen today/Offline)
+       - Point sizes scaled by visit count
+       - Flag emojis in hover tooltips
+    """
     st.markdown("### 🌍 Visitor Tracker")
 
     try:
@@ -3509,6 +3404,7 @@ def display_visitor_tracker() -> None:
         return
 
     log = load_visitors_log()
+    now = datetime.now()
 
     # ---- Summary metrics ----
     c1, c2 = st.columns(2)
@@ -3531,38 +3427,131 @@ def display_visitor_tracker() -> None:
             except Exception:
                 pass
 
-    # ---- World Map of Online Visitors ----
+    # =========================================================
+    # ---- Top Visitor Countries (Flags + Total Counts) ----
+    # =========================================================
+    if log:
+        country_counts = {}
+        for vip, info in log.items():
+            cc = info.get('country_code', 'LO')
+            country = info.get('country', 'Unknown')
+            if country == 'Local Network':
+                continue  # Skip local network for the leaderboard
+            key = (country, cc)
+            country_counts[key] = country_counts.get(key, 0) + 1
+
+        if country_counts:
+            sorted_countries = sorted(country_counts.items(), key=lambda x: -x[1])
+            st.markdown("#### 🏳️ Top Visitor Countries")
+            cols = st.columns(min(5, len(sorted_countries)))
+            for i, ((country, cc), count) in enumerate(sorted_countries[:5]):
+                with cols[i]:
+                    flag = get_country_flag(cc)
+                    # Truncate long country names so the metric card stays neat
+                    short_name = country[:15] + '...' if len(country) > 15 else country
+                    st.metric(f"{flag} {short_name}", f"{count} visitors")
+            st.markdown("---")
+
+    # =========================================================
+    # ---- Live Tracker Map (Animated Time-Lapse with Flags) ----
+    # =========================================================
     map_data = []
-    for v in online_visitors:
-        lat = v.get('latitude')
-        lon = v.get('longitude')
+    for vip, info in log.items():
+        lat = info.get('latitude')
+        lon = info.get('longitude')
         if lat and lon:
             try:
+                last_seen_dt = datetime.fromisoformat(info.get('last_seen', '1970-01-01'))
+                first_seen_dt = datetime.fromisoformat(info.get('first_seen', '1970-01-01'))
+
+                # Determine status color and base size
+                seconds_since_last = (now - last_seen_dt).total_seconds()
+                if seconds_since_last <= ONLINE_THRESHOLD_S:
+                    status_color = '#10B981'  # Green
+                    status_text = "🟢 Online"
+                    base_size = 12
+                elif seconds_since_last <= 86400:
+                    status_color = '#F59E0B'  # Orange
+                    status_text = "🟠 Seen today"
+                    base_size = 10
+                else:
+                    status_color = '#6B7280'  # Grey
+                    status_text = "⚪ Offline"
+                    base_size = 8
+
+                visits = info.get('visits', 1)
+                cc = info.get('country_code', '')
+                flag = get_country_flag(cc)
+
                 map_data.append({
                     'lat': float(lat),
                     'lon': float(lon),
-                    'city': v.get('city', 'Unknown'),
-                    'country': v.get('country', 'Unknown')
+                    'city': info.get('city', 'Unknown'),
+                    'country': info.get('country', 'Unknown'),
+                    'visits': visits,
+                    'first_seen': first_seen_dt,
+                    'last_seen': last_seen_dt,
+                    'color': status_color,
+                    'status': status_text,
+                    'size': base_size + (visits * 2),
+                    'flag': flag
                 })
             except (ValueError, TypeError):
                 continue
 
     if map_data:
-        with st.expander("🗺️ Online Visitors Map", expanded=False):
+        with st.expander("🗺️ Live Tracker Map (Animated)", expanded=True):
             df_map = pd.DataFrame(map_data)
-            fig_map = go.Figure(data=go.Scattergeo(
-                lon=df_map['lon'],
-                lat=df_map['lat'],
-                text=df_map['city'] + ', ' + df_map['country'],
-                mode='markers',
-                marker=dict(
-                    size=10,
-                    color='#3B82F6',
-                    line=dict(width=1, color='black'),
-                    opacity=0.8
-                )
-            ))
+
+            # Build animation frames by date (last 14 days)
+            dates = pd.date_range(end=now.date(), periods=14, freq='D').to_pydatetime()
+            frames = []
+
+            for d in dates:
+                # Convert pandas Timestamp to python datetime if needed
+                d_py = d if isinstance(d, datetime) else pd.Timestamp(d).to_pydatetime()
+                visible = df_map[df_map['first_seen'] <= d_py]
+                if not visible.empty:
+                    frame_data = go.Scattergeo(
+                        lon=visible['lon'],
+                        lat=visible['lat'],
+                        customdata=visible[['city', 'country', 'visits', 'status', 'flag']],
+                        mode='markers',
+                        marker=dict(
+                            size=visible['size'],
+                            color=visible['color'],
+                            line=dict(width=1, color='rgba(0,0,0,0.5)'),
+                            opacity=0.85
+                        ),
+                        hovertemplate="<b>%{customdata[4]} %{customdata[0]}, %{customdata[1]}</b><br>Visits: %{customdata[2]}<br>Status: %{customdata[3]}<extra></extra>"
+                    )
+                    frames.append(go.Frame(data=frame_data, name=d_py.strftime('%Y-%m-%d')))
+                else:
+                    frames.append(go.Frame(data=go.Scattergeo(), name=d_py.strftime('%Y-%m-%d')))
+
+            # Initial frame = latest date (current visible set)
+            latest_dt = dates[-1] if isinstance(dates[-1], datetime) else pd.Timestamp(dates[-1]).to_pydatetime()
+            visible_init = df_map[df_map['first_seen'] <= latest_dt]
+
+            fig_map = go.Figure(
+                data=go.Scattergeo(
+                    lon=visible_init['lon'],
+                    lat=visible_init['lat'],
+                    customdata=visible_init[['city', 'country', 'visits', 'status', 'flag']],
+                    mode='markers',
+                    marker=dict(
+                        size=visible_init['size'],
+                        color=visible_init['color'],
+                        line=dict(width=1, color='rgba(0,0,0,0.5)'),
+                        opacity=0.85
+                    ),
+                    hovertemplate="<b>%{customdata[4]} %{customdata[0]}, %{customdata[1]}</b><br>Visits: %{customdata[2]}<br>Status: %{customdata[3]}<extra></extra>"
+                ),
+                frames=frames
+            )
+
             fig_map.update_layout(
+                title_text='Global Visitor Tracker (Animated)',
                 geo=dict(
                     projection_type='natural earth',
                     showland=True,
@@ -3572,8 +3561,37 @@ def display_visitor_tracker() -> None:
                     showcountries=True,
                     countrycolor='rgb(200, 200, 200)'
                 ),
-                margin=dict(l=0, r=0, t=0, b=0),
-                height=250
+                margin=dict(l=0, r=0, t=40, b=0),
+                height=350,
+                updatemenus=[dict(
+                    type="buttons",
+                    showactive=False,
+                    y=0.95,
+                    x=0.01,
+                    xanchor="left",
+                    yanchor="top",
+                    buttons=[
+                        dict(label="▶️ Play",
+                             method="animate",
+                             args=[None, dict(frame=dict(duration=500, redraw=True), fromcurrent=True)]),
+                        dict(label="⏸️ Pause",
+                             method="animate",
+                             args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")])
+                    ]
+                )],
+                sliders=[dict(
+                    active=len(dates)-1,
+                    currentvalue=dict(prefix="Date: "),
+                    pad=dict(t=10),
+                    steps=[
+                        dict(
+                            label=(d.strftime('%m-%d') if isinstance(d, datetime) else pd.Timestamp(d).strftime('%m-%d')),
+                            method="animate",
+                            args=[[(d.strftime('%Y-%m-%d') if isinstance(d, datetime) else pd.Timestamp(d).strftime('%Y-%m-%d'))]]
+                        )
+                        for d in dates
+                    ]
+                )]
             )
             st.plotly_chart(fig_map, use_container_width=True)
 
@@ -3604,7 +3622,6 @@ def display_visitor_tracker() -> None:
                 df_time = pd.DataFrame(timeline_data)
                 df_time['date'] = pd.to_datetime(df_time['date'])
 
-                # Filter to last 14 days
                 cutoff_date = datetime.now() - timedelta(days=14)
                 df_time = df_time[df_time['date'] >= cutoff_date]
 
@@ -3612,7 +3629,6 @@ def display_visitor_tracker() -> None:
                     daily_counts = df_time.groupby(df_time['date'].dt.date).size().reset_index(name='visits')
                     daily_counts['date'] = pd.to_datetime(daily_counts['date'])
 
-                    # FIXED: `line` is now correctly nested inside `marker` for go.Bar
                     fig_time = go.Figure(data=go.Bar(
                         x=daily_counts['date'],
                         y=daily_counts['visits'],
@@ -3675,10 +3691,10 @@ def load_llm(backend: str):
     return tok, mod, backend
 
 # =============================================
-# NEW: Persistent Parameter Summary Display
+# Persistent Parameter Summary Display
 # =============================================
 def display_parameter_summary():
-    """Show a compact summary of active parameters in the sidebar, highlighting defaults."""
+    """Show a compact summary of active parameters in the sidebar."""
     if st.session_state.get('temporal_manager') is not None:
         target = st.session_state.temporal_manager.target_params
         defaults = st.session_state.nlp_parser.defaults
@@ -3694,27 +3710,24 @@ def display_parameter_summary():
                 st.write(f"**{key}**: {val_str} ({status})")
 
 # =============================================
-# NEW: Logo Display Function
+# Logo Display Function
 # =============================================
 def display_logo():
     """Search for a logo image in the 'logo' folder and display it in the sidebar."""
     logo_path = None
     if os.path.exists(LOGO_DIR) and os.path.isdir(LOGO_DIR):
-        # Look for common image extensions
         for ext in ['*.png', '*.jpg', '*.jpeg', '*.gif', '*.svg']:
             files = glob.glob(os.path.join(LOGO_DIR, ext))
             if files:
-                logo_path = files[0]  # take the first found
+                logo_path = files[0]
                 break
     if logo_path:
         st.sidebar.image(logo_path, use_container_width=True)
     else:
-        # Optional: display a placeholder or nothing
         st.sidebar.markdown("### 🧪 CoreShellLLM")
-        # Could also show a default text logo
 
 # =============================================
-# INITIALIZE SESSION STATE (with manual LLM cache)
+# INITIALIZE SESSION STATE
 # =============================================
 def initialize_session_state():
     defaults = {
@@ -3770,7 +3783,7 @@ def initialize_session_state():
         st.session_state.completion_analyzer = CompletionAnalyzer()
 
 # =============================================
-# RENDER INTELLIGENT DESIGNER TAB (with manual LLM cache)
+# RENDER INTELLIGENT DESIGNER TAB
 # =============================================
 def render_intelligent_designer_tab():
     st.markdown('<h2 class="section-header">🤖 Intelligent Designer</h2>', unsafe_allow_html=True)
@@ -3826,26 +3839,22 @@ def render_intelligent_designer_tab():
                 st.session_state.active_tab = "Multi-Prediction Comparison"
                 st.rerun()
 
-    # NEW: Model selection dropdown – widget key is 'llm_backend'
     model_choice = st.selectbox(
         "🧠 LLM Backend for Parsing & Completeness",
         options=["GPT-2 (default, fastest startup)", 
                  "Qwen2-0.5B-Instruct (best JSON)", 
                  "Qwen2.5-0.5B-Instruct (newest, recommended)"],
-        index=0,  # GPT-2 is default
+        index=0,
         key="llm_backend"
     )
 
-    # Unified loader – store loaded backend in separate key
     if st.session_state.llm_available:
         tokenizer, model, active_backend = load_llm(model_choice)
         st.session_state.llm_tokenizer = tokenizer
         st.session_state.llm_model = model
         st.session_state.llm_backend_loaded = active_backend
-        # Show current backend in UI
         st.caption(f"Current backend: **{st.session_state.llm_backend_loaded}** — Qwen models give cleaner JSON")
 
-    # LLM toggles (use loaded backend)
     llm_available = st.session_state.llm_available and st.session_state.llm_tokenizer is not None
     col_gpt1, col_gpt2, col_gpt3 = st.columns(3)
     with col_gpt1:
@@ -3868,7 +3877,6 @@ def render_intelligent_designer_tab():
     if run_design and user_input:
         with st.spinner("🔍 Parsing natural language input..."):
             parser = st.session_state.nlp_parser
-            # MODIFIED: Use hybrid_parse if LLM is enabled
             if use_llm_parse and st.session_state.llm_tokenizer is not None:
                 target_design = parser.hybrid_parse(
                     user_input, 
@@ -3879,7 +3887,7 @@ def render_intelligent_designer_tab():
                 )
             else:
                 target_design = parser.parse(user_input)
-            target_design['rs'] = 0.2  # as per spec
+            target_design['rs'] = 0.2
 
             design_record = {
                 'timestamp': datetime.now().isoformat(),
@@ -3912,7 +3920,6 @@ def render_intelligent_designer_tab():
             st.info("👈 Go to the sidebar and click 'Load Solutions' to import your numerical simulation data.")
             return
 
-        # Clean up previous animation temp files before creating new manager
         if st.session_state.get('temporal_manager') is not None:
             st.session_state.temporal_manager.cleanup_animation()
 
@@ -3926,7 +3933,7 @@ def render_intelligent_designer_tab():
                     lru_size=2,
                     require_categorical_match=False
                 )
-                st.session_state.temporal_manager = design_manager  # store for other tabs
+                st.session_state.temporal_manager = design_manager
             except Exception as e:
                 st.error(f"Failed to initialize simulation: {e}")
                 return
@@ -3939,17 +3946,12 @@ def render_intelligent_designer_tab():
             weights = np.array(design_manager.weights.get('combined', [1.0]))
             relevance = scorer.score(user_input, st.session_state.solutions, weights)
             confidence_text, confidence_color = scorer.get_confidence_level(relevance)
-            # Store relevance and entropy in session state for other tabs
             st.session_state.current_relevance = relevance
             st.session_state.current_entropy = design_manager.weights.get('entropy', 0.0)
 
-        # ------------------------------------------------------------------
-        # SLIDER AND DYNAMIC CONTENT (completeness recomputed on slider change)
-        # ------------------------------------------------------------------
         st.markdown("---")
         st.markdown("#### ⏱️ Select Any Time Point")
 
-        # Determine default normalized time from user input
         times_norm = list(design_manager.key_frames.keys())
         times_real = [design_manager.get_time_real(t) for t in times_norm]
         if target_design['time'] is not None:
@@ -3972,39 +3974,31 @@ def render_intelligent_designer_tab():
             t_sel_real = design_manager.get_time_real(selected_time_norm)
             st.markdown(f"**t = {t_sel_real:.3e} s**")
 
-        # Fetch fields for selected time
         fields_sel = design_manager.get_fields(selected_time_norm, use_interpolation=True)
 
-        # ==================================================================
-        # DYNAMIC COMPLETENESS ANALYSIS (based on selected_time_norm)
-        # ==================================================================
         analyzer = st.session_state.completion_analyzer
         core_radius_nm = target_design.get('fc', 0.18) * target_design.get('L0_nm', 60.0) / 2
 
-        # Recompute shell quality using current fields
         shell_quality = analyzer.compute_shell_quality(
             fields_sel['phi'], fields_sel['psi'], core_radius_nm, target_design.get('L0_nm', 60.0)
         )
 
-        # Recompute completeness up to selected time
         t_complete, dr_min, is_complete = analyzer.compute_completion(
             design_manager, target_design, 
             max_time_norm=selected_time_norm,
             tolerance=0.3, use_median=True, completeness_threshold=0.95
         )
 
-        # LLM completeness inference (if enabled) – now with manual cache and relevance/entropy
         llm_explanation = None
         llm_complete = None
         if use_llm_complete and st.session_state.llm_tokenizer is not None:
             with st.spinner("🤖 LLM analyzing shell completeness..."):
-                # Build description from current fields
                 r, prof = DepositionPhysics.compute_radial_profile(
                     DepositionPhysics.material_proxy(fields_sel['phi'], fields_sel['psi']),
                     target_design.get('L0_nm', 60.0), use_median=True
                 )
                 core_idx = np.argmin(np.abs(r - core_radius_nm))
-                profile_str = ', '.join([f"{x:.2f}" for x in prof[core_idx:core_idx+10]])  # first 10 bins
+                profile_str = ', '.join([f"{x:.2f}" for x in prof[core_idx:core_idx+10]])
                 desc = f"""
                 - Core radius: {core_radius_nm:.2f} nm
                 - Radial profile (first 10 bins after core): {profile_str}
@@ -4012,29 +4006,21 @@ def render_intelligent_designer_tab():
                 - Uniformity std: {shell_quality['uniformity']:.2f} nm
                 - Intrusion: {shell_quality['intrusion']:.3f}
                 """
-                # Compute hash for caching
                 desc_hash = hashlib.md5(desc.encode()).hexdigest()
 
-                # Check manual cache
                 if desc_hash in st.session_state.llm_cache:
                     llm_complete, llm_t, llm_dr, llm_explanation = st.session_state.llm_cache[desc_hash]
                 else:
-                    # Call LLM (uncached) with relevance and entropy
                     llm_complete, llm_t, llm_dr, llm_explanation = CompletionAnalyzer.llm_infer_completeness(
                         desc, st.session_state.llm_tokenizer, st.session_state.llm_model,
                         relevance=st.session_state.current_relevance,
                         entropy=st.session_state.current_entropy
                     )
-                    # Store in cache with LRU eviction
                     cache = st.session_state.llm_cache
                     cache[desc_hash] = (llm_complete, llm_t, llm_dr, llm_explanation)
                     if len(cache) > st.session_state.llm_cache_maxsize:
-                        # pop the oldest item (OrderedDict maintains insertion order)
                         cache.popitem(last=False)
 
-        # ==================================================================
-        # DISPLAY DYNAMIC RESULTS
-        # ==================================================================
         st.markdown("#### 🎯 Design Analysis Results")
         res_cols = st.columns(4)
         with res_cols[0]:
@@ -4080,9 +4066,6 @@ def render_intelligent_designer_tab():
                     f"Min thickness: {llm_dr if llm_dr else 'N/A'} nm")
             st.caption(f"Explanation: {llm_explanation}")
 
-        # ------------------------------------------------------------------
-        # VISUALIZATIONS (use fields_sel)
-        # ------------------------------------------------------------------
         if fields_sel:
             proxy_sel = DepositionPhysics.material_proxy(
                 fields_sel.get('phi', np.zeros((256, 256))),
@@ -4186,7 +4169,7 @@ def render_intelligent_designer_tab():
             st.plotly_chart(fig_thick, use_container_width=True)
 
 # =============================================
-# MAIN APP (with persistent parameter summary and hyperparameter warning)
+# MAIN APP
 # =============================================
 def main():
     st.set_page_config(
@@ -4196,9 +4179,6 @@ def main():
         initial_sidebar_state="expanded"
     )
 
-    # =========================================
-    # ENHANCED CSS for better visual appeal
-    # =========================================
     st.markdown("""
     <style>
     .main-header {
@@ -4279,9 +4259,6 @@ def main():
     st.markdown('<h1 class="main-header">🧪 CoreShellLLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
                unsafe_allow_html=True)
 
-    # =========================================
-    # HOW TO CITE SECTION (Main Page)
-    # =========================================
     with st.expander("📖 How to Cite", expanded=False):
         st.markdown("### How to Cite Info")
         st.markdown("If you use this code or the intelligent core‑shell designer framework in your research, please cite the following paper:")
@@ -4334,13 +4311,11 @@ def main():
     initialize_session_state()
 
     with st.sidebar:
-        # ========== LOGO ==========
         display_logo()
         st.markdown("---")
 
         st.markdown("## ⚙️ Configuration")
 
-        # NEW: Persistent parameter summary (calls function defined above)
         display_parameter_summary()
 
         st.markdown("### 📁 Data Management")
@@ -4391,7 +4366,6 @@ def main():
         n_key_frames = st.slider("Key frames", 1, 20, 5, 1)
         lru_cache_size = st.slider("LRU cache size", 1, 5, 2, 1)
 
-        # Check if hyperparameters changed (NEW)
         prev_params = st.session_state.get('hyperparams', {})
         current_params = {
             'sigma_fc': sigma_fc, 'sigma_rs': sigma_rs, 'sigma_c': sigma_c, 'sigma_L': sigma_L,
@@ -4409,7 +4383,7 @@ def main():
         st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
 
         # ====================================================
-        # 🌍 GEOGRAPHIC VISITOR ONLINE TRACKER
+        # 🌍 GEOGRAPHIC VISITOR ONLINE TRACKER (Time-Lapse)
         # ====================================================
         st.markdown("---")
         display_visitor_tracker()
