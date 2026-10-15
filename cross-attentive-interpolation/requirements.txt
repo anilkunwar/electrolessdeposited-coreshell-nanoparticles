@@ -10,6 +10,7 @@ imageio
 imageio-ffmpeg
 seaborn
 torch
+torchvision
 h5py
 msgpack
 dill
