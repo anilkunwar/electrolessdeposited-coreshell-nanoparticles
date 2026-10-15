@@ -17,6 +17,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - **NEW**: Dynamic completeness analysis – updates when time slider moves (rule‑based and LLM)
 - **FIXED**: UnhashableParamError in LLM caching – manual cache via session_state (LRU)
 - **NEW**: Geographic visitor online tracker with world map, timeline, and rate-limit handling
+- **FIXED**: Plotly `go.Bar` line parameter now correctly nested inside `marker`
 """
 
 import streamlit as st
@@ -55,7 +56,7 @@ import itertools
 import threading
 import shutil
 import glob  # for logo detection
-import requests  # NEW: for visitor tracking
+import requests  # for visitor tracking
 
 # NEW IMPORTS FOR GPT‑2 AND QWEN
 try:
@@ -3588,7 +3589,7 @@ def display_visitor_tracker() -> None:
                 flag = get_country_flag(cc)
                 st.write(f"{flag} **{country}** — {cnt} visitor{'s' if cnt>1 else ''}")
 
-    # ---- Daily / Weekly Timeline ----
+    # ---- Daily / Weekly Timeline (FIXED: line nested inside marker) ----
     if log:
         with st.expander("📈 Visit Timeline (Last 14 Days)", expanded=False):
             timeline_data = []
@@ -3611,11 +3612,14 @@ def display_visitor_tracker() -> None:
                     daily_counts = df_time.groupby(df_time['date'].dt.date).size().reset_index(name='visits')
                     daily_counts['date'] = pd.to_datetime(daily_counts['date'])
 
+                    # FIXED: `line` is now correctly nested inside `marker` for go.Bar
                     fig_time = go.Figure(data=go.Bar(
                         x=daily_counts['date'],
                         y=daily_counts['visits'],
-                        marker_color='rgba(59, 130, 246, 0.7)',
-                        line=dict(color='rgba(59, 130, 246, 1.0)', width=2)
+                        marker=dict(
+                            color='rgba(59, 130, 246, 0.7)',
+                            line=dict(color='rgba(59, 130, 246, 1.0)', width=2)
+                        )
                     ))
                     fig_time.update_layout(
                         xaxis_title="Date",
@@ -3736,12 +3740,12 @@ def initialize_session_state():
         'llm_available': TRANSFORMERS_AVAILABLE,
         'llm_cache': OrderedDict(),
         'llm_cache_maxsize': 20,
-        'current_relevance': 0.5,          # store relevance for other tabs
-        'current_entropy': 0.0,             # store entropy
+        'current_relevance': 0.5,
+        'current_entropy': 0.0,
         # --- Visitor tracker state ---
-        'vt_ip':  None,                     # cached visitor IP
-        'vt_geo': None,                     # cached geo info
-        'geo_api_cooldown_until': None,     # rate-limit cooldown timestamp
+        'vt_ip':  None,
+        'vt_geo': None,
+        'geo_api_cooldown_until': None,
     }
 
     for key, value in defaults.items():
@@ -4251,12 +4255,10 @@ def main():
         color: white;
         box-shadow: 0 5px 15px rgba(0,0,0,0.1);
     }
-    /* Sidebar logo styling */
     .sidebar-logo {
         text-align: center;
         margin-bottom: 1rem;
     }
-    /* Button hover effects */
     .stButton > button {
         transition: all 0.3s ease;
     }
@@ -4264,7 +4266,6 @@ def main():
         transform: translateY(-2px);
         box-shadow: 0 5px 15px rgba(0,0,0,0.1);
     }
-    /* Card-like containers for metrics */
     div[data-testid="metric-container"] {
         background-color: #f8fafc;
         padding: 1rem;
@@ -4285,7 +4286,6 @@ def main():
         st.markdown("### How to Cite Info")
         st.markdown("If you use this code or the intelligent core‑shell designer framework in your research, please cite the following paper:")
 
-        # Native Streamlit info box for the citation
         st.info("""
         **[1]** H. Ma et al., *"EDL‑catalyzed phase‑field modeling and numerically attentive interpolation framework for the intelligent design of Cu@Ag core‑shell nanoparticles,"* **Journal of Materiomics**, vol. 12, no. 6, p. 101287, Nov. 2026.
 
@@ -4294,7 +4294,6 @@ def main():
 
         st.markdown("#### BibTeX:")
 
-        # Native Streamlit code block (automatically provides a copy button in the top right!)
         bibtex = """@article{Ma2026EDL,
   title   = {EDL-catalyzed phase-field modeling and numerically attentive 
              interpolation framework for the intelligent design of 
@@ -4310,9 +4309,8 @@ def main():
 }"""
         st.code(bibtex, language='bibtex')
 
-        st.markdown("") # Spacer
+        st.markdown("")
 
-        # --- Browser-friendly Copy to Clipboard for plain text citation ---
         citation_text = ('[1] H. Ma et al., "EDL-catalyzed phase-field modeling and numerically '
                          'attentive interpolation framework for the intelligent design of Cu@Ag '
                          'core-shell nanoparticles," Journal of Materiomics, vol. 12, no. 6, '
@@ -4457,7 +4455,6 @@ def main():
 
     mgr = st.session_state.get('temporal_manager', None)
 
-    # Helper to show relevance and entropy in other tabs (if desired)
     def show_relevance_info():
         if mgr:
             st.sidebar.markdown("---")
@@ -4653,7 +4650,6 @@ def main():
         else:
             sources_data = mgr.sources_data if mgr.sources_data else []
             if sources_data:
-                # Show relevance and entropy
                 st.sidebar.metric("Relevance", f"{st.session_state.current_relevance:.3f}")
                 st.sidebar.metric("Entropy", f"{st.session_state.current_entropy:.3f}")
 
@@ -4796,7 +4792,6 @@ def main():
                             'material proxy': ('material', 'Set1')
                         }
 
-                        # Physical alignment if L0 differs
                         gt_L0 = gt_params.get('L0_nm', 20.0)
                         interp_L0 = gt_params.get('L0_nm', 20.0)
                         if abs(gt_L0 - interp_L0) > 1.0:
