@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Standalone Live Map Tracker Test App
-=====================================
+Standalone Live Map Tracker Test App (v2 - Fixed Local IP Handling)
+====================================================================
 Minimal Streamlit app to test the geographic visitor tracker independently.
 Run with: streamlit run tracker_test.py
 """
@@ -34,10 +34,9 @@ st.set_page_config(
 )
 
 # =============================================
-# CORE FUNCTIONS (extracted from original)
+# CORE FUNCTIONS
 # =============================================
 def get_country_flag(country_code: str) -> str:
-    """Convert a 2-letter ISO country code into a flag emoji."""
     if not country_code or len(str(country_code)) != 2:
         return "🏳️"
     try:
@@ -46,19 +45,13 @@ def get_country_flag(country_code: str) -> str:
     except Exception:
         return "🏳️"
 
-
 def format_time_ago(dt: datetime) -> str:
-    """Human-readable 'X minutes ago' label."""
     now = datetime.now()
     seconds = (now - dt).total_seconds()
-    if seconds < 60:
-        return "just now"
-    if seconds < 3600:
-        return f"{int(seconds // 60)} min ago"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)} h ago"
+    if seconds < 60: return "just now"
+    if seconds < 3600: return f"{int(seconds // 60)} min ago"
+    if seconds < 86400: return f"{int(seconds // 3600)} h ago"
     return f"{int(seconds // 86400)} d ago"
-
 
 def get_client_ip() -> Optional[str]:
     """Best-effort retrieval of the visitor's public IP."""
@@ -67,10 +60,24 @@ def get_client_ip() -> Optional[str]:
         headers = st.context.headers  # Streamlit ≥ 1.37
         xff = headers.get("X-Forwarded-For")
         if xff:
-            return xff.split(",")[0].strip()
+            # X-Forwarded-For can be a comma-separated list: "client, proxy1, proxy2"
+            # We want the first PUBLIC IP in the list.
+            ips = [ip.strip() for ip in xff.split(",")]
+            private_prefixes = ("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", 
+                                "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.", 
+                                "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.", 
+                                "127.", "169.254.", "::1")
+            for ip in ips:
+                if not ip.startswith(private_prefixes):
+                    return ip
+            # If all are private, return the first one (it will be flagged as Local Network later)
+            return ips[0] if ips else None
+        
         xri = headers.get("X-Real-IP")
         if xri:
-            return xri.strip()
+            xri = xri.strip()
+            if not xri.startswith(("10.", "192.168.", "172.", "127.")):
+                return xri
     except Exception as e:
         st.caption(f"ℹ️ Header method unavailable: {e}")
 
@@ -84,7 +91,6 @@ def get_client_ip() -> Optional[str]:
 
     return None
 
-
 def get_geo_info(ip: Optional[str]) -> Dict[str, Any]:
     """Resolve IP -> {country, country_code, city, region, lat, lon, tz}."""
     empty = {
@@ -95,7 +101,7 @@ def get_geo_info(ip: Optional[str]) -> Dict[str, Any]:
         return empty
 
     # Local network detection
-    if ip in ("127.0.0.1", "::1", "localhost") or ip.startswith(("192.168.", "10.", "172.")):
+    if ip in ("127.0.0.1", "::1", "localhost") or ip.startswith(("192.168.", "10.", "172.", "169.254.")):
         return {
             **empty,
             'country': 'Local Network', 'country_code': 'LO',
@@ -105,7 +111,6 @@ def get_geo_info(ip: Optional[str]) -> Dict[str, Any]:
     # Rate-limit cooldown
     cooldown_until = st.session_state.get('geo_api_cooldown_until')
     if cooldown_until and datetime.now() < cooldown_until:
-        st.warning(f"⏳ Geo API on cooldown until {cooldown_until}")
         return empty
 
     try:
@@ -134,7 +139,6 @@ def get_geo_info(ip: Optional[str]) -> Dict[str, Any]:
 
     return empty
 
-
 def load_visitors_log() -> Dict[str, Any]:
     try:
         if os.path.exists(VISITORS_LOG_FILE):
@@ -144,14 +148,12 @@ def load_visitors_log() -> Dict[str, Any]:
         st.warning(f"Could not load log: {e}")
     return {}
 
-
 def save_visitors_log(log: Dict[str, Any]) -> None:
     try:
         with open(VISITORS_LOG_FILE, 'w', encoding='utf-8') as f:
             json.dump(log, f, indent=2, ensure_ascii=False)
     except Exception as e:
         st.warning(f"Could not save log: {e}")
-
 
 def track_visitor() -> Tuple[Optional[Dict], int, list]:
     """Register / refresh the current visitor."""
@@ -196,7 +198,6 @@ def track_visitor() -> Tuple[Optional[Dict], int, list]:
 
     return log.get(ip), len(online), online
 
-
 # =============================================
 # UI
 # =============================================
@@ -208,7 +209,7 @@ with st.expander("🔧 Debug Info", expanded=True):
     st.write(f"**Log file:** `{VISITORS_LOG_FILE}`")
     st.write(f"**Streamlit version:** {st.__version__}")
 
-    col_a, col_b = st.columns(2)
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
         if st.button("🔄 Re-detect IP"):
             st.session_state.pop('vt_ip', None)
@@ -221,11 +222,20 @@ with st.expander("🔧 Debug Info", expanded=True):
             st.session_state.pop('vt_ip', None)
             st.session_state.pop('vt_geo', None)
             st.rerun()
+    with col_c:
+        if st.button("🧪 Simulate Public IP"):
+            # Force a known public IP (Google DNS) to test the map rendering
+            st.session_state.vt_ip = "8.8.8.8"
+            st.session_state.vt_geo = get_geo_info("8.8.8.8")
+            st.rerun()
 
     ip = st.session_state.get('vt_ip')
     geo = st.session_state.get('vt_geo')
     st.write(f"**Detected IP:** `{ip}`")
     st.write(f"**Geo info:** `{geo}`")
+    
+    if ip and ip.startswith(("10.", "192.168.", "172.")):
+        st.warning("⚠️ **Local/Private IP Detected:** Your network or hosting platform is masking your real public IP with a local address (e.g., `10.x.x.x`). Local IPs cannot be geolocated. Click **Simulate Public IP** above to verify the map works, or deploy this app to a public URL to get real visitor IPs.")
 
 # --- Track visitor ---
 try:
@@ -418,11 +428,10 @@ if map_data:
 else:
     st.info(
         "⏳ Waiting for visitor geographic data. The map will appear once public IPs are logged.\n\n"
-        "**If you are running locally**, the app is trying to detect your real public IP via "
-        "`api.ipify.org`. Please make sure:\n"
-        "1. You have an active internet connection\n"
-        "2. Outbound HTTPS requests are not blocked by a firewall/proxy\n"
-        "3. The `requests` library is installed (`pip install requests`)"
+        "**Why this happens:** Your current IP (`10.12.32.180`) is a private/local network address. "
+        "These cannot be mapped to a geographic location.\n\n"
+        "**How to test:** Click the **🧪 Simulate Public IP** button in the Debug Info panel above "
+        "to force a test location and verify the map renders correctly."
     )
 
 # --- Recent visitors ---
