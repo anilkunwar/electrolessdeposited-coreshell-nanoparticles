@@ -23,6 +23,8 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
     * Point sizes scale with visit count
     * Flag emojis embedded in hover tooltips
 - **FIXED**: Plotly `go.Bar` line parameter now correctly nested inside `marker`
+- **FIXED**: Local IP detection – now uses a browser-side JS fallback to obtain the
+  visitor's real public IP, so map/geolocation works when running locally
 """
 
 import streamlit as st
@@ -605,7 +607,6 @@ class CoreShellInterpolator:
             fields = self._get_fields_at_time(src, t_req, target_shape)
             source_fields.append(fields)
 
-            # Recompute thickness curve from raw fields
             common_t_norm = np.linspace(0, 1, n_time_points)
             th_vals = []
             t_vals_nd = []
@@ -621,7 +622,6 @@ class CoreShellInterpolator:
                 th_vals.append(th_nm)
                 t_vals_nd.append(t_norm * t_max_nd)
 
-            # ---------- FIX: ensure strictly increasing thickness ----------
             th_vals = np.array(th_vals, dtype=float)
             if len(th_vals) > 1:
                 th_vals = np.maximum.accumulate(th_vals)
@@ -922,7 +922,6 @@ class TemporalFieldManager:
             self.avg_tau0 = 1e-4
             self.avg_t_max_nd = 1.0
 
-        # Build progress splines for each source
         self.progress_splines = []
         self.max_thickness_per_source = []
         for src in self.sources:
@@ -3268,25 +3267,72 @@ def format_time_ago(dt: datetime) -> str:
     if seconds < 86400:     return f"{int(seconds // 3600)} h ago"
     return f"{int(seconds // 86400)} d ago"
 
+# =============================================
+# FIXED: get_client_ip() — robust public-IP detection with JS fallback
+# =============================================
 def get_client_ip() -> Optional[str]:
-    """Best-effort retrieval of the visitor's public IP."""
+    """Best-effort retrieval of the visitor's public IP.
+
+    Order of resolution:
+      1. Streamlit request headers (only accept non-private IPs).
+      2. `?client_ip=` query param (set by the JS fallback below).
+      3. Browser-side JavaScript fetch from api.ipify.org; if that succeeds,
+         the URL is rewritten with `?client_ip=<real_public_ip>` and the
+         page is reloaded, so on the next rerun branch (2) kicks in.
+    """
+    # 1) Try Streamlit's request headers
     try:
         headers = st.context.headers  # Streamlit ≥ 1.37
         xff = headers.get("X-Forwarded-For")
         if xff:
-            return xff.split(",")[0].strip()
+            ip = xff.split(",")[0].strip()
+            # Ignore local network IPs from headers
+            if not (ip.startswith("192.168.") or ip.startswith("10.")
+                    or ip.startswith("172.") or ip in ("127.0.0.1", "::1")):
+                return ip
         xri = headers.get("X-Real-IP")
         if xri:
-            return xri.strip()
+            ip = xri.strip()
+            if not (ip.startswith("192.168.") or ip.startswith("10.")
+                    or ip.startswith("172.") or ip in ("127.0.0.1", "::1")):
+                return ip
     except Exception:
         pass
 
+    # 2) Check query params (set by JS fallback)
     try:
-        r = requests.get("https://api.ipify.org?format=json", timeout=GEO_API_TIMEOUT)
-        if r.status_code == 200:
-            return r.json().get("ip")
+        qp = st.query_params
+        if 'client_ip' in qp:
+            return qp['client_ip']
     except Exception:
         pass
+
+    # 3) JS fallback to get client IP (runs in the browser)
+    # This is necessary if the app is running locally and the server IP is local
+    if 'js_ip_injected' not in st.session_state:
+        st.session_state.js_ip_injected = True
+        try:
+            st.components.v1.html("""
+            <script>
+            fetch('https://api.ipify.org?format=json')
+              .then(response => response.json())
+              .then(data => {
+                const ip = data.ip;
+                try {
+                    const url = new URL(window.parent.location.href);
+                    url.searchParams.set('client_ip', ip);
+                    window.parent.history.replaceState({}, '', url);
+                    window.parent.location.reload(); // Reload to apply the new IP
+                } catch (e) {
+                    console.error("Error updating URL:", e);
+                }
+              })
+              .catch(err => console.error('Error fetching IP:', err));
+            </script>
+            """, height=0)
+        except Exception:
+            pass
+
     return None
 
 def get_geo_info(ip: Optional[str]) -> Dict[str, Any]:
@@ -3358,7 +3404,7 @@ def track_visitor() -> Tuple[Optional[Dict], int, List[Dict]]:
     now  = datetime.now()
 
     log = load_visitors_log()
-    existing = log.get(ip, {})
+    existing = log.get(ip, {}) if ip else {}
     log[ip] = {
         'ip':          ip,
         'last_seen':   now.isoformat(),
@@ -3382,7 +3428,7 @@ def track_visitor() -> Tuple[Optional[Dict], int, List[Dict]]:
                 online.append(info)
         except Exception:
             continue
-    return log[ip], len(online), online
+    return log.get(ip, None), len(online), online
 
 # =============================================
 # FULLY INTERACTIVE TIME-LAPSE VISITOR TRACKER
@@ -3394,6 +3440,7 @@ def display_visitor_tracker() -> None:
        - Status colors (Online/Seen today/Offline)
        - Point sizes scaled by visit count
        - Flag emojis in hover tooltips
+       - Graceful fallback message when no geo data is available yet
     """
     st.markdown("### 🌍 Visitor Tracker")
 
@@ -3508,7 +3555,6 @@ def display_visitor_tracker() -> None:
             frames = []
 
             for d in dates:
-                # Convert pandas Timestamp to python datetime if needed
                 d_py = d if isinstance(d, datetime) else pd.Timestamp(d).to_pydatetime()
                 visible = df_map[df_map['first_seen'] <= d_py]
                 if not visible.empty:
@@ -3529,7 +3575,6 @@ def display_visitor_tracker() -> None:
                 else:
                     frames.append(go.Frame(data=go.Scattergeo(), name=d_py.strftime('%Y-%m-%d')))
 
-            # Initial frame = latest date (current visible set)
             latest_dt = dates[-1] if isinstance(dates[-1], datetime) else pd.Timestamp(dates[-1]).to_pydatetime()
             visible_init = df_map[df_map['first_seen'] <= latest_dt]
 
@@ -3594,6 +3639,13 @@ def display_visitor_tracker() -> None:
                 )]
             )
             st.plotly_chart(fig_map, use_container_width=True)
+    else:
+        # Fallback: no geolocation data yet (e.g., JS is still fetching real IP on first load)
+        with st.expander("🗺️ Live Tracker Map (Animated)", expanded=True):
+            st.info("Waiting for visitor geographic data. "
+                    "The map will appear once public IPs are logged. "
+                    "If you are running locally, the app is detecting your real public IP — "
+                    "please wait a moment while the browser reloads with your coordinates.")
 
     # ---- Online right now (grouped by country) ----
     if online_visitors:
@@ -3607,7 +3659,7 @@ def display_visitor_tracker() -> None:
                 flag = get_country_flag(cc)
                 st.write(f"{flag} **{country}** — {cnt} visitor{'s' if cnt>1 else ''}")
 
-    # ---- Daily / Weekly Timeline (FIXED: line nested inside marker) ----
+    # ---- Daily / Weekly Timeline (line nested inside marker for go.Bar) ----
     if log:
         with st.expander("📈 Visit Timeline (Last 14 Days)", expanded=False):
             timeline_data = []
@@ -3759,6 +3811,7 @@ def initialize_session_state():
         'vt_ip':  None,
         'vt_geo': None,
         'geo_api_cooldown_until': None,
+        'js_ip_injected': False,
     }
 
     for key, value in defaults.items():
