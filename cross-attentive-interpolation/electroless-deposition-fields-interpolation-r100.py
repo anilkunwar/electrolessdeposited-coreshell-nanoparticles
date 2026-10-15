@@ -16,15 +16,7 @@ INTELLIGENT CORE‑SHELL DESIGNER – FULLY INTEGRATED VERSION
 - **FIXED**: Session state conflict with widget key – separate loaded backend from widget value
 - **NEW**: Dynamic completeness analysis – updates when time slider moves (rule‑based and LLM)
 - **FIXED**: UnhashableParamError in LLM caching – manual cache via session_state (LRU)
-
-**FURTHER ENHANCEMENTS (from analysis)**
-- Persistent default parameter display in all tabs
-- Progress‑based interpolation fully implemented in get_fields()
-- Relevance and entropy passed to LLM and shown in weight analysis / ground truth
-- Physical coordinate alignment mandatory when L0 differs
-- Hyperparameter change warning
-- **NEW**: Logo support – place a PNG or JPG file in the "logo" folder to display in the sidebar
-- **NEW**: Enhanced visual appeal with improved CSS gradients and card-like styling
+- **NEW**: Geographic visitor online tracker with world map, timeline, and rate-limit handling
 """
 
 import streamlit as st
@@ -41,7 +33,7 @@ import pickle
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 import warnings
 import json
@@ -63,6 +55,7 @@ import itertools
 import threading
 import shutil
 import glob  # for logo detection
+import requests  # NEW: for visitor tracking
 
 # NEW IMPORTS FOR GPT‑2 AND QWEN
 try:
@@ -101,6 +94,13 @@ LOGO_DIR = os.path.join(SCRIPT_DIR, "logo")
 os.makedirs(SOLUTIONS_DIR, exist_ok=True)
 os.makedirs(VISUALIZATION_OUTPUT_DIR, exist_ok=True)
 os.makedirs(TEMP_ANIMATION_DIR, exist_ok=True)
+
+# =============================================
+# VISITOR TRACKER CONFIGURATION
+# =============================================
+VISITORS_LOG_FILE  = os.path.join(SCRIPT_DIR, "visitors_log.json")
+ONLINE_THRESHOLD_S = 300   # visitor considered "online" if seen in last 5 min
+GEO_API_TIMEOUT    = 4     # seconds for IP-geolocation API
 
 # =============================================
 # ENHANCED COLORMAP OPTIONS (50+ colormaps)
@@ -155,14 +155,14 @@ MATERIAL_COLORSCALE_PLOTLY = [
 # =============================================
 class DepositionParameters:
     """Normalises and stores core‑shell deposition parameters."""
-    
+
     RANGES = {
         'fc': (0.05, 0.45),
         'rs': (0.01, 0.6),
         'c_bulk': (0.1, 1.0),
         'L0_nm': (10.0, 100.0)
     }
-    
+
     @staticmethod
     def normalize(value: float, param_name: str) -> float:
         low, high = DepositionParameters.RANGES[param_name]
@@ -173,7 +173,7 @@ class DepositionParameters:
             return (log_val - log_low) / (log_high - log_low)
         else:
             return (value - low) / (high - low)
-    
+
     @staticmethod
     def denormalize(norm_value: float, param_name: str) -> float:
         low, high = DepositionParameters.RANGES[param_name]
@@ -190,7 +190,7 @@ class DepositionParameters:
 # =============================================
 class DepositionPhysics:
     """Computes derived quantities for core‑shell deposition."""
-    
+
     @staticmethod
     def material_proxy(phi: np.ndarray, psi: np.ndarray, method: str = "max(phi, psi) + psi") -> np.ndarray:
         if method == "max(phi, psi) + psi":
@@ -201,11 +201,11 @@ class DepositionPhysics:
             return phi * (1.0 - psi) + 2.0 * psi
         else:
             raise ValueError(f"Unknown material proxy method: {method}")
-    
+
     @staticmethod
     def potential_proxy(c: np.ndarray, alpha_nd: float) -> np.ndarray:
         return -alpha_nd * c
-    
+
     @staticmethod
     def shell_thickness(phi: np.ndarray, psi: np.ndarray, core_radius_frac: float,
                        threshold: float = 0.5, dx: float = 1.0) -> float:
@@ -222,7 +222,7 @@ class DepositionPhysics:
             thickness_nd = max_dist - core_radius_frac
             return max(0.0, thickness_nd)
         return 0.0
-    
+
     @staticmethod
     def phase_stats(phi, psi, dx, dy, L0, threshold=0.5):
         ag_mask = (phi > threshold) & (psi <= 0.5)
@@ -237,7 +237,7 @@ class DepositionPhysics:
             "Ag": (ag_area_nd, ag_area_nd * (L0**2)),
             "Cu": (cu_area_nd, cu_area_nd * (L0**2))
         }
-    
+
     @staticmethod
     def compute_growth_rate(thickness_history: List[Dict], time_idx: int) -> float:
         if time_idx == 0 or time_idx >= len(thickness_history):
@@ -247,7 +247,7 @@ class DepositionPhysics:
             return 0.0
         dth = thickness_history[time_idx]['th_nm'] - thickness_history[time_idx-1]['th_nm']
         return dth / dt if dt > 0 else 0.0
-    
+
     @staticmethod
     def compute_radial_profile(field, L0, center_frac=0.5, n_bins=100, use_median=False):
         H, W = field.shape
@@ -281,7 +281,7 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.max_len = max_len
-    
+
     def forward(self, x):
         seq_len = x.size(1)
         position = torch.arange(seq_len, dtype=torch.float).unsqueeze(1)
@@ -303,16 +303,16 @@ class CoreShellInterpolator:
         self.d_model = d_model
         self.nhead = nhead
         self.num_layers = num_layers
-        
+
         if param_sigma is None:
             param_sigma = [0.15, 0.15, 0.15, 0.15]
         self.param_sigma = param_sigma
-        
+
         self.temperature = temperature
         self.gating_mode = gating_mode
         self.lambda_shape = lambda_shape
         self.sigma_shape = sigma_shape
-        
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -323,29 +323,29 @@ class CoreShellInterpolator:
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.input_proj = nn.Linear(12, d_model)
         self.pos_encoder = PositionalEncoding(d_model)
-    
+
     def set_parameter_sigma(self, param_sigma):
         self.param_sigma = param_sigma
-    
+
     def set_gating_mode(self, gating_mode):
         self.gating_mode = gating_mode
-    
+
     def set_shape_params(self, lambda_shape, sigma_shape):
         self.lambda_shape = lambda_shape
         self.sigma_shape = sigma_shape
-    
+
     def filter_sources_hierarchy(self, sources: List[Dict], target_params: Dict,
                               require_categorical_match: bool = False) -> Tuple[List[Dict], Dict]:
         valid_sources = []
         excluded_reasons = {'categorical': 0, 'kept': 0}
-        
+
         target_mode = target_params.get('mode', '2D (planar)')
         target_bc = target_params.get('bc_type', 'Neu')
         target_edl = target_params.get('use_edl', False)
-        
+
         for src in sources:
             params = src.get('params', {})
-            
+
             if require_categorical_match:
                 if params.get('mode') != target_mode:
                     excluded_reasons['categorical'] += 1
@@ -356,22 +356,22 @@ class CoreShellInterpolator:
                 if params.get('use_edl') != target_edl:
                     excluded_reasons['categorical'] += 1
                     continue
-            
+
             valid_sources.append(src)
             excluded_reasons['kept'] += 1
-        
+
         if not valid_sources and sources:
             st.warning("⚠️ No sources passed filters. Using nearest neighbor fallback.")
             distances = []
             for src in sources:
                 p = src['params']
-                d = sum((target_params.get(k, 0) - p.get(k, 0))**2 
+                d = sum((target_params.get(k, 0) - p.get(k, 0))**2
                        for k in ['fc', 'rs', 'L0_nm'])
                 distances.append(d)
             valid_sources = [sources[np.argmin(distances)]]
-        
+
         return valid_sources, excluded_reasons
-    
+
     def compute_alpha(self, source_params: List[Dict], target_L0: float,
                      preference_tiers: Dict = None) -> np.ndarray:
         if preference_tiers is None:
@@ -382,12 +382,12 @@ class CoreShellInterpolator:
                 'poor': (50.0, 0.15),
                 'exclude': (np.inf, 0.01)
             }
-        
+
         alphas = []
         for src in source_params:
             src_L0 = src.get('L0_nm', 20.0)
             delta = abs(target_L0 - src_L0)
-            
+
             if delta <= preference_tiers['preferred'][0]:
                 weight = preference_tiers['preferred'][1]
             elif delta <= preference_tiers['acceptable'][0]:
@@ -404,73 +404,73 @@ class CoreShellInterpolator:
                     preference_tiers['marginal'][1] - preference_tiers['poor'][1])
             else:
                 weight = preference_tiers['exclude'][1]
-            
+
             alphas.append(weight)
-        
+
         return np.array(alphas)
-    
+
     def compute_beta(self, source_params: List[Dict], target_params: Dict) -> Tuple[np.ndarray, Dict]:
         weights = {'fc': 2.0, 'rs': 1.5, 'c_bulk': 3.0}
         betas = []
         individual_weights = {'fc': [], 'rs': [], 'c_bulk': []}
-        
+
         for src in source_params:
             sq_sum = 0.0
             src_indiv_weights = {}
-            
+
             for i, (pname, w) in enumerate(weights.items()):
                 norm_src = DepositionParameters.normalize(src.get(pname, 0.5), pname)
                 norm_tar = DepositionParameters.normalize(target_params.get(pname, 0.5), pname)
                 diff = norm_src - norm_tar
                 sigma_idx = ['fc', 'rs', 'c_bulk'].index(pname)
                 sigma = self.param_sigma[sigma_idx]
-                
+
                 indiv_weight = np.exp(-0.5 * (diff / sigma) ** 2)
                 src_indiv_weights[pname] = indiv_weight
-                
+
                 sq_sum += w * (diff / sigma) ** 2
-            
+
             beta = np.exp(-0.5 * sq_sum)
             betas.append(beta)
-            
+
             for pname in weights.keys():
                 individual_weights[pname].append(src_indiv_weights[pname])
-        
+
         return np.array(betas), individual_weights
-    
+
     def compute_gamma(self, source_fields: List[Dict], source_params: List[Dict],
                      target_params: Dict, time_norm: float, beta_weights: np.ndarray) -> np.ndarray:
         n_sources = len(source_fields)
         if n_sources == 0:
             return np.array([])
-        
+
         profiles = []
         radii_list = []
-        
+
         for i, src in enumerate(source_params):
             L0 = src.get('L0_nm', 20.0)
             field = source_fields[i]['phi']
             r_centers, profile = DepositionPhysics.compute_radial_profile(field, L0, n_bins=100)
             profiles.append(profile)
             radii_list.append(r_centers)
-        
+
         max_radius = max([r[-1] for r in radii_list])
         r_common = np.linspace(0, max_radius, 100)
-        
+
         profiles_interp = []
         for i in range(n_sources):
             prof_interp = np.interp(r_common, radii_list[i], profiles[i], left=0, right=0)
             profiles_interp.append(prof_interp)
         profiles_interp = np.array(profiles_interp)
-        
+
         beta_norm = beta_weights / (np.sum(beta_weights) + 1e-12)
         ref_profile = np.sum(profiles_interp * beta_norm[:, None], axis=0)
-        
+
         mse = np.mean((profiles_interp - ref_profile) ** 2, axis=1)
         gamma = np.exp(-mse / self.sigma_shape)
-        
+
         return gamma
-    
+
     def encode_parameters(self, params_list: List[Dict]) -> torch.Tensor:
         features = []
         for p in params_list:
@@ -487,20 +487,20 @@ class CoreShellInterpolator:
                 feat.append(0.0)
             features.append(feat[:12])
         return torch.FloatTensor(features)
-    
+
     def _get_fields_at_time(self, source: Dict, time_norm: float, target_shape: Tuple[int, int]):
         history = source.get('history', [])
         if not history:
             return {'phi': np.zeros(target_shape), 'c': np.zeros(target_shape), 'psi': np.zeros(target_shape)}
-        
+
         t_max = 1.0
         if source.get('thickness_history'):
             t_max = source['thickness_history'][-1]['t_nd']
         else:
             t_max = history[-1]['t_nd']
-        
+
         t_target = time_norm * t_max
-        
+
         if len(history) == 1:
             snap = history[0]
             phi = self._ensure_2d(snap['phi'])
@@ -524,26 +524,26 @@ class CoreShellInterpolator:
                 t1, t2 = t_vals[idx], t_vals[idx+1]
                 snap1, snap2 = history[idx], history[idx+1]
                 alpha = (t_target - t1) / (t2 - t1) if t2 > t1 else 0.0
-                
+
                 phi1 = self._ensure_2d(snap1['phi'])
                 phi2 = self._ensure_2d(snap2['phi'])
                 c1 = self._ensure_2d(snap1['c'])
                 c2 = self._ensure_2d(snap2['c'])
                 psi1 = self._ensure_2d(snap1['psi'])
                 psi2 = self._ensure_2d(snap2['psi'])
-                
+
                 phi = (1 - alpha) * phi1 + alpha * phi2
                 c = (1 - alpha) * c1 + alpha * c2
                 psi = (1 - alpha) * psi1 + alpha * psi2
-        
+
         if phi.shape != target_shape:
             factors = (target_shape[0]/phi.shape[0], target_shape[1]/phi.shape[1])
             phi = zoom(phi, factors, order=1)
             c = zoom(c, factors, order=1)
             psi = zoom(psi, factors, order=1)
-        
+
         return {'phi': phi, 'c': c, 'psi': psi}
-    
+
     def _ensure_2d(self, arr):
         if arr is None:
             return np.zeros((1,1))
@@ -553,7 +553,7 @@ class CoreShellInterpolator:
             mid = arr.shape[0] // 2
             return arr[mid, :, :]
         return arr
-    
+
     def interpolate_fields(self, sources: List[Dict], target_params: Dict,
                           target_shape: Tuple[int, int] = (256, 256),
                           n_time_points: int = 100,
@@ -562,22 +562,22 @@ class CoreShellInterpolator:
                           recompute_thickness: bool = True):
         if not sources:
             return None
-        
+
         filtered_sources, filter_stats = self.filter_sources_hierarchy(
             sources, target_params, require_categorical_match=require_categorical_match
         )
         active_sources = filtered_sources if filtered_sources else sources
-        
+
         source_params = []
         source_fields = []
         source_thickness = []
         source_tau0 = []
         source_t_max_nd = []
-        
+
         for src in active_sources:
             if 'params' not in src or 'history' not in src or len(src['history']) == 0:
                 continue
-            
+
             params = src['params'].copy()
             params.setdefault('fc', params.get('core_radius_frac', 0.18))
             params.setdefault('rs', params.get('shell_thickness_frac', 0.2))
@@ -588,23 +588,23 @@ class CoreShellInterpolator:
             params.setdefault('mode', params.get('mode', '2D (planar)'))
             params.setdefault('growth_model', params.get('growth_model', 'Model A'))
             params.setdefault('tau0_s', params.get('tau0_s', 1e-4))
-            
+
             source_params.append(params)
-            
+
             if time_norm is None:
                 t_req = 1.0
             else:
                 t_req = time_norm
-            
+
             fields = self._get_fields_at_time(src, t_req, target_shape)
             source_fields.append(fields)
-            
+
             # Recompute thickness curve from raw fields
             common_t_norm = np.linspace(0, 1, n_time_points)
             th_vals = []
             t_vals_nd = []
             t_max_nd = src['history'][-1]['t_nd'] if src.get('history') else 1.0
-            
+
             for t_norm in common_t_norm:
                 fields_t = self._get_fields_at_time(src, t_norm, target_shape)
                 th_nd = DepositionPhysics.shell_thickness(
@@ -614,7 +614,7 @@ class CoreShellInterpolator:
                 th_nm = th_nd * params.get('L0_nm', 20.0)
                 th_vals.append(th_nm)
                 t_vals_nd.append(t_norm * t_max_nd)
-            
+
             # ---------- FIX: ensure strictly increasing thickness ----------
             th_vals = np.array(th_vals, dtype=float)
             if len(th_vals) > 1:
@@ -622,7 +622,7 @@ class CoreShellInterpolator:
                 th_vals = np.maximum.accumulate(th_vals)
                 th_vals += np.arange(len(th_vals)) * 1e-14
             t_vals_nd = np.array(t_vals_nd)   # also ensure array
-            
+
             source_thickness.append({
                 't_norm': common_t_norm,
                 'th_nm': th_vals,
@@ -631,47 +631,47 @@ class CoreShellInterpolator:
             })
             source_t_max_nd.append(t_max_nd)
             source_tau0.append(params['tau0_s'])
-        
+
         if not source_params:
             st.error("No valid source fields.")
             return None
-        
+
         target_L0 = target_params.get('L0_nm', 20.0)
-        
+
         alpha = self.compute_alpha(source_params, target_L0)
         beta, individual_param_weights = self.compute_beta(source_params, target_params)
-        
+
         beta_norm = beta / (np.sum(beta) + 1e-12)
-        gamma = self.compute_gamma(source_fields, source_params, target_params, 
+        gamma = self.compute_gamma(source_fields, source_params, target_params,
                                   t_req if t_req is not None else 1.0, beta_norm)
-        
+
         refinement_factor = alpha * beta * (1.0 + self.lambda_shape * gamma)
-        
+
         source_features = self.encode_parameters(source_params)
         target_features = self.encode_parameters([target_params])
         all_features = torch.cat([target_features, source_features], dim=0).unsqueeze(0)
-        
+
         proj = self.input_proj(all_features)
         proj = self.pos_encoder(proj)
         transformer_out = self.transformer(proj)
-        
+
         target_rep = transformer_out[:, 0, :]
         source_reps = transformer_out[:, 1:, :]
-        
-        attn_scores = torch.matmul(target_rep.unsqueeze(1), 
+
+        attn_scores = torch.matmul(target_rep.unsqueeze(1),
                                   source_reps.transpose(1,2)).squeeze(1)
         attn_scores = attn_scores / np.sqrt(self.d_model) / self.temperature
-        
+
         final_scores = attn_scores * torch.FloatTensor(refinement_factor).unsqueeze(0)
         final_weights = torch.softmax(final_scores, dim=-1).squeeze().detach().cpu().numpy()
-        
+
         if np.isscalar(final_weights):
             final_weights = np.array([final_weights])
         elif final_weights.ndim == 0:
             final_weights = np.array([final_weights.item()])
         elif final_weights.ndim > 1:
             final_weights = final_weights.flatten()
-        
+
         attn_np = attn_scores.squeeze().detach().cpu().numpy()
         if np.isscalar(attn_np):
             attn_np = np.array([attn_np])
@@ -679,7 +679,7 @@ class CoreShellInterpolator:
             attn_np = np.array([attn_np.item()])
         elif attn_np.ndim > 1:
             attn_np = attn_np.flatten()
-        
+
         if len(final_weights) != len(source_fields):
             st.warning(f"Weight length mismatch: {len(final_weights)} vs {len(source_fields)}. Truncating/padding.")
             if len(final_weights) > len(source_fields):
@@ -687,25 +687,25 @@ class CoreShellInterpolator:
             else:
                 final_weights = np.pad(final_weights, (0, len(source_fields)-len(final_weights)),
                                       'constant', constant_values=0)
-        
+
         eps = 1e-10
         entropy = -np.sum(final_weights * np.log(final_weights + eps))
         max_weight = np.max(final_weights)
         effective_sources = np.sum(final_weights > 0.01)
-        
+
         interp = {'phi': np.zeros(target_shape),
                  'c': np.zeros(target_shape),
                  'psi': np.zeros(target_shape)}
-        
+
         for i, fld in enumerate(source_fields):
             interp['phi'] += final_weights[i] * fld['phi']
             interp['c'] += final_weights[i] * fld['c']
             interp['psi'] += final_weights[i] * fld['psi']
-        
+
         interp['phi'] = gaussian_filter(interp['phi'], sigma=1.0)
         interp['c'] = gaussian_filter(interp['c'], sigma=1.0)
         interp['psi'] = gaussian_filter(interp['psi'], sigma=1.0)
-        
+
         common_t_norm = np.linspace(0, 1, n_time_points)
         thickness_curves = []
         for i, thick in enumerate(source_thickness):
@@ -718,35 +718,35 @@ class CoreShellInterpolator:
                 th_interp = np.full_like(common_t_norm,
                                         thick['th_nm'][0] if len(thick['th_nm']) > 0 else 0.0)
             thickness_curves.append(th_interp)
-        
+
         thickness_interp = np.zeros_like(common_t_norm)
         for i, curve in enumerate(thickness_curves):
             thickness_interp += final_weights[i] * curve
-        
+
         avg_tau0 = np.average(source_tau0, weights=final_weights)
         avg_t_max_nd = np.average(source_t_max_nd, weights=final_weights)
         if target_params.get('tau0_s') is not None:
             avg_tau0 = target_params['tau0_s']
-        
+
         common_t_real = common_t_norm * avg_t_max_nd * avg_tau0
-        
+
         if time_norm is not None:
             t_real = time_norm * avg_t_max_nd * avg_tau0
         else:
             t_real = avg_t_max_nd * avg_tau0
-        
+
         material = DepositionPhysics.material_proxy(interp['phi'], interp['psi'])
         alpha_phys = target_params.get('alpha_nd', 2.0)
         potential = DepositionPhysics.potential_proxy(interp['c'], alpha_phys)
-        
+
         fc = target_params.get('fc', target_params.get('core_radius_frac', 0.18))
         dx = 1.0 / (target_shape[0] - 1)
         thickness_nd = DepositionPhysics.shell_thickness(interp['phi'], interp['psi'], fc, dx=dx)
         L0 = target_params.get('L0_nm', 20.0) * 1e-9
         thickness_nm = thickness_nd * L0 * 1e9
-        
+
         stats = DepositionPhysics.phase_stats(interp['phi'], interp['psi'], dx, dx, L0)
-        
+
         growth_rate = 0.0
         if time_norm is not None and len(thickness_curves) > 0:
             idx = int(time_norm * (len(common_t_norm) - 1))
@@ -755,7 +755,7 @@ class CoreShellInterpolator:
                 dt_real = dt_norm * avg_t_max_nd * avg_tau0
                 dth = thickness_interp[idx] - thickness_interp[idx-1]
                 growth_rate = dth / dt_real if dt_real > 0 else 0.0
-        
+
         sources_data = []
         for i, (src_params, alpha_w, beta_w, gamma_w, indiv_weights, combined_w, attn_w) in enumerate(zip(
             source_params, alpha, beta, gamma,
@@ -780,7 +780,7 @@ class CoreShellInterpolator:
                 'physics_refinement': float(alpha_w * beta_w * (1.0 + self.lambda_shape * gamma_w)),
                 'combined_weight': float(combined_w)
             })
-        
+
         result = {
             'fields': interp,
             'derived': {
@@ -818,7 +818,7 @@ class CoreShellInterpolator:
             'avg_t_max_nd': avg_t_max_nd,
             'filter_stats': filter_stats
         }
-        
+
         return result
 
 # =============================================
@@ -832,7 +832,7 @@ class TemporalCacheEntry:
     fields: Optional[Dict[str, np.ndarray]] = None
     thickness_nm: float = 0.0
     timestamp: datetime = field(default_factory=datetime.now)
-    
+
     def get_size_mb(self) -> float:
         if self.fields is None:
             return 0.001
@@ -847,7 +847,7 @@ class TemporalFieldManager:
     Three-tier temporal management system with hierarchical source filtering.
     Uses progress (thickness/max_th) for interpolation to capture non‑linear growth.
     """
-    
+
     def __init__(self, interpolator, sources: List[Dict], target_params: Dict,
                  n_key_frames: int = 10, lru_size: int = 3,
                  require_categorical_match: bool = False):
@@ -856,12 +856,12 @@ class TemporalFieldManager:
         self.n_key_frames = n_key_frames
         self.lru_size = lru_size
         self.require_categorical_match = require_categorical_match
-        
+
         self.sources, self.filter_stats = interpolator.filter_sources_hierarchy(
             sources, target_params, require_categorical_match=require_categorical_match
         )
         self._use_fallback = False
-        
+
         if self.filter_stats:
             kept = self.filter_stats.get('kept', 0)
             total = len(sources)
@@ -873,32 +873,32 @@ class TemporalFieldManager:
                 self._use_fallback = True
             else:
                 st.success(f"✅ {total} sources compatible.")
-        
+
         if not self.sources:
             self.sources = sources
             self._use_fallback = True
-        
+
         self.avg_tau0 = None
         self.avg_t_max_nd = None
         self.thickness_time: Optional[Dict] = None
         self.weights: Optional[Dict] = None
         self.sources_data: Optional[List] = None
         self._compute_thickness_curve()
-        
+
         # Progress‑related attributes (NEW)
         self.progress_splines: List[Optional[CubicSpline]] = []   # map thickness progress → t_norm
         self.max_thickness_per_source: List[float] = []           # max thickness of each source
-        
+
         self.key_times: np.ndarray = np.linspace(0, 1, n_key_frames)
         self.key_frames: Dict[float, Dict[str, np.ndarray]] = {}
         self.key_thickness: Dict[float, float] = {}
         self.key_time_real: Dict[float, float] = {}
         self._precompute_key_frames()
-        
+
         self.lru_cache: OrderedDict[float, TemporalCacheEntry] = OrderedDict()
         self.animation_temp_dir: Optional[str] = None
         self.animation_frame_paths: List[str] = []
-    
+
     def _compute_thickness_curve(self):
         res = self.interpolator.interpolate_fields(
             self.sources, self.target_params, target_shape=(256, 256),
@@ -916,7 +916,7 @@ class TemporalFieldManager:
             self.sources_data = []
             self.avg_tau0 = 1e-4
             self.avg_t_max_nd = 1.0
-        
+
         # Build progress splines for each source (NEW)
         self.progress_splines = []
         self.max_thickness_per_source = []
@@ -933,7 +933,7 @@ class TemporalFieldManager:
                 )
                 th_nm = th_nd * params.get('L0_nm', 20.0)
                 th_vals.append(th_nm)
-            
+
             # ---------- FIX: ensure strictly increasing thickness ----------
             th_vals = np.array(th_vals, dtype=float)
             if len(th_vals) > 1:
@@ -953,7 +953,7 @@ class TemporalFieldManager:
             else:
                 spl = None
             self.progress_splines.append(spl)
-    
+
     def _precompute_key_frames(self):
         st.info(f"Pre-computing {self.n_key_frames} key frames using progress‑based time...")
         progress_bar = st.progress(0)
@@ -983,14 +983,14 @@ class TemporalFieldManager:
             progress_bar.progress((i + 1) / self.n_key_frames)
         progress_bar.empty()
         st.success(f"Key frames ready. Memory: ~{self._estimate_key_frame_memory():.1f} MB")
-    
+
     def _estimate_key_frame_memory(self) -> float:
         if not self.key_frames:
             return 0.0
         sample_frame = next(iter(self.key_frames.values()))
         bytes_per_frame = sum(arr.nbytes for arr in sample_frame.values())
         return (bytes_per_frame * len(self.key_frames)) / (1024 * 1024)
-    
+
     # ------------------------------------------------------------------
     # MODIFIED: get_fields now uses progress-based blending with progress_splines
     # ------------------------------------------------------------------
@@ -998,13 +998,13 @@ class TemporalFieldManager:
         """Return fields at given normalized time, using progress‑based blending."""
         t_key = round(time_norm, 4)
         time_real = time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
-        
+
         # Check LRU cache
         if t_key in self.lru_cache:
             entry = self.lru_cache.pop(t_key)
             self.lru_cache[t_key] = entry
             return entry.fields
-        
+
         # Map requested time_norm to progress (NEW)
         if self.thickness_time and len(self.thickness_time['th_nm']) > 1:
             th_t = np.interp(time_norm, self.thickness_time['t_norm'], self.thickness_time['th_nm'])
@@ -1012,7 +1012,7 @@ class TemporalFieldManager:
             progress_target = th_t / max_th if max_th > 0 else time_norm
         else:
             progress_target = time_norm
-        
+
         # Find key frames that bound the progress_target (using the stored t_norm of key frames)
         key_times_arr = np.array(list(self.key_frames.keys()))
         # We need to map each key frame's t_norm to its thickness progress.
@@ -1022,10 +1022,10 @@ class TemporalFieldManager:
             max_th = self.thickness_time['th_nm'][-1]
             key_progress.append(th_t / max_th if max_th > 0 else t)
         key_progress = np.array(key_progress)
-        
+
         # Find interpolation indices in progress space
         idx = np.searchsorted(key_progress, progress_target)
-        
+
         if idx == 0:
             # before first key frame
             t0 = key_times_arr[0]
@@ -1038,7 +1038,7 @@ class TemporalFieldManager:
             fields = self.key_frames[t1]
             self._add_to_lru(t_key, fields, self.key_thickness[t1], time_real)
             return fields
-        
+
         # linear interpolation in progress space
         t0, t1 = key_times_arr[idx-1], key_times_arr[idx]
         p0, p1 = key_progress[idx-1], key_progress[idx]
@@ -1048,15 +1048,15 @@ class TemporalFieldManager:
             alpha = 0.0
         f0, f1 = self.key_frames[t0], self.key_frames[t1]
         th0, th1 = self.key_thickness[t0], self.key_thickness[t1]
-        
+
         interp_fields = {}
         for key in f0:
             interp_fields[key] = (1 - alpha) * f0[key] + alpha * f1[key]
         interp_thickness = (1 - alpha) * th0 + alpha * th1
-        
+
         self._add_to_lru(t_key, interp_fields, interp_thickness, time_real)
         return interp_fields
-    
+
     def _add_to_lru(self, time_norm: float, fields: Dict[str, np.ndarray],
                    thickness_nm: float, time_real_s: float):
         if time_norm in self.lru_cache:
@@ -1070,7 +1070,7 @@ class TemporalFieldManager:
             fields=fields,
             thickness_nm=thickness_nm
         )
-    
+
     def get_thickness_at_time(self, time_norm: float) -> float:
         if self.thickness_time is None:
             return 0.0
@@ -1081,10 +1081,10 @@ class TemporalFieldManager:
         if time_norm >= t_arr[-1]:
             return th_arr[-1]
         return np.interp(time_norm, t_arr, th_arr)
-    
+
     def get_time_real(self, time_norm: float) -> float:
         return time_norm * self.avg_t_max_nd * self.avg_tau0 if self.avg_t_max_nd else 0.0
-    
+
     def prepare_animation_streaming(self, n_frames: int = 50) -> List[str]:
         import tempfile
         self.animation_temp_dir = tempfile.mkdtemp(dir=TEMP_ANIMATION_DIR)
@@ -1103,7 +1103,7 @@ class TemporalFieldManager:
             progress.progress((i + 1) / n_frames)
         progress.empty()
         return self.animation_frame_paths
-    
+
     def get_animation_frame(self, frame_idx: int) -> Optional[Dict[str, np.ndarray]]:
         if not self.animation_frame_paths or frame_idx >= len(self.animation_frame_paths):
             return None
@@ -1113,13 +1113,13 @@ class TemporalFieldManager:
             'time_norm': float(data['time_norm']),
             'time_real_s': float(data['time_real_s'])
         }
-    
+
     def cleanup_animation(self):
         if self.animation_temp_dir and os.path.exists(self.animation_temp_dir):
             shutil.rmtree(self.animation_temp_dir)
         self.animation_temp_dir = None
         self.animation_frame_paths = []
-    
+
     def get_memory_stats(self) -> Dict[str, float]:
         lru_memory = sum(entry.get_size_mb() for entry in self.lru_cache.values())
         key_memory = self._estimate_key_frame_memory()
@@ -1130,11 +1130,11 @@ class TemporalFieldManager:
             'lru_entries': len(self.lru_cache),
             'key_frame_entries': len(self.key_frames)
         }
-    
+
     def clear_lru_cache(self):
         self.lru_cache.clear()
         st.sidebar.info("LRU cache cleared.")
-    
+
     def recompute_key_frames(self):
         st.sidebar.info("Recomputing key frames...")
         self.key_frames.clear()
@@ -1148,15 +1148,15 @@ class TemporalFieldManager:
 # =============================================
 class EnhancedSolutionLoader:
     """Loads PKL files from numerical_solutions, parsing filenames as fallback."""
-    
+
     def __init__(self, solutions_dir: str = SOLUTIONS_DIR):
         self.solutions_dir = solutions_dir
         self._ensure_directory()
         self.cache = {}
-    
+
     def _ensure_directory(self):
         os.makedirs(self.solutions_dir, exist_ok=True)
-    
+
     def scan_solutions(self) -> List[Dict[str, Any]]:
         import glob
         all_files = []
@@ -1165,7 +1165,7 @@ class EnhancedSolutionLoader:
             files = glob.glob(pattern)
             all_files.extend(files)
         all_files.sort(key=os.path.getmtime, reverse=True)
-        
+
         file_info = []
         for file_path in all_files:
             try:
@@ -1180,34 +1180,34 @@ class EnhancedSolutionLoader:
             except:
                 continue
         return file_info
-    
+
     def parse_filename(self, filename: str) -> Dict[str, any]:
         params = {}
         mode_match = re.search(r'_(2D|3D)_', filename)
         if mode_match:
             params['mode'] = '2D (planar)' if mode_match.group(1) == '2D' else '3D (spherical)'
-        
+
         c_match = re.search(r'_c([0-9.]+)_', filename)
         if c_match:
             params['c_bulk'] = float(c_match.group(1))
-        
+
         L_match = re.search(r'_L0([0-9.]+)nm', filename)
         if L_match:
             params['L0_nm'] = float(L_match.group(1))
-        
+
         fc_match = re.search(r'_fc([0-9.]+)_', filename)
         if fc_match:
             params['fc'] = float(fc_match.group(1))
-        
+
         rs_match = re.search(r'_rs([0-9.]+)_', filename)
         if rs_match:
             params['rs'] = float(rs_match.group(1))
-        
+
         if 'Neu' in filename:
             params['bc_type'] = 'Neu'
         elif 'Dir' in filename:
             params['bc_type'] = 'Dir'
-        
+
         if 'noEDL' in filename:
             params['use_edl'] = False
         elif 'EDL' in filename:
@@ -1215,33 +1215,33 @@ class EnhancedSolutionLoader:
             edl_match = re.search(r'EDL([0-9.]+)', filename)
             if edl_match:
                 params['lambda0_edl'] = float(edl_match.group(1))
-        
+
         k_match = re.search(r'_k([0-9.]+)_', filename)
         if k_match:
             params['k0_nd'] = float(k_match.group(1))
-        
+
         M_match = re.search(r'_M([0-9.]+)_', filename)
         if M_match:
             params['M_nd'] = float(M_match.group(1))
-        
+
         D_match = re.search(r'_D([0-9.]+)_', filename)
         if D_match:
             params['D_nd'] = float(D_match.group(1))
-        
+
         Nx_match = re.search(r'_Nx(\d+)_', filename)
         if Nx_match:
             params['Nx'] = int(Nx_match.group(1))
-        
+
         steps_match = re.search(r'_steps(\d+)\.', filename)
         if steps_match:
             params['n_steps'] = int(steps_match.group(1))
-        
+
         tau_match = re.search(r'_tau0([0-9.eE+-]+)s', filename)
         if tau_match:
             params['tau0_s'] = float(tau_match.group(1))
-        
+
         return params
-    
+
     def _ensure_2d(self, arr):
         if arr is None:
             return np.zeros((1, 1))
@@ -1255,7 +1255,7 @@ class EnhancedSolutionLoader:
             return arr[:n*n].reshape(n, n)
         else:
             return arr
-    
+
     def _convert_tensors(self, data):
         if isinstance(data, dict):
             for key, value in data.items():
@@ -1269,12 +1269,12 @@ class EnhancedSolutionLoader:
                     data[i] = item.cpu().numpy()
                 elif isinstance(item, (dict, list)):
                     self._convert_tensors(item)
-    
+
     def read_simulation_file(self, file_path):
         try:
             with open(file_path, 'rb') as f:
                 data = pickle.load(f)
-            
+
             standardized = {
                 'params': {},
                 'history': [],
@@ -1284,16 +1284,16 @@ class EnhancedSolutionLoader:
                     'loaded_at': datetime.now().isoformat(),
                 }
             }
-            
+
             if isinstance(data, dict):
                 if 'parameters' in data and isinstance(data['parameters'], dict):
                     standardized['params'].update(data['parameters'])
                 if 'meta' in data and isinstance(data['meta'], dict):
                     standardized['params'].update(data['meta'])
-                
+
                 standardized['coords_nd'] = data.get('coords_nd', None)
                 standardized['diagnostics'] = data.get('diagnostics', [])
-                
+
                 if 'thickness_history_nm' in data:
                     thick_list = []
                     for entry in data['thickness_history_nm']:
@@ -1304,7 +1304,7 @@ class EnhancedSolutionLoader:
                                 'th_nm': entry[2]
                             })
                     standardized['thickness_history'] = thick_list
-                
+
                 if 'snapshots' in data and isinstance(data['snapshots'], list):
                     snap_list = []
                     for snap in data['snapshots']:
@@ -1326,12 +1326,12 @@ class EnhancedSolutionLoader:
                             }
                             snap_list.append(snap_dict)
                     standardized['history'] = snap_list
-                
+
                 if not standardized['params']:
                     parsed = self.parse_filename(os.path.basename(file_path))
                     standardized['params'].update(parsed)
                     st.sidebar.info(f"Parsed parameters from filename: {os.path.basename(file_path)}")
-                
+
                 params = standardized['params']
                 params.setdefault('fc', params.get('core_radius_frac', 0.18))
                 params.setdefault('rs', params.get('shell_thickness_frac', 0.2))
@@ -1343,38 +1343,38 @@ class EnhancedSolutionLoader:
                 params.setdefault('growth_model', params.get('growth_model', 'Model A'))
                 params.setdefault('alpha_nd', params.get('alpha_nd', 2.0))
                 params.setdefault('tau0_s', params.get('tau0_s', 1e-4))
-                
+
                 if not standardized['history']:
                     st.sidebar.warning(f"No snapshots in {os.path.basename(file_path)}")
                     return None
-            
+
             self._convert_tensors(standardized)
             return standardized
         except Exception as e:
             st.sidebar.error(f"Error loading {os.path.basename(file_path)}: {e}")
             return None
-    
+
     def load_all_solutions(self, use_cache=True, max_files=None):
         solutions = []
         file_info = self.scan_solutions()
         if max_files:
             file_info = file_info[:max_files]
-        
+
         if not file_info:
             st.sidebar.warning("No PKL files found in numerical_solutions directory.")
             return solutions
-        
+
         for item in file_info:
             cache_key = item['filename']
             if use_cache and cache_key in self.cache:
                 solutions.append(self.cache[cache_key])
                 continue
-            
+
             sol = self.read_simulation_file(item['path'])
             if sol:
                 self.cache[cache_key] = sol
                 solutions.append(sol)
-        
+
         st.sidebar.success(f"Loaded {len(solutions)} solutions.")
         return solutions
 
@@ -1451,11 +1451,11 @@ class NLParser:
         """
         if not text:
             return self.defaults.copy()
-        
+
         backend = st.session_state.get('llm_backend_loaded', 'GPT-2 (default, fastest startup)')
         if temperature is None:
             temperature = 0.0 if "Qwen" in backend else 0.1
-        
+
         # Build a prompt with few-shot examples
         system = "You are an expert extractor. Always reply with valid JSON only. Clip every value to its exact range."
         examples = """
@@ -1469,7 +1469,7 @@ Examples:
         regex_hint = ""
         if regex_params is not None:
             regex_hint = f"\nPreliminary regex extraction (use as a hint, but prioritize the text): {json.dumps(regex_params, default=str)}"
-        
+
         user = f"""{examples}
 {regex_hint}
 Text: "{text}"
@@ -1500,7 +1500,7 @@ JSON:"""
                     pad_token_id=tokenizer.eos_token_id
                 )
             generated = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
+
             # Robust JSON extraction
             json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
             match = re.search(json_pattern, generated, re.DOTALL)
@@ -1544,7 +1544,7 @@ JSON:"""
         for _ in range(n_runs):
             params = self.parse_with_llm(text, tokenizer, model, regex_params, temperature=temperature)
             all_params.append(params)
-        
+
         # Combine
         combined = {}
         for key in self.defaults:
@@ -1576,7 +1576,7 @@ JSON:"""
         for key in self.defaults:
             # high confidence if value differs from default, low if default (may indicate no match)
             regex_conf[key] = 1.0 if regex_params[key] != self.defaults[key] else 0.0
-        
+
         # Step 2: LLM if available
         if tokenizer is not None and model is not None:
             if use_ensemble:
@@ -1590,7 +1590,7 @@ JSON:"""
         else:
             llm_params = self.defaults.copy()
             llm_conf = {k: 0.0 for k in self.defaults}
-        
+
         # Step 3: Merge with confidence
         final_params = {}
         for key in self.defaults:
@@ -1606,12 +1606,12 @@ JSON:"""
                     final_params[key] = (regex_params[key] + llm_params[key]) / 2
                 else:
                     final_params[key] = regex_params[key]  # fallback
-        
+
         # Clip to ranges
         for p in ['fc', 'rs', 'c_bulk', 'L0_nm']:
             low, high = DepositionParameters.RANGES[p]
             final_params[p] = np.clip(final_params[p], low, high)
-        
+
         return final_params
 
     def _fallback_extract(self, generated: str) -> dict:
@@ -1643,10 +1643,10 @@ JSON:"""
     def parse(self, text: str) -> dict:
         if not text or not isinstance(text, str):
             return self.defaults.copy()
-        
+
         params = self.defaults.copy()
         text_lower = text.lower()
-        
+
         for param_name, patterns in self.patterns.items():
             for pattern in patterns:
                 match = re.search(pattern, text, re.IGNORECASE)
@@ -1671,23 +1671,23 @@ JSON:"""
                         break
                     except (ValueError, TypeError):
                         continue
-        
+
         for p in ['fc', 'rs', 'c_bulk', 'L0_nm']:
             low, high = DepositionParameters.RANGES[p]
             if not (low <= params[p] <= high):
                 old_val = params[p]
                 params[p] = np.clip(params[p], low, high)
                 st.warning(f"Parameter {p}={old_val} out of range [{low}, {high}]; clipped to {params[p]}.")
-        
+
         return params
-    
+
     def get_explanation(self, params: dict, original_text: str) -> str:
         lines = ["### Parsed Parameters from Natural Language Input", ""]
         lines.append(f"**Original input:** _{original_text}_")
         lines.append("")
         lines.append("| Parameter | Value | Status |")
         lines.append("|-----------|-------|--------|")
-        
+
         for key, val in params.items():
             if key == 'time' and val is None:
                 status = "Default (full evolution)"
@@ -1695,27 +1695,26 @@ JSON:"""
             else:
                 status = "Extracted" if val != self.defaults[key] else "Default"
                 val_str = f"{val:.4f}" if isinstance(val, float) else str(val)
-            
-            lines.append(f"| {key} | {val_str} | {status} |")
-        
-        return "\n".join(lines)
 
+            lines.append(f"| {key} | {val_str} | {status} |")
+
+        return "\n".join(lines)
 
 class RelevanceScorer:
     """Compute semantic relevance using SciBERT or fallback keyword matching."""
     _instance = None
     _model = None
     _lock = threading.Lock()
-    
+
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     def __init__(self, use_scibert: bool = True):
         self.use_scibert = use_scibert
         self._embedding_cache = {}
-        
+
         if use_scibert and RelevanceScorer._model is None:
             try:
                 with RelevanceScorer._lock:
@@ -1734,7 +1733,7 @@ class RelevanceScorer:
             except Exception as e:
                 st.warning(f"Could not load SciBERT: {e}. Using fallback.")
                 self.use_scibert = False
-    
+
     def encode_source(self, src_params: dict) -> str:
         return (
             f"Deposition simulation with domain length {src_params.get('L0_nm', 20):.1f} nm, "
@@ -1745,11 +1744,11 @@ class RelevanceScorer:
             f"with {src_params.get('bc_type', 'Neu')} boundary conditions "
             f"and EDL {'enabled' if src_params.get('use_edl', True) else 'disabled'}."
         )
-    
+
     def score(self, query: str, sources: List[Dict], weights: np.ndarray) -> float:
         if not sources or len(weights) == 0:
             return 0.0
-        
+
         if self.use_scibert and self.model is not None:
             try:
                 query_hash = hashlib.md5(query.encode()).hexdigest()
@@ -1758,33 +1757,33 @@ class RelevanceScorer:
                     self._embedding_cache[query_hash] = query_emb
                 else:
                     query_emb = self._embedding_cache[query_hash]
-                
+
                 src_texts = [self.encode_source(s.get('params', {})) for s in sources]
                 src_embs = self.model.encode(src_texts, convert_to_tensor=False)
-                
+
                 query_norm = np.linalg.norm(query_emb)
                 src_norms = np.linalg.norm(src_embs, axis=1)
-                
+
                 valid_mask = src_norms > 1e-8
                 if not np.any(valid_mask):
                     return float(np.max(weights))
-                
+
                 similarities = np.zeros(len(sources))
                 similarities[valid_mask] = (
-                    np.dot(src_embs[valid_mask], query_emb) / 
+                    np.dot(src_embs[valid_mask], query_emb) /
                     (src_norms[valid_mask] * query_norm + 1e-12)
                 )
-                
+
                 weighted_score = np.average(similarities, weights=weights)
                 normalized_score = (weighted_score + 1) / 2
                 return float(np.clip(normalized_score, 0.0, 1.0))
-                
+
             except Exception as e:
                 st.warning(f"SciBERT scoring failed: {e}. Using fallback.")
                 return float(np.max(weights)) if len(weights) > 0 else 0.0
         else:
             return float(np.max(weights)) if len(weights) > 0 else 0.0
-    
+
     def get_confidence_level(self, score: float) -> Tuple[str, str]:
         if score >= 0.8:
             return "High confidence", "green"
@@ -1795,12 +1794,11 @@ class RelevanceScorer:
         else:
             return "Very low confidence - consider adjusting parameters", "red"
 
-
 class CompletionAnalyzer:
     """Determine shell completion and minimal thickness, plus shell‑tracking diagnostics."""
-    
+
     @staticmethod
-    def compute_completion(manager, target_params: Dict, 
+    def compute_completion(manager, target_params: Dict,
                           max_time_norm: Optional[float] = None,
                           tolerance: float = 0.3,
                           use_median: bool = True,
@@ -1811,7 +1809,7 @@ class CompletionAnalyzer:
         key_times_norm = list(manager.key_frames.keys()) if hasattr(manager, 'key_frames') else []
         if not key_times_norm:
             return None, None, False
-        
+
         # Filter times up to max_time_norm if provided
         if max_time_norm is not None:
             key_times_norm = [t for t in key_times_norm if t <= max_time_norm]
@@ -1819,32 +1817,32 @@ class CompletionAnalyzer:
                 # No frames up to this time; return incomplete
                 final_th = manager.get_thickness_at_time(max_time_norm) if hasattr(manager, 'get_thickness_at_time') else 0.0
                 return None, final_th, False
-        
+
         core_radius_nm = target_params.get('fc', 0.18) * target_params.get('L0_nm', 60.0) / 2
         t_complete = None
         dr_min = None
-        
+
         sorted_times = sorted(key_times_norm)
         L0 = target_params.get('L0_nm', 60.0)
-        
+
         for t_norm in sorted_times:
             fields = manager.key_frames.get(t_norm)
             if fields is None:
                 continue
-            
-            proxy = DepositionPhysics.material_proxy(fields.get('phi', np.zeros((1,1))), 
+
+            proxy = DepositionPhysics.material_proxy(fields.get('phi', np.zeros((1,1))),
                                                       fields.get('psi', np.zeros((1,1))))
-            
+
             r, prof = DepositionPhysics.compute_radial_profile(proxy, L0, n_bins=100, use_median=use_median)
-            
+
             core_idx = np.argmin(np.abs(r - core_radius_nm))
             if core_idx >= len(prof):
                 continue
-            
+
             profile_from_core = prof[core_idx:]
             if len(profile_from_core) == 0:
                 continue
-            
+
             # Softer check: require that at least completeness_threshold fraction of shell bins are above threshold
             shell_bins = profile_from_core[profile_from_core < 1.5]  # exclude core region
             if len(shell_bins) > 0:
@@ -1852,7 +1850,7 @@ class CompletionAnalyzer:
                 is_continuous = frac_above >= completeness_threshold
             else:
                 is_continuous = False
-            
+
             if is_continuous and t_complete is None:
                 ag_region = profile_from_core < 1.5
                 if np.any(ag_region):
@@ -1860,11 +1858,11 @@ class CompletionAnalyzer:
                     dr_est = r[min(core_idx + first_cu_idx, len(r)-1)] - core_radius_nm
                 else:
                     dr_est = r[-1] - core_radius_nm
-                
+
                 t_complete = manager.get_time_real(t_norm)
                 dr_min = max(0.0, dr_est)
                 break
-        
+
         # Check final state (last key frame considered)
         if sorted_times:
             final_t = sorted_times[-1]
@@ -1883,11 +1881,11 @@ class CompletionAnalyzer:
                 is_complete_at_end = False
         else:
             is_complete_at_end = False
-        
+
         if t_complete is None:
             final_thickness = manager.get_thickness_at_time(sorted_times[-1]) if hasattr(manager, 'get_thickness_at_time') and sorted_times else 0.0
             return None, final_thickness, False
-        
+
         return t_complete, dr_min, is_complete_at_end
 
     @staticmethod
@@ -1901,7 +1899,7 @@ class CompletionAnalyzer:
         """
         # Intrusion
         intrusion = np.mean(phi[psi > 0.5]) if np.any(psi > 0.5) else 0.0
-        
+
         # Coverage of core boundary
         core_mask = psi > 0.5
         if np.any(core_mask):
@@ -1917,7 +1915,7 @@ class CompletionAnalyzer:
             coverage = min(1.0, coverage)
         else:
             coverage = 0.0
-        
+
         # Uniformity: radial thickness variance
         proxy = DepositionPhysics.material_proxy(phi, psi)
         r_centers, profile = DepositionPhysics.compute_radial_profile(proxy, L0_nm, n_bins=100)
@@ -1936,7 +1934,7 @@ class CompletionAnalyzer:
             uniformity = np.std(thickness_vals) if len(thickness_vals) > 1 else 0.0
         else:
             uniformity = 0.0
-        
+
         return {
             'intrusion': float(intrusion),
             'coverage': float(coverage),
@@ -1960,13 +1958,13 @@ class CompletionAnalyzer:
         if not match:
             return None
         json_str = match.group(0)
-        
+
         # Repair: insert missing commas after true/false/null before a key
         # e.g., "true" "t_complete" -> "true", "t_complete"
         json_str = re.sub(r'(true|false|null)\s*(")', r'\1,\2', json_str)
         # Repair: remove trailing commas before } or ]
         json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
-        
+
         try:
             return json.loads(json_str)
         except json.JSONDecodeError:
@@ -2050,8 +2048,8 @@ JSON:"""
 
     # MODIFIED: generate_recommendations now accepts llm_complete and adds a discrepancy note.
     @staticmethod
-    def generate_recommendations(params: dict, relevance: float, 
-                                  t_complete: Optional[float], 
+    def generate_recommendations(params: dict, relevance: float,
+                                  t_complete: Optional[float],
                                   dr_min: Optional[float],
                                   is_complete: bool,
                                   shell_quality: Optional[Dict] = None,
@@ -2173,10 +2171,10 @@ class HeatMapVisualizer:
 
     def __init__(self):
         self.colormaps = COLORMAP_OPTIONS
-    
+
     def _get_extent(self, L0_nm):
         return [0, L0_nm, 0, L0_nm]
-    
+
     def _is_material_proxy(self, field_data, colorbar_label, title):
         unique_vals = np.unique(field_data)
         # Robust check: if values are exactly 0, 1, 2 (allowing for floats)
@@ -2184,15 +2182,15 @@ class HeatMapVisualizer:
         is_discrete = set(unique_vals).issubset(valid_material_values) and len(unique_vals) <= 3
         # Optional keyword check as a fallback, but data values are primary
         return is_discrete
-    
+
     def create_field_heatmap(self, field_data, title, cmap_name='viridis',
                            L0_nm=20.0, figsize=(10,8), colorbar_label="",
                            vmin=None, vmax=None, target_params=None, time_real_s=None):
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
         extent = self._get_extent(L0_nm)
-        
+
         is_material = self._is_material_proxy(field_data, colorbar_label, title)
-        
+
         if is_material:
             im = ax.imshow(field_data, cmap=MATERIAL_COLORMAP_MATPLOTLIB,
                           norm=MATERIAL_BOUNDARY_NORM,
@@ -2206,10 +2204,10 @@ class HeatMapVisualizer:
             cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             if colorbar_label:
                 cbar.set_label(colorbar_label, fontsize=14, fontweight='bold')
-        
+
         ax.set_xlabel('X (nm)', fontsize=14, fontweight='bold')
         ax.set_ylabel('Y (nm)', fontsize=14, fontweight='bold')
-        
+
         title_str = title
         if target_params:
             fc = target_params.get('fc', 0); rs = target_params.get('rs', 0)
@@ -2217,21 +2215,21 @@ class HeatMapVisualizer:
             title_str += f"\nfc={fc:.3f}, rs={rs:.3f}, c_bulk={cb:.2f}, L0={L0_nm} nm"
         if time_real_s is not None:
             title_str += f"\nt = {time_real_s:.3e} s"
-        
+
         ax.set_title(title_str, fontsize=16, fontweight='bold')
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         return fig
-    
+
     def create_interactive_heatmap(self, field_data, title, cmap_name='viridis',
                                  L0_nm=20.0, width=800, height=700,
                                  target_params=None, time_real_s=None):
         ny, nx = field_data.shape
         x = np.linspace(0, L0_nm, nx)
         y = np.linspace(0, L0_nm, ny)
-        
+
         is_material = self._is_material_proxy(field_data, "", title)
-        
+
         if is_material:
             hover = [[f"X={x[j]:.2f} nm, Y={y[i]:.2f} nm<br>Phase={int(field_data[i,j])}"
                      for j in range(nx)] for i in range(ny)]
@@ -2255,7 +2253,7 @@ class HeatMapVisualizer:
                 hoverinfo='text', text=hover,
                 colorbar=dict(title=dict(text="Value", font=dict(size=14)))
             ))
-        
+
         title_str = title
         if target_params:
             fc = target_params.get('fc', 0); rs = target_params.get('rs', 0)
@@ -2263,7 +2261,7 @@ class HeatMapVisualizer:
             title_str += f"<br>fc={fc:.3f}, rs={rs:.3f}, c_bulk={cb:.2f}, L0={L0_nm} nm"
         if time_real_s is not None:
             title_str += f"<br>t = {time_real_s:.3e} s"
-        
+
         fig.update_layout(
             title=dict(text=title_str, font=dict(size=20), x=0.5),
             xaxis=dict(title="X (nm)", scaleanchor="y", scaleratio=1),
@@ -2271,23 +2269,23 @@ class HeatMapVisualizer:
             width=width, height=height
         )
         return fig
-    
+
     def create_thickness_plot(self, thickness_time, source_curves=None, weights=None,
                            title="Shell Thickness Evolution", figsize=(10,6),
                            current_time_norm=None, current_time_real=None,
                            show_growth_rate=False):
         fig, ax = plt.subplots(figsize=figsize, dpi=300)
-        
+
         if 't_real_s' in thickness_time:
             t_plot = np.array(thickness_time['t_real_s'])
             ax.set_xlabel("Time (s)")
         else:
             t_plot = np.array(thickness_time['t_norm'])
             ax.set_xlabel("Normalized Time")
-        
+
         th_nm = np.array(thickness_time['th_nm'])
         ax.plot(t_plot, th_nm, 'b-', linewidth=3, label='Interpolated')
-        
+
         if show_growth_rate and len(t_plot) > 1:
             growth_rate = np.gradient(th_nm, t_plot)
             ax2 = ax.twinx()
@@ -2295,13 +2293,13 @@ class HeatMapVisualizer:
             ax2.set_ylabel('Growth Rate (nm/s)', fontsize=12, color='green')
             ax2.tick_params(axis='y', labelcolor='green')
             ax2.grid(False)
-        
+
         if source_curves is not None and weights is not None:
             for i, (src_t, src_th) in enumerate(source_curves):
                 alpha = min(weights[i] * 5, 0.8)
                 ax.plot(src_t, src_th, '--', linewidth=1, alpha=alpha,
                        label=f'Source {i+1} (w={weights[i]:.3f})')
-        
+
         if current_time_norm is not None:
             if 't_real_s' in thickness_time:
                 current_th = np.interp(current_time_norm,
@@ -2312,31 +2310,31 @@ class HeatMapVisualizer:
                 current_t_plot = current_time_norm
                 current_th = np.interp(current_time_norm,
                                       np.array(thickness_time['t_norm']), th_nm)
-            
+
             ax.axvline(current_t_plot, color='r', linestyle='--',
                       linewidth=2, alpha=0.7)
             ax.plot(current_t_plot, current_th, 'ro', markersize=8,
                    label=f'Current: t={current_t_plot:.2e}, h={current_th:.2f} nm')
-        
+
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
         ax.legend(loc='best')
         plt.tight_layout()
         return fig
-    
+
     def create_temporal_comparison_plot(self, fields_list, times_list, field_key='phi',
                                       cmap_name='viridis', L0_nm=20.0, n_cols=3):
         n_frames = len(fields_list)
         n_rows = (n_frames + n_cols - 1) // n_cols
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows), dpi=200)
-        
+
         if n_frames == 1:
             axes = np.array([axes])
         axes = axes.flatten()
-        
+
         extent = self._get_extent(L0_nm)
         is_material = "material" in field_key.lower()
-        
+
         if is_material:
             cmap = MATERIAL_COLORMAP_MATPLOTLIB
             norm = MATERIAL_BOUNDARY_NORM
@@ -2347,7 +2345,7 @@ class HeatMapVisualizer:
             all_values = [f[field_key] for f in fields_list]
             vmin = min(np.min(v) for v in all_values)
             vmax = max(np.max(v) for v in all_values)
-        
+
         for i, (fields, t) in enumerate(zip(fields_list, times_list)):
             ax = axes[i]
             if norm is not None:
@@ -2359,17 +2357,17 @@ class HeatMapVisualizer:
             ax.set_title(f't = {t:.3e} s', fontsize=12)
             ax.set_xlabel('X (nm)')
             ax.set_ylabel('Y (nm)')
-        
+
         for j in range(i+1, len(axes)):
             axes[j].axis('off')
-        
+
         cbar = plt.colorbar(im, ax=axes, fraction=0.046, pad=0.04)
         if is_material:
             cbar.set_ticks([0, 1, 2])
             cbar.set_ticklabels(['Electrolyte', 'Ag', 'Cu'])
         else:
             cbar.set_label(field_key)
-        
+
         plt.suptitle(f'Temporal Evolution: {field_key}', fontsize=16, fontweight='bold')
         plt.tight_layout()
         return fig
@@ -2379,7 +2377,7 @@ class HeatMapVisualizer:
 # =============================================
 class HybridWeightVisualizer:
     """Creates Sankey, chord, radar, and breakdown diagrams for weight analysis."""
-    
+
     def __init__(self):
         self.color_scheme = {
             'L0': '#FF6B6B',
@@ -2391,7 +2389,7 @@ class HybridWeightVisualizer:
             'Combined': '#9966FF',
             'Query': '#FF6B6B'
         }
-        
+
         self.font_config = {
             'family': 'Arial, sans-serif',
             'size_title': 24,
@@ -2399,7 +2397,7 @@ class HybridWeightVisualizer:
             'size_ticks': 14,
             'color': '#2C3E50'
         }
-    
+
     def get_colormap(self, cmap_name, n_colors=10):
         try:
             cmap = plt.get_cmap(cmap_name)
@@ -2409,72 +2407,72 @@ class HybridWeightVisualizer:
             cmap = plt.get_cmap('viridis')
             return [f'rgb({int(r*255)}, {int(g*255)}, {int(b*255)})'
                     for r, g, b, _ in [cmap(i/n_colors) for i in range(n_colors)]]
-    
+
     def create_enhanced_sankey_diagram(self, sources_data, target_params, param_sigmas):
         labels = ['Target']
-        
+
         for source in sources_data:
             idx = source['source_index']
             l0 = source['L0_nm']
             fc = source['fc']
             labels.append(f"S{idx}\nL0={l0:.0f}nm\nfc={fc:.2f}")
-        
+
         component_start = len(labels)
-        labels.extend(['L0 Weight', 'fc Weight', 'rs Weight', 'c_bulk Weight', 
+        labels.extend(['L0 Weight', 'fc Weight', 'rs Weight', 'c_bulk Weight',
                       'Attention', 'Physics Refinement', 'Combined Weight'])
-        
+
         source_indices = []
         target_indices = []
         values = []
         colors = []
-        
+
         color_palette = self.get_colormap('viridis', len(sources_data) + 7)
-        
+
         node_colors = ["#FF6B6B"]
         combined_weights = [s['combined_weight'] for s in sources_data]
         for w in combined_weights:
             node_colors.append(f'rgba(153,102,255,{w:.2f})')
         node_colors.extend(["#FF6B6B", "#4ECDC4", "#95E1D3", "#FFD93D", "#9D4EDD", "#36A2EB", "#9966FF"])
-        
+
         for i, source in enumerate(sources_data):
             source_idx = i + 1
             source_color = color_palette[i % len(color_palette)]
-            
+
             source_indices.append(source_idx)
             target_indices.append(component_start)
             values.append(source['l0_weight'] * 100)
             colors.append(f'rgba(255, 107, 107, 0.8)')
-            
+
             source_indices.append(source_idx)
             target_indices.append(component_start + 1)
             values.append(source['fc_weight'] * 100)
             colors.append(f'rgba(78, 205, 196, 0.8)')
-            
+
             source_indices.append(source_idx)
             target_indices.append(component_start + 2)
             values.append(source['rs_weight'] * 100)
             colors.append(f'rgba(149, 225, 211, 0.8)')
-            
+
             source_indices.append(source_idx)
             target_indices.append(component_start + 3)
             values.append(source['c_bulk_weight'] * 100)
             colors.append(f'rgba(255, 217, 61, 0.8)')
-            
+
             source_indices.append(source_idx)
             target_indices.append(component_start + 4)
             values.append(source['attention_weight'] * 100)
             colors.append(f'rgba(157, 78, 221, 0.8)')
-            
+
             source_indices.append(source_idx)
             target_indices.append(component_start + 5)
             values.append(source['physics_refinement'] * 100)
             colors.append(f'rgba(54, 162, 235, 0.8)')
-            
+
             source_indices.append(source_idx)
             target_indices.append(component_start + 6)
             values.append(source['combined_weight'] * 100)
             colors.append(f'rgba(153, 102, 255, 0.8)')
-        
+
         for comp_idx in range(7):
             source_indices.append(component_start + comp_idx)
             target_indices.append(0)
@@ -2482,7 +2480,7 @@ class HybridWeightVisualizer:
                            if t == component_start + comp_idx)
             values.append(comp_value * 0.5)
             colors.append(f'rgba(153, 102, 255, 0.6)')
-        
+
         fig = go.Figure(data=[go.Sankey(
             node=dict(
                 pad=25,
@@ -2502,10 +2500,10 @@ class HybridWeightVisualizer:
             ),
             hoverinfo='all'
         )])
-        
+
         fig.update_layout(
             title=dict(
-                text=f'<b>SANKEY DIAGRAM: HYBRID WEIGHT COMPONENT FLOW</b><br>' + 
+                text=f'<b>SANKEY DIAGRAM: HYBRID WEIGHT COMPONENT FLOW</b><br>' +
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
                          color=self.font_config['color']),
@@ -2526,23 +2524,23 @@ class HybridWeightVisualizer:
                 bordercolor='white'
             )
         )
-        
+
         return fig
-    
+
     def create_enhanced_chord_diagram(self, sources_data, target_params):
         n_sources = len(sources_data)
         center_x, center_y = 0, 0
         radius = 1.5
-        
+
         source_positions = []
         for i in range(n_sources):
             angle = 2 * pi * i / n_sources
             x = center_x + radius * cos(angle)
             y = center_y + radius * sin(angle)
             source_positions.append((x, y))
-        
+
         fig = go.Figure()
-        
+
         fig.add_trace(go.Scatter(
             x=[center_x], y=[center_y],
             mode='markers+text',
@@ -2555,13 +2553,13 @@ class HybridWeightVisualizer:
             hoverinfo='text',
             hovertemplate='<b>Target</b><br>L0=%{text}<extra></extra>'
         ))
-        
+
         source_x = []
         source_y = []
         source_colors = []
         source_sizes = []
         combined_weights = [s['combined_weight'] for s in sources_data]
-        
+
         for i, source in enumerate(sources_data):
             x, y = source_positions[i]
             source_x.append(x)
@@ -2569,7 +2567,7 @@ class HybridWeightVisualizer:
             node_size = 20 + source['combined_weight'] * 60
             source_sizes.append(node_size)
             source_colors.append(self.color_scheme['Combined'])
-        
+
         fig.add_trace(go.Scatter(
             x=source_x, y=source_y,
             mode='markers+text',
@@ -2582,7 +2580,7 @@ class HybridWeightVisualizer:
             hoverinfo='text',
             hovertemplate='<b>Source %{text}</b><br>Combined weight: %{marker.size:.1f}<extra></extra>'
         ))
-        
+
         for i, source in enumerate(sources_data):
             sx, sy = source_positions[i]
             cx = (sx + center_x) / 2
@@ -2595,15 +2593,15 @@ class HybridWeightVisualizer:
                 ny = dx / length * 0.3
             else:
                 nx, ny = 0, 0
-            
+
             t = np.linspace(0, 1, 50)
-            
+
             combined_curve_x = (1-t)**2 * sx + 2*(1-t)*t * (cx - nx*1.0) + t**2 * center_x
             combined_curve_y = (1-t)**2 * sy + 2*(1-t)*t * (cy - ny*1.0) + t**2 * center_y
             combined_width = max(2, source['combined_weight'] * 20)
             weight_norm = source['combined_weight'] / max(combined_weights) if max(combined_weights) > 0 else 0.5
             line_color = px.colors.sample_colorscale('viridis', weight_norm)[0]
-            
+
             fig.add_trace(go.Scatter(
                 x=combined_curve_x, y=combined_curve_y,
                 mode='lines',
@@ -2613,10 +2611,10 @@ class HybridWeightVisualizer:
                 hovertext=f"Combined Weight: {source['combined_weight']:.3f}",
                 showlegend=False
             ))
-        
+
         fig.update_layout(
             title=dict(
-                text=f'<b>ENHANCED CHORD DIAGRAM: HYBRID WEIGHT VISUALIZATION</b><br>' + 
+                text=f'<b>ENHANCED CHORD DIAGRAM: HYBRID WEIGHT VISUALIZATION</b><br>' +
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=self.font_config['size_title'],
                          color=self.font_config['color']),
@@ -2644,9 +2642,9 @@ class HybridWeightVisualizer:
                 bordercolor='white'
             )
         )
-        
+
         return fig
-    
+
     def create_parameter_radar_charts(self, sources_data, target_params, param_sigmas):
         param_keys = ['L0_nm', 'fc', 'rs', 'c_bulk']
         param_names = ['L0 (nm)', 'fc', 'rs', 'c_bulk']
@@ -2768,59 +2766,59 @@ class HybridWeightVisualizer:
             vertical_spacing=0.2,
             horizontal_spacing=0.15
         )
-        
+
         sources_data = sorted(sources_data, key=lambda x: x['source_index'])
         source_indices = [s['source_index'] for s in sources_data]
-        
+
         l0_values = [s['l0_weight'] for s in sources_data]
         fc_values = [s['fc_weight'] for s in sources_data]
         rs_values = [s['rs_weight'] for s in sources_data]
         c_bulk_values = [s['c_bulk_weight'] for s in sources_data]
         attention_values = [s['attention_weight'] for s in sources_data]
         combined_values = [s['combined_weight'] for s in sources_data]
-        
+
         fig.add_trace(go.Bar(
             x=source_indices, y=l0_values, name='L0 Weight',
             marker_color=self.color_scheme['L0'],
             text=[f'{v:.3f}' for v in l0_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family']),
             hovertemplate='<b>Source %{x}</b><br>L0 Weight: %{y:.3f}<extra></extra>'
         ), row=1, col=1)
-        
+
         fig.add_trace(go.Bar(
             x=source_indices, y=fc_values, name='fc Weight',
             marker_color=self.color_scheme['fc'],
             text=[f'{v:.3f}' for v in fc_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family'])
         ), row=1, col=1)
-        
+
         fig.add_trace(go.Bar(
             x=source_indices, y=attention_values, name='Attention',
             marker_color=self.color_scheme['Attention'],
             text=[f'{v:.3f}' for v in attention_values], textposition='outside', textfont=dict(size=10, family=self.font_config['family'])
         ), row=1, col=1)
-        
+
         sorted_weights = np.sort(combined_values)[::-1]
         cumulative = np.cumsum(sorted_weights) / np.sum(sorted_weights) if np.sum(sorted_weights) > 0 else np.zeros_like(sorted_weights)
         x_vals = np.arange(1, len(cumulative) + 1)
-        
+
         fig.add_trace(go.Scatter(
             x=x_vals, y=cumulative, mode='lines+markers', name='Cumulative Weight',
             line=dict(color=self.color_scheme['Combined'], width=4), marker=dict(size=8),
             fill='tozeroy', fillcolor='rgba(153, 102, 255, 0.2)',
             hovertemplate='Top %{x} sources: %{y:.1%}<extra></extra>'
         ), row=1, col=2)
-        
+
         if len(cumulative) > 0 and np.sum(sorted_weights) > 0:
             threshold_idx = np.where(cumulative >= 0.9)[0]
             if len(threshold_idx) > 0:
                 fig.add_hline(y=0.9, line_dash="dash", line_color="red",
                              annotation_text="90% threshold", row=1, col=2)
                 fig.add_vline(x=threshold_idx[0]+1, line_dash="dash", line_color="red", row=1, col=2)
-        
+
         param_means = [np.mean(l0_values), np.mean(fc_values), np.mean(rs_values), np.mean(c_bulk_values)]
         param_names = ['L0', 'fc', 'rs', 'c_bulk']
-        param_colors = [self.color_scheme['L0'], self.color_scheme['fc'], 
+        param_colors = [self.color_scheme['L0'], self.color_scheme['fc'],
                        self.color_scheme['rs'], self.color_scheme['c_bulk']]
-        
+
         fig.add_trace(go.Bar(
             x=param_names, y=param_means, name='Mean Weight by Parameter',
             marker_color=param_colors,
@@ -2828,7 +2826,7 @@ class HybridWeightVisualizer:
             textfont=dict(family=self.font_config['family']),
             hovertemplate='<b>%{x}</b><br>Mean weight: %{y:.3f}<extra></extra>'
         ), row=2, col=1)
-        
+
         fig.add_trace(go.Scatter(
             x=source_indices, y=combined_values, mode='markers+lines',
             name='Combined Weight',
@@ -2839,12 +2837,12 @@ class HybridWeightVisualizer:
             textfont=dict(family=self.font_config['family']),
             hovertemplate='<b>Source %{x}</b><br>Combined Weight: %{y:.3f}<extra></extra>'
         ), row=2, col=2)
-        
+
         fig.update_layout(
             barmode='stack',
             title=dict(
-                text=f'<b>HYBRID WEIGHT FORMULA ANALYSIS</b><br>' + 
-                     f'wᵢ = α(L0) × β(params) × γ(shape) × Attention<br>' + 
+                text=f'<b>HYBRID WEIGHT FORMULA ANALYSIS</b><br>' +
+                     f'wᵢ = α(L0) × β(params) × γ(shape) × Attention<br>' +
                      f'Target: L0={target_params.get("L0_nm", 20):.0f}nm, fc={target_params.get("fc", 0.18):.2f}',
                 font=dict(family=self.font_config['family'], size=20,
                          color=self.font_config['color']),
@@ -2862,7 +2860,7 @@ class HybridWeightVisualizer:
             hovermode='closest',
             margin=dict(l=100, r=100, t=150, b=100)
         )
-        
+
         fig.update_xaxes(title_text="Source Index", row=1, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
         fig.update_yaxes(title_text="Weight Component Value", row=1, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
         fig.update_xaxes(title_text="Number of Top Sources", row=1, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
@@ -2871,7 +2869,7 @@ class HybridWeightVisualizer:
         fig.update_yaxes(title_text="Mean Weight", row=2, col=1, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
         fig.update_xaxes(title_text="Source Index", row=2, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
         fig.update_yaxes(title_text="Weight Value", row=2, col=2, title_font=dict(family=self.font_config['family'], size=14, color=self.font_config['color']))
-        
+
         return fig
 
 # =============================================
@@ -2879,7 +2877,7 @@ class HybridWeightVisualizer:
 # =============================================
 class MultiPredictionVisualizer:
     """Generates comparison plots for multiple saved predictions."""
-    
+
     @staticmethod
     def thickness_evolution_plot(predictions, labels):
         fig = go.Figure()
@@ -2913,7 +2911,7 @@ class MultiPredictionVisualizer:
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         return fig
-    
+
     @staticmethod
     def thickness_evolution_3d(predictions, labels, param_y='fc', param_color='growth_rate', cmap='turbo'):
         fig = go.Figure()
@@ -2953,7 +2951,7 @@ class MultiPredictionVisualizer:
             height=700
         )
         return fig
-    
+
     @staticmethod
     def parameter_map(predictions, param_x, param_y, metric='thickness_nm', plot_type='scatter', cmap='viridis'):
         df = pd.DataFrame([
@@ -2978,7 +2976,7 @@ class MultiPredictionVisualizer:
                             hover_data=['label'],
                             title=f'{metric} Map: {param_x} vs {param_y}')
         return fig
-    
+
     @staticmethod
     def radar_comparison(predictions, labels):
         metrics = ['thickness_nm', 'growth_rate', 'entropy']
@@ -3002,7 +3000,7 @@ class MultiPredictionVisualizer:
             title='Multi-Prediction Metrics Comparison'
         )
         return fig
-    
+
     @staticmethod
     def weight_sunburst(predictions, labels, cmap='viridis'):
         ids = ['all']
@@ -3154,7 +3152,7 @@ class MultiPredictionVisualizer:
 class ResultsManager:
     def __init__(self):
         pass
-    
+
     def prepare_export_data(self, interpolation_result, visualization_params):
         res = interpolation_result.copy()
         export = {
@@ -3174,10 +3172,10 @@ class ResultsManager:
                 'growth_rate': res['derived'].get('growth_rate', 0.0)
             }
         }
-        
+
         for fname, arr in res['fields'].items():
             export['result'][f'{fname}_data'] = arr.tolist()
-        
+
         for dname, val in res['derived'].items():
             if isinstance(val, np.ndarray):
                 export['result'][f'{dname}_data'] = val.tolist()
@@ -3185,9 +3183,9 @@ class ResultsManager:
                 export['result'][dname] = val
             else:
                 export['result'][dname] = val
-        
+
         return export
-    
+
     def export_to_json(self, export_data, filename=None):
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -3196,10 +3194,10 @@ class ResultsManager:
             cb = p.get('c_bulk', 0)
             t = export_data['result'].get('time_real_s', 0)
             filename = f"temporal_interp_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_t{t:.3e}s_{ts}.json"
-        
+
         json_str = json.dumps(export_data, indent=2, default=self._json_serializer)
         return json_str, filename
-    
+
     def export_to_csv(self, interpolation_result, filename=None):
         if filename is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -3208,27 +3206,27 @@ class ResultsManager:
             cb = p.get('c_bulk', 0)
             t = interpolation_result.get('time_real_s', 0)
             filename = f"fields_fc{fc:.3f}_rs{rs:.3f}_c{cb:.2f}_t{t:.3e}s_{ts}.csv"
-        
+
         shape = interpolation_result['shape']
         L0 = interpolation_result['target_params'].get('L0_nm', 20.0)
         x = np.linspace(0, L0, shape[1]); y = np.linspace(0, L0, shape[0])
         X, Y = np.meshgrid(x, y)
-        
+
         data = {'x_nm': X.flatten(), 'y_nm': Y.flatten(),
                'time_norm': interpolation_result.get('time_norm', 0),
                'time_real_s': interpolation_result.get('time_real_s', 0)}
-        
+
         for fname, arr in interpolation_result['fields'].items():
             data[fname] = arr.flatten()
-        
+
         for dname, val in interpolation_result['derived'].items():
             if isinstance(val, np.ndarray):
                 data[dname] = val.flatten()
-        
+
         df = pd.DataFrame(data)
         csv_str = df.to_csv(index=False)
         return csv_str, filename
-    
+
     def _json_serializer(self, obj):
         if isinstance(obj, np.integer): return int(obj)
         elif isinstance(obj, np.floating): return float(obj)
@@ -3268,7 +3266,7 @@ def compare_fields_physical(gt_field, gt_L0, interp_field, interp_L0,
     )
     gt_resampled = resample_to_physical_grid(gt_field, gt_L0, x_ref, y_ref)
     interp_resampled = resample_to_physical_grid(interp_field, interp_L0, x_ref, y_ref)
-    
+
     if compare_region == 'overlap':
         gt_mask = np.zeros(shape_ref, dtype=bool)
         interp_mask = np.zeros(shape_ref, dtype=bool)
@@ -3285,14 +3283,14 @@ def compare_fields_physical(gt_field, gt_L0, interp_field, interp_L0,
             valid_mask = np.ones_like(valid_mask)
     else:
         valid_mask = np.ones(shape_ref, dtype=bool)
-    
+
     gt_valid = gt_resampled[valid_mask]
     interp_valid = interp_resampled[valid_mask]
-    
+
     mse = np.mean((gt_valid - interp_valid) ** 2)
     mae = np.mean(np.abs(gt_valid - interp_valid))
     max_err = np.max(np.abs(gt_valid - interp_valid))
-    
+
     if np.sum(valid_mask) > 1000:
         y_idx, x_idx = np.where(valid_mask)
         y_min, y_max = y_idx.min(), y_idx.max()
@@ -3304,7 +3302,7 @@ def compare_fields_physical(gt_field, gt_L0, interp_field, interp_L0,
         )
     else:
         ssim_val = np.nan
-    
+
     return {
         'gt_aligned': gt_resampled,
         'interp_aligned': interp_resampled,
@@ -3349,6 +3347,309 @@ def format_small_number(val: float, threshold: float = 0.001, decimals: int = 3)
 # ----------------------------------------------------------------------
 def set_template(text: str):
     st.session_state.designer_input = text
+
+# =============================================
+# VISITOR TRACKER (geographic, persistent)
+# =============================================
+def get_country_flag(country_code: str) -> str:
+    """Convert a 2-letter ISO country code into a flag emoji."""
+    if not country_code or len(str(country_code)) != 2:
+        return ""
+    try:
+        cc = str(country_code).upper()
+        return chr(ord(cc[0]) + 127397) + chr(ord(cc[1]) + 127397)
+    except Exception:
+        return ""
+
+def format_time_ago(dt: datetime) -> str:
+    """Human-readable 'X minutes ago' label."""
+    now = datetime.now()
+    seconds = (now - dt).total_seconds()
+    if seconds < 60:        return "just now"
+    if seconds < 3600:      return f"{int(seconds // 60)} min ago"
+    if seconds < 86400:     return f"{int(seconds // 3600)} h ago"
+    return f"{int(seconds // 86400)} d ago"
+
+def get_client_ip() -> Optional[str]:
+    """Best-effort retrieval of the visitor's public IP."""
+    # 1) Try Streamlit's request headers (works behind proxies / tunnels)
+    try:
+        headers = st.context.headers  # Streamlit ≥ 1.37
+        xff = headers.get("X-Forwarded-For")
+        if xff:
+            return xff.split(",")[0].strip()
+        xri = headers.get("X-Real-IP")
+        if xri:
+            return xri.strip()
+    except Exception:
+        pass
+
+    # 2) Fallback: external echo service
+    try:
+        r = requests.get("https://api.ipify.org?format=json", timeout=GEO_API_TIMEOUT)
+        if r.status_code == 200:
+            return r.json().get("ip")
+    except Exception:
+        pass
+    return None
+
+def get_geo_info(ip: Optional[str]) -> Dict[str, Any]:
+    """Resolve IP -> {country, country_code, city, region, lat, lon, tz}."""
+    empty = {'country':'Unknown','country_code':'','city':'Unknown',
+             'region':'Unknown','latitude':None,'longitude':None,'timezone':None}
+    if not ip:
+        return empty
+
+    # Local / private ranges – don't query external API
+    if (ip in ("127.0.0.1","::1","localhost")
+            or ip.startswith(("192.168.","10.","172."))):
+        return {**empty,
+                'country':'Local Network','country_code':'LO',
+                'city':'Local','region':'Local'}
+
+    # Check if we are in cooldown due to rate limits
+    cooldown_until = st.session_state.get('geo_api_cooldown_until')
+    if cooldown_until and datetime.now() < cooldown_until:
+        return empty
+
+    try:
+        # Free tier: 30k req/month, no API key required
+        r = requests.get(f"https://ipapi.co/{ip}/json/", timeout=GEO_API_TIMEOUT)
+
+        # Handle ipapi.co rate limits (X-Rl: remaining, X-Ttl: seconds until reset)
+        remaining = int(r.headers.get('X-Rl', 999))
+        ttl = int(r.headers.get('X-Ttl', 60))
+        if remaining <= 1:
+            st.session_state['geo_api_cooldown_until'] = datetime.now() + timedelta(seconds=ttl)
+            st.toast(f"Geo API rate limit reached. Cooldown for {ttl} seconds.", icon="⏳")
+
+        if r.status_code == 200:
+            d = r.json()
+            return {
+                'country':      d.get('country_name','Unknown'),
+                'country_code': d.get('country_code',''),
+                'city':         d.get('city','Unknown'),
+                'region':       d.get('region','Unknown'),
+                'latitude':     d.get('latitude'),
+                'longitude':    d.get('longitude'),
+                'timezone':     d.get('timezone'),
+            }
+    except Exception:
+        pass
+    return empty
+
+def load_visitors_log() -> Dict[str, Any]:
+    try:
+        if os.path.exists(VISITORS_LOG_FILE):
+            with open(VISITORS_LOG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_visitors_log(log: Dict[str, Any]) -> None:
+    try:
+        with open(VISITORS_LOG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(log, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+def track_visitor() -> Tuple[Optional[Dict], int, List[Dict]]:
+    """
+    Register / refresh the current visitor.
+    Returns (current_visitor_info, online_count, online_visitors_list).
+    """
+    # ---- Avoid hammering the geo API on every rerun ----
+    if 'vt_ip' not in st.session_state or st.session_state.vt_ip is None:
+        st.session_state.vt_ip  = get_client_ip()
+        st.session_state.vt_geo = get_geo_info(st.session_state.vt_ip)
+
+    ip   = st.session_state.vt_ip
+    geo  = st.session_state.vt_geo or {'country':'Unknown','country_code':'','city':'Unknown',
+             'region':'Unknown','latitude':None,'longitude':None,'timezone':None}
+    now  = datetime.now()
+
+    log = load_visitors_log()
+    existing = log.get(ip, {})
+    log[ip] = {
+        'ip':          ip,
+        'last_seen':   now.isoformat(),
+        'first_seen':  existing.get('first_seen', now.isoformat()),
+        'visits':      existing.get('visits', 0) + 1,
+        'country':     geo['country'],
+        'country_code':geo['country_code'],
+        'city':        geo['city'],
+        'region':      geo['region'],
+        'latitude':    geo['latitude'],
+        'longitude':   geo['longitude'],
+        'timezone':    geo['timezone'],
+    }
+    save_visitors_log(log)
+
+    # ---- Determine online visitors ----
+    online = []
+    for vip, info in log.items():
+        try:
+            last = datetime.fromisoformat(info['last_seen'])
+            if (now - last).total_seconds() <= ONLINE_THRESHOLD_S:
+                online.append(info)
+        except Exception:
+            continue
+    return log[ip], len(online), online
+
+def display_visitor_tracker() -> None:
+    """Render the geographic visitor tracker widget in the sidebar."""
+    st.markdown("### 🌍 Visitor Tracker")
+
+    try:
+        visitor_info, online_count, online_visitors = track_visitor()
+    except Exception as e:
+        st.caption(f"Tracker disabled ({e})")
+        return
+
+    log = load_visitors_log()
+
+    # ---- Summary metrics ----
+    c1, c2 = st.columns(2)
+    c1.metric("🟢 Online Now", online_count)
+    c2.metric("📊 Total Unique", len(log))
+
+    # ---- Current visitor card ----
+    if visitor_info:
+        flag = get_country_flag(visitor_info.get('country_code',''))
+        with st.expander(f"📍 You: {flag} {visitor_info.get('city','Unknown')}", expanded=False):
+            st.write(f"**IP:** `{visitor_info['ip']}`")
+            st.write(f"**Country:** {flag} {visitor_info.get('country','Unknown')}")
+            st.write(f"**City / Region:** {visitor_info.get('city','?')} / {visitor_info.get('region','?')}")
+            if visitor_info.get('timezone'):
+                st.write(f"**Timezone:** {visitor_info['timezone']}")
+            st.write(f"**Visits:** {visitor_info.get('visits',1)}")
+            try:
+                first = datetime.fromisoformat(visitor_info['first_seen'])
+                st.write(f"**First seen:** {format_time_ago(first)}")
+            except Exception:
+                pass
+
+    # ---- World Map of Online Visitors ----
+    map_data = []
+    for v in online_visitors:
+        lat = v.get('latitude')
+        lon = v.get('longitude')
+        if lat and lon:
+            try:
+                map_data.append({
+                    'lat': float(lat),
+                    'lon': float(lon),
+                    'city': v.get('city', 'Unknown'),
+                    'country': v.get('country', 'Unknown')
+                })
+            except (ValueError, TypeError):
+                continue
+
+    if map_data:
+        with st.expander("🗺️ Online Visitors Map", expanded=False):
+            df_map = pd.DataFrame(map_data)
+            fig_map = go.Figure(data=go.Scattergeo(
+                lon=df_map['lon'],
+                lat=df_map['lat'],
+                text=df_map['city'] + ', ' + df_map['country'],
+                mode='markers',
+                marker=dict(
+                    size=10,
+                    color='#3B82F6',
+                    line=dict(width=1, color='black'),
+                    opacity=0.8
+                )
+            ))
+            fig_map.update_layout(
+                geo=dict(
+                    projection_type='natural earth',
+                    showland=True,
+                    landcolor='rgb(243, 244, 246)',
+                    showocean=True,
+                    oceancolor='rgb(225, 242, 255)',
+                    showcountries=True,
+                    countrycolor='rgb(200, 200, 200)'
+                ),
+                margin=dict(l=0, r=0, t=0, b=0),
+                height=250
+            )
+            st.plotly_chart(fig_map, use_container_width=True)
+
+    # ---- Online right now (grouped by country) ----
+    if online_visitors:
+        with st.expander(f"👥 Online Visitors ({online_count})", expanded=True):
+            country_counts = {}
+            for v in online_visitors:
+                key = (v.get('country','Unknown'), v.get('country_code',''))
+                country_counts[key] = country_counts.get(key, 0) + 1
+            sorted_cc = sorted(country_counts.items(), key=lambda x: -x[1])
+            for (country, cc), cnt in sorted_cc:
+                flag = get_country_flag(cc)
+                st.write(f"{flag} **{country}** — {cnt} visitor{'s' if cnt>1 else ''}")
+
+    # ---- Daily / Weekly Timeline ----
+    if log:
+        with st.expander("📈 Visit Timeline (Last 14 Days)", expanded=False):
+            timeline_data = []
+            for vip, info in log.items():
+                try:
+                    last = datetime.fromisoformat(info['last_seen']).date()
+                    timeline_data.append({'date': last})
+                except Exception:
+                    continue
+
+            if timeline_data:
+                df_time = pd.DataFrame(timeline_data)
+                df_time['date'] = pd.to_datetime(df_time['date'])
+
+                # Filter to last 14 days
+                cutoff_date = datetime.now() - timedelta(days=14)
+                df_time = df_time[df_time['date'] >= cutoff_date]
+
+                if not df_time.empty:
+                    daily_counts = df_time.groupby(df_time['date'].dt.date).size().reset_index(name='visits')
+                    daily_counts['date'] = pd.to_datetime(daily_counts['date'])
+
+                    fig_time = go.Figure(data=go.Bar(
+                        x=daily_counts['date'],
+                        y=daily_counts['visits'],
+                        marker_color='rgba(59, 130, 246, 0.7)',
+                        line=dict(color='rgba(59, 130, 246, 1.0)', width=2)
+                    ))
+                    fig_time.update_layout(
+                        xaxis_title="Date",
+                        yaxis_title="Unique Visitors",
+                        margin=dict(l=10, r=10, t=10, b=10),
+                        height=250,
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)'
+                    )
+                    st.plotly_chart(fig_time, use_container_width=True)
+                else:
+                    st.caption("No visits in the last 14 days.")
+
+    # ---- Recent visitors ----
+    if log:
+        with st.expander("📅 Recent Visitors (last 10)", expanded=False):
+            sorted_visitors = sorted(
+                log.items(),
+                key=lambda kv: kv[1].get('last_seen',''),
+                reverse=True
+            )[:10]
+            for vip, info in sorted_visitors:
+                try:
+                    last_dt = datetime.fromisoformat(info['last_seen'])
+                    when = format_time_ago(last_dt)
+                except Exception:
+                    when = '?'
+                flag = get_country_flag(info.get('country_code',''))
+                city = info.get('city','?')
+                country = info.get('country','?')
+                st.write(f"{flag} {city}, {country} • {when}")
+
+    # ---- Privacy Notice ----
+    st.caption("ℹ️ Your IP is logged for analytics. No personal data is stored.")
 
 # =============================================
 # UNIFIED LLM LOADER (with caching)
@@ -3435,14 +3736,18 @@ def initialize_session_state():
         'llm_available': TRANSFORMERS_AVAILABLE,
         'llm_cache': OrderedDict(),
         'llm_cache_maxsize': 20,
-        'current_relevance': 0.5,          # NEW: store relevance for other tabs
-        'current_entropy': 0.0,             # NEW: store entropy
+        'current_relevance': 0.5,          # store relevance for other tabs
+        'current_entropy': 0.0,             # store entropy
+        # --- Visitor tracker state ---
+        'vt_ip':  None,                     # cached visitor IP
+        'vt_geo': None,                     # cached geo info
+        'geo_api_cooldown_until': None,     # rate-limit cooldown timestamp
     }
-    
+
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-    
+
     if st.session_state.loader is None:
         st.session_state.loader = EnhancedSolutionLoader(SOLUTIONS_DIR)
     if st.session_state.interpolator is None:
@@ -3465,7 +3770,7 @@ def initialize_session_state():
 # =============================================
 def render_intelligent_designer_tab():
     st.markdown('<h2 class="section-header">🤖 Intelligent Designer</h2>', unsafe_allow_html=True)
-    
+
     st.markdown("""
     <div style="background-color: #F0F9FF; border-left: 5px solid #3B82F6; padding: 1.2rem; 
                 border-radius: 0.6rem; margin: 1.2rem 0; font-size: 1.1rem;">
@@ -3481,7 +3786,7 @@ def render_intelligent_designer_tab():
     </ul>
     </div>
     """, unsafe_allow_html=True)
-    
+
     col_input1, col_input2 = st.columns([3, 1])
     with col_input1:
         user_input = st.text_area(
@@ -3504,7 +3809,7 @@ def render_intelligent_designer_tab():
                      on_click=set_template,
                      args=("Fast deposition with L0=50nm, fc=0.25, c_bulk=0.6, high concentration",)):
             pass
-    
+
     col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
     with col_btn1:
         run_design = st.button("🚀 Run Designer", type="primary", use_container_width=True)
@@ -3516,7 +3821,7 @@ def render_intelligent_designer_tab():
             if st.button("📊 Compare All Saved Designs", use_container_width=True):
                 st.session_state.active_tab = "Multi-Prediction Comparison"
                 st.rerun()
-    
+
     # NEW: Model selection dropdown – widget key is 'llm_backend'
     model_choice = st.selectbox(
         "🧠 LLM Backend for Parsing & Completeness",
@@ -3526,7 +3831,7 @@ def render_intelligent_designer_tab():
         index=0,  # GPT-2 is default
         key="llm_backend"
     )
-    
+
     # Unified loader – store loaded backend in separate key
     if st.session_state.llm_available:
         tokenizer, model, active_backend = load_llm(model_choice)
@@ -3535,7 +3840,7 @@ def render_intelligent_designer_tab():
         st.session_state.llm_backend_loaded = active_backend
         # Show current backend in UI
         st.caption(f"Current backend: **{st.session_state.llm_backend_loaded}** — Qwen models give cleaner JSON")
-    
+
     # LLM toggles (use loaded backend)
     llm_available = st.session_state.llm_available and st.session_state.llm_tokenizer is not None
     col_gpt1, col_gpt2, col_gpt3 = st.columns(3)
@@ -3555,7 +3860,7 @@ def render_intelligent_designer_tab():
             ensemble_runs = st.number_input("Ensemble runs", min_value=2, max_value=10, value=3, step=1)
         else:
             ensemble_runs = 3
-    
+
     if run_design and user_input:
         with st.spinner("🔍 Parsing natural language input..."):
             parser = st.session_state.nlp_parser
@@ -3571,22 +3876,22 @@ def render_intelligent_designer_tab():
             else:
                 target_design = parser.parse(user_input)
             target_design['rs'] = 0.2  # as per spec
-            
+
             design_record = {
                 'timestamp': datetime.now().isoformat(),
                 'input': user_input,
                 'params': target_design.copy()
             }
             st.session_state.design_history.append(design_record)
-        
+
         explanation = parser.get_explanation(target_design, user_input)
         st.markdown(explanation)
-        
+
         st.markdown("#### 📊 Parameter Visualization")
         cols = st.columns(5)
         param_icons = {'L0_nm': '📏', 'fc': '🔵', 'rs': '🟠', 'c_bulk': '🧪', 'time': '⏱️'}
         param_units = {'L0_nm': 'nm', 'fc': '', 'rs': '', 'c_bulk': '', 'time': 's'}
-        
+
         for i, (key, val) in enumerate(target_design.items()):
             if key in ['bc_type', 'use_edl', 'mode', 'alpha_nd', 'tau0_s']:
                 continue
@@ -3597,16 +3902,16 @@ def render_intelligent_designer_tab():
                 if val is None:
                     val_str = "Full evolution"
                 st.metric(f"{icon} {key}", val_str)
-        
+
         if not st.session_state.solutions:
             st.error("⚠️ No simulation solutions loaded. Please load solutions in the sidebar first.")
             st.info("👈 Go to the sidebar and click 'Load Solutions' to import your numerical simulation data.")
             return
-        
+
         # Clean up previous animation temp files before creating new manager
         if st.session_state.get('temporal_manager') is not None:
             st.session_state.temporal_manager.cleanup_animation()
-        
+
         with st.spinner("⚙️ Initializing simulation environment..."):
             try:
                 design_manager = TemporalFieldManager(
@@ -3621,11 +3926,11 @@ def render_intelligent_designer_tab():
             except Exception as e:
                 st.error(f"Failed to initialize simulation: {e}")
                 return
-        
+
         with st.spinner("🧠 Computing semantic relevance..."):
             if st.session_state.relevance_scorer is None:
                 st.session_state.relevance_scorer = RelevanceScorer(use_scibert=use_scibert)
-            
+
             scorer = st.session_state.relevance_scorer
             weights = np.array(design_manager.weights.get('combined', [1.0]))
             relevance = scorer.score(user_input, st.session_state.solutions, weights)
@@ -3633,13 +3938,13 @@ def render_intelligent_designer_tab():
             # Store relevance and entropy in session state for other tabs
             st.session_state.current_relevance = relevance
             st.session_state.current_entropy = design_manager.weights.get('entropy', 0.0)
-        
+
         # ------------------------------------------------------------------
         # SLIDER AND DYNAMIC CONTENT (completeness recomputed on slider change)
         # ------------------------------------------------------------------
         st.markdown("---")
         st.markdown("#### ⏱️ Select Any Time Point")
-        
+
         # Determine default normalized time from user input
         times_norm = list(design_manager.key_frames.keys())
         times_real = [design_manager.get_time_real(t) for t in times_norm]
@@ -3649,7 +3954,7 @@ def render_intelligent_designer_tab():
             default_norm = times_norm[default_idx]
         else:
             default_norm = 1.0
-        
+
         slider_col1, slider_col2 = st.columns([3, 1])
         with slider_col1:
             selected_time_norm = st.slider(
@@ -3662,28 +3967,28 @@ def render_intelligent_designer_tab():
         with slider_col2:
             t_sel_real = design_manager.get_time_real(selected_time_norm)
             st.markdown(f"**t = {t_sel_real:.3e} s**")
-        
+
         # Fetch fields for selected time
         fields_sel = design_manager.get_fields(selected_time_norm, use_interpolation=True)
-        
+
         # ==================================================================
         # DYNAMIC COMPLETENESS ANALYSIS (based on selected_time_norm)
         # ==================================================================
         analyzer = st.session_state.completion_analyzer
         core_radius_nm = target_design.get('fc', 0.18) * target_design.get('L0_nm', 60.0) / 2
-        
+
         # Recompute shell quality using current fields
         shell_quality = analyzer.compute_shell_quality(
             fields_sel['phi'], fields_sel['psi'], core_radius_nm, target_design.get('L0_nm', 60.0)
         )
-        
+
         # Recompute completeness up to selected time
         t_complete, dr_min, is_complete = analyzer.compute_completion(
             design_manager, target_design, 
             max_time_norm=selected_time_norm,
             tolerance=0.3, use_median=True, completeness_threshold=0.95
         )
-        
+
         # LLM completeness inference (if enabled) – now with manual cache and relevance/entropy
         llm_explanation = None
         llm_complete = None
@@ -3705,7 +4010,7 @@ def render_intelligent_designer_tab():
                 """
                 # Compute hash for caching
                 desc_hash = hashlib.md5(desc.encode()).hexdigest()
-                
+
                 # Check manual cache
                 if desc_hash in st.session_state.llm_cache:
                     llm_complete, llm_t, llm_dr, llm_explanation = st.session_state.llm_cache[desc_hash]
@@ -3722,7 +4027,7 @@ def render_intelligent_designer_tab():
                     if len(cache) > st.session_state.llm_cache_maxsize:
                         # pop the oldest item (OrderedDict maintains insertion order)
                         cache.popitem(last=False)
-        
+
         # ==================================================================
         # DISPLAY DYNAMIC RESULTS
         # ==================================================================
@@ -3751,7 +4056,7 @@ def render_intelligent_designer_tab():
                     st.warning("⏳ Pending")
                 else:
                     st.error("❌ Failed")
-        
+
         st.markdown("#### 🛡️ Shell Quality Metrics")
         qcols = st.columns(3)
         with qcols[0]:
@@ -3763,14 +4068,14 @@ def render_intelligent_designer_tab():
         with qcols[2]:
             st.metric("Uniformity (std dev)", f"{shell_quality['uniformity']:.2f} nm",
                       help="Lower is more uniform")
-        
+
         if use_llm_complete and llm_explanation is not None:
             st.markdown("#### 🤖 LLM Completeness Insight")
             st.info(f"**LLM says:** {'Complete' if llm_complete else 'Incomplete'} | "
                     f"Est. completion time: {llm_t if llm_t else 'N/A'} s | "
                     f"Min thickness: {llm_dr if llm_dr else 'N/A'} nm")
             st.caption(f"Explanation: {llm_explanation}")
-        
+
         # ------------------------------------------------------------------
         # VISUALIZATIONS (use fields_sel)
         # ------------------------------------------------------------------
@@ -3779,7 +4084,7 @@ def render_intelligent_designer_tab():
                 fields_sel.get('phi', np.zeros((256, 256))),
                 fields_sel.get('psi', np.zeros((256, 256)))
             )
-            
+
             viz_col1, viz_col2 = st.columns(2)
             with viz_col1:
                 fig_mat = st.session_state.visualizer.create_field_heatmap(
@@ -3791,7 +4096,7 @@ def render_intelligent_designer_tab():
                     time_real_s=t_sel_real
                 )
                 st.pyplot(fig_mat)
-            
+
             with viz_col2:
                 fig_inter = st.session_state.visualizer.create_interactive_heatmap(
                     proxy_sel,
@@ -3802,14 +4107,14 @@ def render_intelligent_designer_tab():
                     time_real_s=t_sel_real
                 )
                 st.plotly_chart(fig_inter, use_container_width=True)
-        
+
         st.markdown("#### 💡 Optimization Recommendations")
         recommendations = analyzer.generate_recommendations(
             target_design, st.session_state.current_relevance, t_complete, dr_min, is_complete, shell_quality, llm_explanation, llm_complete
         )
         for rec in recommendations:
             st.markdown(rec)
-        
+
         st.markdown("---")
         save_cols = st.columns([1, 3])
         with save_cols[0]:
@@ -3820,7 +4125,7 @@ def render_intelligent_designer_tab():
                 with st.spinner("Saving prediction..."):
                     t_norm_requested = target_design['time'] / design_manager.get_time_real(1.0) if target_design['time'] else 1.0
                     t_norm_requested = np.clip(t_norm_requested, 0, 1)
-                    
+
                     res_design = st.session_state.interpolator.interpolate_fields(
                         st.session_state.solutions,
                         target_design,
@@ -3829,7 +4134,7 @@ def render_intelligent_designer_tab():
                         time_norm=t_norm_requested,
                         recompute_thickness=True
                     )
-                    
+
                     if res_design:
                         res_design['design_name'] = design_name
                         res_design['input_text'] = user_input
@@ -3838,7 +4143,7 @@ def render_intelligent_designer_tab():
                         st.success(f"✅ Design '{design_name}' saved! Total saved: {len(st.session_state.saved_predictions)}")
                     else:
                         st.error("❌ Failed to save design.")
-        
+
         st.markdown("#### 📈 Predicted Thickness Evolution")
         thick_time = design_manager.thickness_time
         if thick_time and 'th_nm' in thick_time:
@@ -3850,7 +4155,7 @@ def render_intelligent_designer_tab():
                 name='Interpolated',
                 line=dict(color='blue', width=3)
             ))
-            
+
             if t_complete is not None:
                 idx_complete = np.argmin(np.abs(np.array(thick_time.get('t_real_s', thick_time['t_norm'])) - t_complete))
                 fig_thick.add_vline(x=t_complete, line_dash="dash", line_color="green",
@@ -3862,11 +4167,11 @@ def render_intelligent_designer_tab():
                     marker=dict(size=12, color='green', symbol='star'),
                     name='Completion Point'
                 ))
-            
+
             if target_design['time'] is not None:
                 fig_thick.add_vline(x=target_design['time'], line_dash="dot", line_color="red",
                                    annotation_text="Requested")
-            
+
             fig_thick.update_layout(
                 title='Shell Thickness vs. Time',
                 xaxis_title='Time (s)',
@@ -3886,7 +4191,7 @@ def main():
         page_icon="🧪",
         initial_sidebar_state="expanded"
     )
-    
+
     # =========================================
     # ENHANCED CSS for better visual appeal
     # =========================================
@@ -3969,31 +4274,26 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
-    
-    #st.markdown('<h1 class="main-header">🧪 CoreShellLLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
-    #           unsafe_allow_html=True)
-    
-    #initialize_session_state()
+
     st.markdown('<h1 class="main-header">🧪 CoreShellLLM: Intelligent Core‑Shell Designer with Real Physics Interpolation</h1>',
                unsafe_allow_html=True)
 
-    
     # =========================================
     # HOW TO CITE SECTION (Main Page)
     # =========================================
     with st.expander("📖 How to Cite", expanded=False):
         st.markdown("### How to Cite Info")
         st.markdown("If you use this code or the intelligent core‑shell designer framework in your research, please cite the following paper:")
-        
+
         # Native Streamlit info box for the citation
         st.info("""
         **[1]** H. Ma et al., *"EDL‑catalyzed phase‑field modeling and numerically attentive interpolation framework for the intelligent design of Cu@Ag core‑shell nanoparticles,"* **Journal of Materiomics**, vol. 12, no. 6, p. 101287, Nov. 2026.
-        
+
         🔗 **DOI:** [10.1016/j.jmat.2026.101287](https://doi.org/10.1016/j.jmat.2026.101287)
         """)
-        
+
         st.markdown("#### BibTeX:")
-        
+
         # Native Streamlit code block (automatically provides a copy button in the top right!)
         bibtex = """@article{Ma2026EDL,
   title   = {EDL-catalyzed phase-field modeling and numerically attentive 
@@ -4009,9 +4309,9 @@ def main():
   doi     = {10.1016/j.jmat.2026.101287}
 }"""
         st.code(bibtex, language='bibtex')
-        
+
         st.markdown("") # Spacer
-        
+
         # --- Browser-friendly Copy to Clipboard for plain text citation ---
         citation_text = ('[1] H. Ma et al., "EDL-catalyzed phase-field modeling and numerically '
                          'attentive interpolation framework for the intelligent design of Cu@Ag '
@@ -4034,18 +4334,17 @@ def main():
         """, height=60)
 
     initialize_session_state()
-    
-    
+
     with st.sidebar:
         # ========== LOGO ==========
         display_logo()
         st.markdown("---")
-        
+
         st.markdown("## ⚙️ Configuration")
-        
+
         # NEW: Persistent parameter summary (calls function defined above)
         display_parameter_summary()
-        
+
         st.markdown("### 📁 Data Management")
         col1, col2, col3 = st.columns([2, 2, 1])
         with col1:
@@ -4069,10 +4368,10 @@ def main():
                 if st.button("🗑️ Clear Cache", use_container_width=True, help="Clears LRU cache only"):
                     st.session_state.temporal_manager.clear_lru_cache()
                     st.rerun()
-        
+
         if st.session_state.solutions:
             st.success(f"✅ {len(st.session_state.solutions)} solutions loaded")
-        
+
         st.markdown("---")
         st.markdown("### 🧠 Interpolation Hyperparameters")
         sigma_fc = st.slider("σ (fc)", 0.05, 0.3, 0.15, 0.01)
@@ -4093,7 +4392,7 @@ def main():
         require_categorical_match = st.checkbox("Require exact categorical match", value=False)
         n_key_frames = st.slider("Key frames", 1, 20, 5, 1)
         lru_cache_size = st.slider("LRU cache size", 1, 5, 2, 1)
-        
+
         # Check if hyperparameters changed (NEW)
         prev_params = st.session_state.get('hyperparams', {})
         current_params = {
@@ -4105,12 +4404,18 @@ def main():
         if prev_params and prev_params != current_params and st.session_state.get('temporal_manager'):
             st.warning("⚠️ Hyperparameters changed – consider re-running the design or recomputing key frames.")
         st.session_state['hyperparams'] = current_params
-        
+
         st.session_state.interpolator.set_parameter_sigma([sigma_fc, sigma_rs, sigma_c, sigma_L])
         st.session_state.interpolator.temperature = temperature
         st.session_state.interpolator.set_gating_mode(gating_mode)
         st.session_state.interpolator.set_shape_params(lambda_shape, sigma_shape)
-        
+
+        # ====================================================
+        # 🌍 GEOGRAPHIC VISITOR ONLINE TRACKER
+        # ====================================================
+        st.markdown("---")
+        display_visitor_tracker()
+
         st.markdown("---")
         st.markdown("### 🗑️ Cache Management")
         if st.session_state.get('temporal_manager') is not None:
@@ -4122,7 +4427,7 @@ def main():
                 if st.button("Recompute Key Frames", use_container_width=True):
                     with st.spinner("Recomputing..."):
                         st.session_state.temporal_manager.recompute_key_frames()
-            
+
             mem_stats = st.session_state.temporal_manager.get_memory_stats()
             st.markdown(f"""
             <div class="memory-stats">
@@ -4134,7 +4439,7 @@ def main():
             """, unsafe_allow_html=True)
         else:
             st.info("No active temporal manager. Run a design first.")
-    
+
     tabs = st.tabs([
         "🤖 Intelligent Designer",
         "📊 Field Visualization",
@@ -4146,19 +4451,19 @@ def main():
         "🔍 Ground Truth Comparison",
         "📊 Multi-Prediction Comparison"
     ])
-    
+
     with tabs[0]:
         render_intelligent_designer_tab()
-    
+
     mgr = st.session_state.get('temporal_manager', None)
-    
+
     # Helper to show relevance and entropy in other tabs (if desired)
     def show_relevance_info():
         if mgr:
             st.sidebar.markdown("---")
             st.sidebar.metric("Current Relevance", f"{st.session_state.current_relevance:.3f}")
             st.sidebar.metric("Weight Entropy", f"{st.session_state.current_entropy:.3f}")
-    
+
     with tabs[1]:
         st.markdown('<h2 class="section-header">📊 Field Visualization</h2>', unsafe_allow_html=True)
         if mgr is None:
@@ -4168,7 +4473,7 @@ def main():
             current_time_norm = st.session_state.current_time
             current_time_real = mgr.get_time_real(current_time_norm)
             fields = mgr.get_fields(current_time_norm, use_interpolation=True)
-            
+
             field_choice = st.selectbox("Select field",
                                        ['c (concentration)', 'phi (shell)', 'psi (core)',
                                         'material proxy'],
@@ -4176,15 +4481,15 @@ def main():
             field_map = {'c (concentration)': 'c', 'phi (shell)': 'phi',
                         'psi (core)': 'psi', 'material proxy': 'material'}
             field_key = field_map[field_choice]
-            
+
             if field_key == 'material':
                 field_data = DepositionPhysics.material_proxy(fields['phi'], fields['psi'])
             else:
                 field_data = fields[field_key]
-            
+
             cmap_cat = st.selectbox("Colormap category", list(COLORMAP_OPTIONS.keys()), index=0, key='viz_cmap_cat')
             cmap = st.selectbox("Colormap", COLORMAP_OPTIONS[cmap_cat], index=0, key='viz_cmap')
-            
+
             fig = st.session_state.visualizer.create_field_heatmap(
                 field_data,
                 title=f"Interpolated {field_choice}",
@@ -4195,7 +4500,7 @@ def main():
                 colorbar_label="Material" if field_key == 'material' else field_choice.split()[0]
             )
             st.pyplot(fig)
-            
+
             if st.checkbox("Show interactive heatmap"):
                 fig_inter = st.session_state.visualizer.create_interactive_heatmap(
                     field_data,
@@ -4206,7 +4511,7 @@ def main():
                     time_real_s=current_time_real
                 )
                 st.plotly_chart(fig_inter, use_container_width=True)
-    
+
     with tabs[2]:
         st.markdown('<h2 class="section-header">📈 Thickness Evolution</h2>', unsafe_allow_html=True)
         if mgr is None:
@@ -4222,7 +4527,7 @@ def main():
                 show_growth_rate=show_growth
             )
             st.pyplot(fig_th)
-    
+
     with tabs[3]:
         st.markdown('<h2 class="section-header">🎬 Animation</h2>', unsafe_allow_html=True)
         if mgr is None:
@@ -4283,7 +4588,7 @@ def main():
                     if st.button("🗑️ Clean Pre-rendered", use_container_width=True):
                         mgr.cleanup_animation()
                         st.success("Cleaned up")
-    
+
     with tabs[4]:
         st.markdown('<h2 class="section-header">🧪 Derived Quantities</h2>', unsafe_allow_html=True)
         if mgr is None:
@@ -4305,7 +4610,7 @@ def main():
                     st.metric("Growth rate (nm/s)", format_small_number(val))
                 with col3:
                     st.metric("Sources used", res['num_sources'])
-                
+
                 st.subheader("Phase Statistics")
                 stats = res['derived']['phase_stats']
                 cols = st.columns(3)
@@ -4318,7 +4623,7 @@ def main():
                 with cols[2]:
                     st.metric("Cu core", f"{stats['Cu'][0]:.4f} nd²",
                              help=f"Real: {stats['Cu'][1]*1e18:.2f} nm²")
-                
+
                 col_viz1, col_viz2 = st.columns(2)
                 with col_viz1:
                     st.subheader("Material Proxy")
@@ -4340,7 +4645,7 @@ def main():
                         time_real_s=mgr.get_time_real(st.session_state.current_time)
                     )
                     st.pyplot(fig_pot)
-    
+
     with tabs[5]:
         st.markdown('<h2 class="section-header">⚖️ Hybrid Weight Analysis</h2>', unsafe_allow_html=True)
         if mgr is None:
@@ -4348,10 +4653,10 @@ def main():
         else:
             sources_data = mgr.sources_data if mgr.sources_data else []
             if sources_data:
-                # Show relevance and entropy (NEW)
+                # Show relevance and entropy
                 st.sidebar.metric("Relevance", f"{st.session_state.current_relevance:.3f}")
                 st.sidebar.metric("Entropy", f"{st.session_state.current_entropy:.3f}")
-                
+
                 weight_tabs = st.tabs(["Sankey", "Chord", "Radar", "Breakdown"])
                 with weight_tabs[0]:
                     fig = st.session_state.weight_visualizer.create_enhanced_sankey_diagram(
@@ -4376,7 +4681,7 @@ def main():
                         sources_data, mgr.target_params, [sigma_fc, sigma_rs, sigma_c, sigma_L]
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                
+
                 st.markdown("#### 📋 Source Weight Table")
                 df_weights = pd.DataFrame(sources_data)
                 st.dataframe(df_weights.style.format({
@@ -4393,7 +4698,7 @@ def main():
                 }).background_gradient(subset=['combined_weight'], cmap='viridis'), use_container_width=True)
             else:
                 st.info("No source weight data available.")
-    
+
     with tabs[6]:
         st.markdown('<h2 class="section-header">💾 Export</h2>', unsafe_allow_html=True)
         if mgr is None:
@@ -4426,7 +4731,7 @@ def main():
                     if res:
                         csv_str, fname = st.session_state.results_manager.export_to_csv(res)
                         st.download_button("⬇️ Download CSV", csv_str, fname, "text/csv")
-    
+
     with tabs[7]:
         st.markdown('<h2 class="section-header">🔍 Ground Truth Comparison</h2>', unsafe_allow_html=True)
         if mgr is None:
@@ -4450,13 +4755,13 @@ def main():
             else:
                 st.info("No source weight data available.")
                 gt_options = []
-            
+
             if gt_options:
                 selected_gt_label = st.selectbox("Select Ground Truth Simulation", gt_options)
                 selected_idx = gt_indices[gt_options.index(selected_gt_label)]
                 gt_sol = st.session_state.solutions[selected_idx]
                 gt_params = gt_sol['params']
-                
+
                 with st.spinner("Computing interpolation at ground truth parameters..."):
                     interp_res = st.session_state.interpolator.interpolate_fields(
                         st.session_state.solutions, gt_params, target_shape=(256,256),
@@ -4464,52 +4769,52 @@ def main():
                         require_categorical_match=st.session_state.get('require_categorical_match', False),
                         recompute_thickness=True
                     )
-                    
+
                     if interp_res:
                         gt_mgr = TemporalFieldManager(st.session_state.interpolator,
                                                      [gt_sol], gt_params,
                                                      n_key_frames=5, lru_size=1,
                                                      require_categorical_match=False)
                         gt_fields = gt_mgr.get_fields(st.session_state.current_time)
-                        
+
                         target_shape = interp_res['shape']
                         for key in gt_fields:
                             if gt_fields[key].shape != target_shape:
                                 factors = (target_shape[0]/gt_fields[key].shape[0],
                                           target_shape[1]/gt_fields[key].shape[1])
                                 gt_fields[key] = zoom(gt_fields[key], factors, order=1)
-                        
+
                         interp_material = DepositionPhysics.material_proxy(
                             interp_res['fields']['phi'], interp_res['fields']['psi'])
                         gt_material = DepositionPhysics.material_proxy(
                             gt_fields['phi'], gt_fields['psi'])
-                        
+
                         compare_fields = {
                             'phi (shell)': ('phi', 'viridis'),
                             'c (concentration)': ('c', 'plasma'),
                             'psi (core)': ('psi', 'inferno'),
                             'material proxy': ('material', 'Set1')
                         }
-                        
-                        # MODIFIED: force physical alignment if L0 differs
+
+                        # Physical alignment if L0 differs
                         gt_L0 = gt_params.get('L0_nm', 20.0)
-                        interp_L0 = gt_params.get('L0_nm', 20.0)  # same because we are interpolating to gt_params
+                        interp_L0 = gt_params.get('L0_nm', 20.0)
                         if abs(gt_L0 - interp_L0) > 1.0:
                             use_physical_alignment = True
                             st.info(f"📐 Physical alignment enforced: GT L0={gt_L0:.1f}nm ≠ Interp L0={interp_L0:.1f}nm")
                         else:
                             use_physical_alignment = st.checkbox("✅ Use Physical Coordinate Alignment", value=True)
-                        
+
                         for field_title, (field_key, cmap_choice) in compare_fields.items():
                             st.subheader(field_title)
-                            
+
                             if field_key == 'material':
                                 interp_data = interp_material
                                 gt_data = gt_material
                             else:
                                 interp_data = interp_res['fields'][field_key]
                                 gt_data = gt_fields[field_key]
-                            
+
                             if use_physical_alignment:
                                 comparison = compare_fields_physical(
                                     gt_data, gt_L0, interp_data, interp_L0,
@@ -4525,13 +4830,13 @@ def main():
                                 gt_aligned = gt_data
                                 interp_aligned = interp_data
                                 errors = compute_errors(gt_data, interp_data)
-                            
+
                             col_err1, col_err2, col_err3, col_err4 = st.columns(4)
                             col_err1.metric("MSE", f"{errors['MSE']:.4e}")
                             col_err2.metric("MAE", f"{errors['MAE']:.4e}")
                             col_err3.metric("Max Error", f"{errors['Max Error']:.4e}")
                             col_err4.metric("SSIM", f"{errors['SSIM']:.3f}" if not np.isnan(errors['SSIM']) else "N/A")
-                            
+
                             col_plot1, col_plot2, col_plot3 = st.columns(3)
                             with col_plot1:
                                 st.markdown("**Ground Truth**")
@@ -4555,11 +4860,11 @@ def main():
                                     L0_nm=comparison['L_ref'] if use_physical_alignment else gt_params.get('L0_nm',20.0)
                                 )
                                 st.pyplot(fig_diff)
-                        
+
                         del gt_mgr
                     else:
                         st.error("Failed to compute interpolation for comparison.")
-    
+
     with tabs[8]:
         st.markdown('<h2 class="section-header">📊 Multi-Prediction Comparison</h2>', unsafe_allow_html=True)
         if not st.session_state.saved_predictions:
@@ -4571,22 +4876,22 @@ def main():
                 p = pred['target_params']
                 short_label = f"P{i}: L0={p.get('L0_nm',20):.0f} fc={p.get('fc',0.18):.2f}"
                 pred_labels_short.append(short_label)
-            
+
             selected_indices = st.multiselect("Select predictions to compare", 
                                               options=range(len(pred_labels_short)),
                                               format_func=lambda i: pred_labels_short[i],
                                               default=list(range(min(3, len(pred_labels_short)))))
-            
+
             if selected_indices:
                 selected_preds = [st.session_state.saved_predictions[i] for i in selected_indices]
                 selected_labels = [pred_labels_short[i] for i in selected_indices]
-                
+
                 plot_type = st.radio("Plot type", 
                                      ["Thickness Evolution", "Thickness Evolution (Matplotlib)",
                                       "3D Thickness Evolution", "Parameter Map",
                                       "Radar Metrics", "Weight Sunburst",
                                       "3D Parameter Scatter", "Parallel Coordinates", "Pair Plot"])
-                
+
                 if plot_type == "Thickness Evolution":
                     fig = st.session_state.multi_visualizer.thickness_evolution_plot(selected_preds, selected_labels)
                     st.plotly_chart(fig, use_container_width=True)
