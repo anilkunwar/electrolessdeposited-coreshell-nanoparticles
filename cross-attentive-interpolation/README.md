@@ -11,3 +11,6 @@ With the Statistics of Scholarly Visits
 Without the codes for measuring the visits
 
 [![meaningtowords](https://img.shields.io/badge/cu@agllm-v102.0-blue)](https://coreshellllm1.streamlit.app/)  
+
+[![meaningtowords](https://img.shields.io/badge/gi-v1.0-blue)](https://geographicalinformation1.streamlit.app/)  
+
