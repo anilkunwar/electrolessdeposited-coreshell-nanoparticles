@@ -556,8 +556,9 @@ def render_visitor_map(map_data: list[dict]) -> None:
                 zoom=1,
                 height=560,
             )
+            # NOTE: scattermap (MapLibre) markers have no "line" property in Plotly 6.x.
             fig.update_traces(
-                marker=dict(opacity=0.9, line=dict(width=1, color="white")),
+                marker=dict(opacity=0.9),
                 cluster=dict(enabled=True),
             )
 
@@ -578,7 +579,6 @@ def render_visitor_map(map_data: list[dict]) -> None:
                     size=18,
                     color="#8B5CF6",
                     symbol="star",
-                    line=dict(width=1.5, color="white"),
                 )
                 trace.name = "🧪 Map diagnostic"
                 trace.showlegend = True
