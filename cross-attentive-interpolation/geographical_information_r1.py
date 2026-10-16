@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import requests
 import streamlit as st
@@ -483,7 +484,8 @@ if showing_demo_only:
         "lon": 21.0122,
         "city": "Warsaw (map test)",
         "country": "Poland",
-        "visits": 0,
+        "region": "Mazovia",
+        "visits": 1,
         "last_seen": now,
         "first_seen": now,
         "color": "#8B5CF6",
@@ -493,48 +495,127 @@ if showing_demo_only:
         "simulated": True,
     })
 
-with st.expander("🗺️ Visitor Map", expanded=True):
+
+MAP_REFRESH_S = 15
+
+
+@st.fragment(run_every=MAP_REFRESH_S)
+def render_visitor_map(map_data: list[dict]) -> None:
+    """Render the visitor map and refresh only this fragment."""
+    with st.expander("🗺️ Visitor Map", expanded=True):
+        if not map_data:
+            st.info(
+                "No visitor records currently have valid coordinates. "
+                "The map will appear once IP geolocation returns coordinates."
+            )
+            return
+
         df = pd.DataFrame(map_data)
-        fig = go.Figure()
-        fig.add_trace(go.Scattergeo(
-            lon=df["lon"],
-            lat=df["lat"],
-            text=df["city"] + ", " + df["country"],
-            customdata=df[["visits", "status", "flag", "simulated"]],
-            mode="markers",
-            marker=dict(
-                size=df["size"],
-                color=df["color"],
-                opacity=0.88,
-                line=dict(width=1, color="rgba(0,0,0,0.45)"),
-            ),
-            hovertemplate=(
-                "<b>%{customdata[2]} %{text}</b><br>"
-                "Visits/sessions: %{customdata[0]}<br>"
-                "Status: %{customdata[1]}<br>"
-                "Simulated: %{customdata[3]}<extra></extra>"
-            ),
-        ))
+        # Plotly would otherwise show a raw ISO timestamp in the hover box.
+        df["last_seen"] = (
+            pd.to_datetime(df["last_seen"], utc=True)
+            .dt.strftime("%Y-%m-%d %H:%M UTC")
+        )
+
+        # Separate synthetic diagnostic points from real visitor records.
+        real_df = df[~df["simulated"]].copy()
+        demo_df = df[df["simulated"]].copy()
+
+        fig = None
+        if not real_df.empty:
+            fig = px.scatter_map(
+                real_df,
+                lat="lat",
+                lon="lon",
+                color="status",
+                size="visits",
+                size_max=22,
+                hover_name="city",
+                hover_data={
+                    "country": True,
+                    "visits": True,
+                    "last_seen": True,
+                    "lat": False,
+                    "lon": False,
+                    "status": False,
+                    "key": False,
+                },
+                color_discrete_map={
+                    "🟢 Recently active": "#10B981",
+                    "🟠 Seen today": "#F59E0B",
+                    "⚪ Offline": "#6B7280",
+                },
+                category_orders={
+                    "status": [
+                        "🟢 Recently active",
+                        "🟠 Seen today",
+                        "⚪ Offline",
+                    ]
+                },
+                map_style="open-street-map",
+                zoom=1,
+                height=560,
+            )
+            fig.update_traces(
+                marker=dict(opacity=0.9, line=dict(width=1, color="white")),
+                cluster=dict(enabled=True),
+            )
+
+        # Add synthetic test markers as a visually distinct trace.
+        if not demo_df.empty:
+            demo_trace = px.scatter_map(
+                demo_df,
+                lat="lat",
+                lon="lon",
+                hover_name="city",
+                hover_data={"status": True, "lat": False, "lon": False},
+                map_style="open-street-map",
+                zoom=1,
+                height=560,
+            )
+            for trace in demo_trace.data:
+                trace.marker = dict(
+                    size=18,
+                    color="#8B5CF6",
+                    symbol="star",
+                    line=dict(width=1.5, color="white"),
+                )
+                trace.name = "🧪 Map diagnostic"
+                trace.showlegend = True
+                if fig is None:
+                    fig = go.Figure()
+                fig.add_trace(trace)
+        elif real_df.empty:
+            st.info(
+                "No real visitor records currently have valid coordinates. "
+                "The purple star is a map-rendering diagnostic only; it is not "
+                "saved to the visitor log and does not represent your location."
+            )
+            return
+
         fig.update_layout(
-            title="Visitor locations (approximate IP geolocation)",
-            geo=dict(
-                projection_type="natural earth",
-                showland=True,
-                landcolor="rgb(243,244,246)",
-                showocean=True,
-                oceancolor="rgb(225,242,255)",
-                showcountries=True,
-                countrycolor="rgb(200,200,200)",
-                fitbounds="locations",
+            title="Visitor locations — approximate IP geolocation",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=0.01,
+                xanchor="left",
+                x=0.01,
+                bgcolor="rgba(255,255,255,0.75)",
             ),
             margin=dict(l=0, r=0, t=45, b=0),
-            height=520,
         )
+
         st.plotly_chart(fig, use_container_width=True)
         st.caption(
-            "IP-based locations are approximate and may identify a network gateway rather than a person. "
-            "The purple marker is synthetic when simulation mode is enabled."
+            f"Auto-refreshes every {MAP_REFRESH_S} seconds. IP-based locations are approximate "
+            "and may identify a network gateway rather than an individual person. "
+            "Purple star markers are diagnostic only."
         )
+
+
+render_visitor_map(map_data)
+
 if showing_demo_only:
     st.info(
         "No real visitor records currently have valid coordinates. The purple Warsaw marker "
