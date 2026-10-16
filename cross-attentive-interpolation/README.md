@@ -14,5 +14,5 @@ Without the codes for measuring the visits
 
 Map
 
-[![meaningtowords](https://img.shields.io/badge/gi-v1.0-blue)](https://geographical-information1.streamlit.app/)   (Map using Carto, OpenStreet Map Contribution)
+[![meaningtowords](https://img.shields.io/badge/gi-v1.0-blue)](https://geographical-information1.streamlit.app/)   (OpenStreetMap: Inside the px.scatter_map() call, the argument map_style="open-street-map" tells Plotly to fetch and display the actual street map tiles from the OpenStreetMap public servers.)
 
